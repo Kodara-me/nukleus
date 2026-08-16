@@ -10,6 +10,21 @@ cmake --build build
 ctest --test-dir build
 ```
 
+For a standard CMake prefix installation of the executables:
+
+```sh
+cmake --install build --prefix "$HOME/.local"
+```
+
+This installs the daemon under `libexec/kira-service/` and the manager under
+`bin/`. Use `scripts/install-kira-service.sh` for the complete Linux systemd
+installation, including configuration, service-account setup, model storage,
+and the user-local manager installation.
+
+Sources are organized under `src/daemon/`, `src/manager/`, and
+`src/protocol/`. The executable targets remain declared by
+`src/CMakeLists.txt`, so built binaries continue to appear under `build/src/`.
+
 `kira-service` is the daemon. `kira-service-manager` is a native Qt administrator app installed into the invoking user's `~/.local/bin`. Start its GUI with `kira-service-manager --gui`; it automatically connects to the local service at `127.0.0.1:9384` and retries while the service is unavailable.
 
 The manager also provides local CLI operations:

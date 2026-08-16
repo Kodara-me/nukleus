@@ -6,29 +6,36 @@ find_package(Qt6 6.2 REQUIRED COMPONENTS Network Test WebSockets)
 
 add_executable(kira-service-test
     ServiceTest.cpp
-    ../src/GenerationRequest.h
-    ../src/GenerationProgress.h
-    ../src/KiraService.cpp
-    ../src/KiraService.h
-    ../src/ModelCatalog.cpp
-    ../src/ModelCatalog.h
-    ../src/SdCliRunner.cpp
-    ../src/SdCliRunner.h
-    ../src/SdCliProgressParser.cpp
-    ../src/SdCliProgressParser.h
-    ../src/ServiceJobResult.h
-    ../src/ServicePaths.cpp
-    ../src/ServicePaths.h
-    ../src/ServiceProtocol.cpp
-    ../src/ServiceProtocol.h
+    ../src/daemon/GenerationRequest.h
+    ../src/protocol/GenerationProgress.h
+    ../src/daemon/KiraService.cpp
+    ../src/daemon/KiraService.h
+    ../src/daemon/ModelCatalog.cpp
+    ../src/daemon/ModelCatalog.h
+    ../src/daemon/SdCliRunner.cpp
+    ../src/daemon/SdCliRunner.h
+    ../src/daemon/SdCliProgressParser.cpp
+    ../src/daemon/SdCliProgressParser.h
+    ../src/daemon/ServiceJobResult.h
+    ../src/daemon/ServicePaths.cpp
+    ../src/daemon/ServicePaths.h
+    ../src/protocol/ServiceProtocol.cpp
+    ../src/protocol/ServiceProtocol.h
 )
-target_include_directories(kira-service-test PRIVATE ../src)
+target_include_directories(kira-service-test PRIVATE
+    ../src/daemon
+    ../src/protocol
+)
 target_link_libraries(kira-service-test PRIVATE Qt6::Network Qt6::Test Qt6::WebSockets)
 add_test(NAME kira-service-test COMMAND kira-service-test)
 
 add_test(NAME kira-service-installer-test
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/KiraServiceInstallerTest.sh
             ${CMAKE_SOURCE_DIR} $<TARGET_FILE:kira-service> $<TARGET_FILE:kira-service-manager>)
+
+add_test(NAME kira-service-cmake-install-test
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/KiraServiceCMakeInstallTest.sh
+            ${CMAKE_BINARY_DIR})
 
 add_test(NAME kira-service-manager-help COMMAND $<TARGET_FILE:kira-service-manager> --help)
 add_test(NAME kira-service-manager-unavailable COMMAND $<TARGET_FILE:kira-service-manager> list)
