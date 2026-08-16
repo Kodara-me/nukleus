@@ -10,7 +10,17 @@ cmake --build build
 ctest --test-dir build
 ```
 
-`kira-service` is the daemon. `kira-service-manager` is a native Qt administrator app intended to run on the service host. It connects to localhost, or an IPv4 address assigned to that host, at port `9384` and uses the configured shared token.
+`kira-service` is the daemon. `kira-service-manager` is a native Qt administrator app installed into the invoking user's `~/.local/bin`. Start its GUI with `kira-service-manager --gui`; it automatically connects to the local service at `127.0.0.1:9384` and retries while the service is unavailable.
+
+The manager also provides local CLI operations:
+
+```sh
+kira-service-manager list
+kira-service-manager add https://huggingface.co/owner/repo/resolve/main/model.gguf --category upscaler
+kira-service-manager delete upscaler:model.gguf
+```
+
+Use `--help` for all options. CLI and GUI manager connections are local-only and do not require manual host or token configuration.
 
 ## Models
 
@@ -21,9 +31,9 @@ The Linux installer moves legacy models from `$XDG_DATA_HOME/kira-canvas/models/
 ## Linux system service
 
 ```sh
-sudo scripts/install-kira-service.sh --binary build/src/kira-service
+sudo scripts/install-kira-service.sh --binary build/src/kira-service --manager-binary build/src/kira-service-manager
 ```
 
-The installer uses port `9384`, preserves a valid existing bind/token configuration, and restarts updated installations. LAN bindings require a shared token. Configuration remains under `/etc/kira-service/`; system-service model data resolves to `/var/lib/kira-service/data/kira-service/models/`.
+The installer uses port `9384`, preserves a valid existing bind/token configuration, installs the manager into the invoking user's `~/.local/bin`, and restarts updated installations. A LAN binding listens on both `127.0.0.1` and the selected IPv4 address. Loopback manager clients authenticate without a token; non-loopback clients require the shared LAN token. Configuration remains under `/etc/kira-service/`; system-service model data resolves to `/var/lib/kira-service/data/kira-service/models/`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/protocol-v3.md](docs/protocol-v3.md).

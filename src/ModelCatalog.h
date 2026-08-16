@@ -62,7 +62,9 @@ public:
     static std::optional<ModelCategory> categoryFromName(const QString &name);
     QList<ModelInfo> models(ModelCategory category) const;
     std::optional<ModelInfo> model(ModelCategory category, const QString &id) const;
+    std::optional<ModelInfo> modelById(const QString &id) const;
     bool install(const ModelInstallRequest &request, QString *errorMessage = nullptr);
+    bool remove(const QString &id, QString *errorMessage = nullptr);
     void cancel(const QString &installId);
 
 signals:

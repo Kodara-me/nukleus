@@ -2,6 +2,7 @@
 
 #include <QList>
 #include <QObject>
+#include <QTimer>
 #include <QUrl>
 
 #include <optional>
@@ -36,21 +37,22 @@ class ManagerServiceClient final : public QObject
 public:
     explicit ManagerServiceClient(QObject *parent = nullptr);
 
-    QUrl endpoint() const;
-    QString token() const;
-    void setConfiguration(const QUrl &endpoint, const QString &token, bool persist = true);
     void connectToService();
+    void setAutomaticReconnect(bool enabled);
     bool isAuthenticated() const;
     bool modelListAvailable() const;
     QList<ManagedModelInfo> models(const QString &category) const;
     QList<ManagedInstall> installs() const;
     void requestModels();
-    bool installModel(const QString &category, const QUrl &url, const QString &sha256 = {});
+    QString installModel(const QString &category, const QUrl &url, const QString &sha256 = {});
+    bool deleteModel(const QString &id);
 
 signals:
     void serviceStateChanged(const QString &state, const QString &message);
     void modelsChanged();
     void installsChanged();
+    void modelDeleted(const QString &id);
+    void modelOperationFailed(const QString &id, const QString &message);
 
 private:
     void authenticate();
@@ -59,8 +61,8 @@ private:
     void failActiveInstalls(const QString &message);
 
     QWebSocket *m_socket;
-    QUrl m_endpoint;
-    QString m_token;
+    QTimer *m_retryTimer;
+    bool m_automaticReconnect = true;
     bool m_authenticated = false;
     bool m_modelListAvailable = false;
     QList<ManagedModelInfo> m_generationModels;

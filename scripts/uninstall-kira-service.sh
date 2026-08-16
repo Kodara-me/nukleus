@@ -4,6 +4,7 @@ set -euo pipefail
 
 readonly SERVICE_NAME="kira-service"
 install_root=""
+user_bin_path=""
 dry_run=false
 purge=false
 yes=false
@@ -12,11 +13,13 @@ usage() {
     cat <<'EOF'
 Usage: sudo scripts/uninstall-kira-service.sh [options]
 
-Remove the installed Kira Service program and systemd unit. Configuration and
-downloaded model data are retained unless --purge is confirmed.
+Remove the installed Kira Service program, model manager, and systemd unit.
+Configuration and downloaded model data are retained unless --purge is confirmed.
 
 Options:
   --root PATH  Remove files staged under PATH instead of the live filesystem
+  --user-bin PATH
+               User-local bin directory containing kira-service-manager
   --purge      Also remove /etc/kira-service and /var/lib/kira-service
   --yes        Confirm --purge without prompting
   --dry-run    Print actions without modifying the filesystem
@@ -41,6 +44,7 @@ destination() { printf '%s%s' "$install_root" "$1"; }
 while (( $# > 0 )); do
     case "$1" in
     --root) install_root="${2:-}"; shift 2 ;;
+    --user-bin) user_bin_path="${2:-}"; shift 2 ;;
     --purge) purge=true; shift ;;
     --yes) yes=true; shift ;;
     --dry-run) dry_run=true; shift ;;
@@ -51,11 +55,27 @@ done
 
 [[ -n "$install_root" || $EUID -eq 0 ]] || fail "Run with sudo, or use --root for a staging installation."
 
+manager_user=""
+if [[ -z "$user_bin_path" ]]; then
+    if [[ "$EUID" -eq 0 ]]; then
+        [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]] || fail "Provide --user-bin when running as root without SUDO_USER."
+        manager_user="$SUDO_USER"
+        user_home="$(getent passwd "$manager_user" | cut -d: -f6)"
+        [[ -n "$user_home" ]] || fail "Could not resolve the home directory for $manager_user."
+        user_bin_path="$user_home/.local/bin"
+    else
+        user_bin_path="${HOME:?}/.local/bin"
+    fi
+else
+    [[ "$user_bin_path" == /* ]] || fail "--user-bin must be an absolute path."
+fi
+
 if [[ -z "$install_root" ]]; then
     run systemctl disable --now "$SERVICE_NAME.service" || true
 fi
 run rm -f "$(destination "/usr/lib/systemd/system/$SERVICE_NAME.service")"
 run rm -rf "$(destination "/usr/local/libexec/$SERVICE_NAME")"
+run rm -f "$(destination "$user_bin_path/kira-service-manager")"
 if [[ -z "$install_root" ]]; then
     run systemctl daemon-reload
 fi

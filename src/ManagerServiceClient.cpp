@@ -4,7 +4,6 @@
 
 #include <QJsonArray>
 #include <QJsonDocument>
-#include <QSettings>
 #include <QUuid>
 #include <QWebSocket>
 
@@ -12,17 +11,16 @@
 
 namespace
 {
-const QString EndpointKey = QStringLiteral("Manager/Endpoint");
-const QString TokenKey = QStringLiteral("Manager/Token");
+const QUrl LocalEndpoint(QStringLiteral("ws://127.0.0.1:9384"));
 }
 
 ManagerServiceClient::ManagerServiceClient(QObject *parent)
     : QObject(parent)
     , m_socket(new QWebSocket(QStringLiteral("Kira Service Manager"), QWebSocketProtocol::VersionLatest, this))
+    , m_retryTimer(new QTimer(this))
 {
-    QSettings settings;
-    m_endpoint = QUrl(settings.value(EndpointKey, QStringLiteral("ws://127.0.0.1:%1").arg(ServiceProtocol::DefaultPort)).toString());
-    m_token = settings.value(TokenKey).toString();
+    m_retryTimer->setSingleShot(true);
+    m_retryTimer->setInterval(5000);
     connect(m_socket, &QWebSocket::connected, this, &ManagerServiceClient::authenticate);
     connect(m_socket, &QWebSocket::textMessageReceived, this, &ManagerServiceClient::handleTextMessage);
     connect(m_socket, &QWebSocket::disconnected, this, [this] {
@@ -32,29 +30,23 @@ ManagerServiceClient::ManagerServiceClient(QObject *parent)
         failActiveInstalls(tr("Service connection was closed"));
         emit modelsChanged();
         emit serviceStateChanged(QStringLiteral("offline"), tr("Service connection was closed"));
+        if (m_automaticReconnect) m_retryTimer->start();
     });
     connect(m_socket, &QWebSocket::errorOccurred, this, [this](QAbstractSocket::SocketError) {
-        emit serviceStateChanged(QStringLiteral("connection-error"), tr("Could not connect to %1: %2").arg(m_endpoint.toString(), m_socket->errorString()));
+        emit serviceStateChanged(QStringLiteral("connection-error"), tr("Could not connect to the local Kira Service: %1").arg(m_socket->errorString()));
     });
-}
-
-QUrl ManagerServiceClient::endpoint() const { return m_endpoint; }
-QString ManagerServiceClient::token() const { return m_token; }
-
-void ManagerServiceClient::setConfiguration(const QUrl &endpoint, const QString &token, bool persist)
-{
-    m_endpoint = endpoint; m_token = token;
-    if (persist) { QSettings settings; settings.setValue(EndpointKey, endpoint.toString()); settings.setValue(TokenKey, token); }
+    connect(m_retryTimer, &QTimer::timeout, this, &ManagerServiceClient::connectToService);
 }
 
 void ManagerServiceClient::connectToService()
 {
     m_authenticated = false;
     if (m_socket->state() != QAbstractSocket::UnconnectedState) m_socket->abort();
-    emit serviceStateChanged(QStringLiteral("connecting"), tr("Connecting to service…"));
-    m_socket->open(m_endpoint);
+    emit serviceStateChanged(QStringLiteral("connecting"), tr("Connecting to the local Kira Service…"));
+    m_socket->open(LocalEndpoint);
 }
 
+void ManagerServiceClient::setAutomaticReconnect(bool enabled) { m_automaticReconnect = enabled; }
 bool ManagerServiceClient::isAuthenticated() const { return m_authenticated; }
 bool ManagerServiceClient::modelListAvailable() const { return m_modelListAvailable; }
 QList<ManagedModelInfo> ManagerServiceClient::models(const QString &category) const
@@ -67,9 +59,9 @@ QList<ManagedModelInfo> ManagerServiceClient::models(const QString &category) co
 QList<ManagedInstall> ManagerServiceClient::installs() const { return m_installs; }
 void ManagerServiceClient::requestModels() { if (m_authenticated) m_socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list\"}")); }
 
-bool ManagerServiceClient::installModel(const QString &category, const QUrl &url, const QString &sha256)
+QString ManagerServiceClient::installModel(const QString &category, const QUrl &url, const QString &sha256)
 {
-    if (!m_authenticated) return false;
+    if (!m_authenticated) return {};
     const QString installId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     m_installs.append({installId, category, url, ManagedInstallState::Requesting, 0, {}, {}});
     QJsonObject message{{QStringLiteral("type"), QStringLiteral("models.install")}, {QStringLiteral("installId"), installId},
@@ -77,13 +69,21 @@ bool ManagerServiceClient::installModel(const QString &category, const QUrl &url
     if (!sha256.isEmpty()) message.insert(QStringLiteral("sha256"), sha256);
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     emit installsChanged();
+    return installId;
+}
+
+bool ManagerServiceClient::deleteModel(const QString &id)
+{
+    if (!m_authenticated || id.isEmpty()) return false;
+    const QJsonObject message{{QStringLiteral("type"), QStringLiteral("models.delete")}, {QStringLiteral("id"), id}};
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     return true;
 }
 
 void ManagerServiceClient::authenticate()
 {
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument({{QStringLiteral("type"), QStringLiteral("authenticate")},
-        {QStringLiteral("version"), ServiceProtocol::Version}, {QStringLiteral("token"), m_token}}).toJson(QJsonDocument::Compact)));
+        {QStringLiteral("version"), ServiceProtocol::Version}, {QStringLiteral("token"), QString()}}).toJson(QJsonDocument::Compact)));
 }
 
 void ManagerServiceClient::handleTextMessage(const QString &message)
@@ -116,9 +116,12 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
         install->totalBytes = object.contains(QStringLiteral("totalBytes")) ? std::optional<qint64>(object.value(QStringLiteral("totalBytes")).toVariant().toLongLong()) : std::nullopt;
         emit installsChanged(); } return; }
     if (type == QStringLiteral("models.install.completed")) { if (auto *install = findInstall(object.value(QStringLiteral("installId")).toString())) { install->state = ManagedInstallState::Completed; install->message = tr("Installed"); emit installsChanged(); } requestModels(); return; }
+    if (type == QStringLiteral("models.delete.completed")) { emit modelDeleted(object.value(QStringLiteral("id")).toString()); requestModels(); return; }
     if (type == QStringLiteral("error")) {
         const QString installId = object.value(QStringLiteral("installId")).toString();
         if (auto *install = findInstall(installId)) { install->state = ManagedInstallState::Failed; install->message = object.value(QStringLiteral("message")).toString(); emit installsChanged(); return; }
+        const QString id = object.value(QStringLiteral("id")).toString();
+        if (!id.isEmpty()) { emit modelOperationFailed(id, object.value(QStringLiteral("message")).toString()); return; }
         if (!m_authenticated) { emit serviceStateChanged(QStringLiteral("authentication-failed"), object.value(QStringLiteral("message")).toString()); m_socket->close(); }
     }
 }

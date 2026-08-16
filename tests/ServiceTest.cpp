@@ -1,3 +1,4 @@
+#include "KiraService.h"
 #include "ModelCatalog.h"
 #include "ServicePaths.h"
 #include "ServiceProtocol.h"
@@ -6,10 +7,13 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHostAddress>
+#include <QJsonDocument>
+#include <QNetworkInterface>
 #include <QStandardPaths>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
+#include <QWebSocket>
 #include <QtTest>
 
 namespace
@@ -45,17 +49,101 @@ class ServiceTest final : public QObject
 
 private slots:
     void preservesProtocolV3();
+    void rejectsLanWithoutToken();
+    void startsOnLoopbackAndLanAddress();
+    void authenticatesLoopbackWithoutToken();
+    void rejectsLanAuthenticationWithoutToken();
+    void rollsBackWhenLanListenerFails();
     void listsSupportedModelsWithoutPathLeak();
+    void removesModelByOpaqueId();
     void installsModelAtomically();
     void rejectsInvalidModelInstall();
     void migratesLegacyModelRoot();
     void rejectsConflictingModelRoots();
 };
 
+namespace
+{
+QHostAddress availableLanAddress()
+{
+    for (const QNetworkInterface &interface : QNetworkInterface::allInterfaces()) {
+        for (const QNetworkAddressEntry &entry : interface.addressEntries()) {
+            if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol && !entry.ip().isLoopback() && !entry.ip().isNull()) return entry.ip();
+        }
+    }
+    return {};
+}
+}
+
 void ServiceTest::preservesProtocolV3()
 {
     QCOMPARE(ServiceProtocol::Version, 3);
     QCOMPARE(ServiceProtocol::DefaultPort, quint16(9384));
+}
+
+void ServiceTest::rejectsLanWithoutToken()
+{
+    const QHostAddress lan = availableLanAddress();
+    if (lan.isNull()) QSKIP("No non-loopback IPv4 address is available");
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    KiraServiceConfiguration configuration; configuration.listenAddress = lan; configuration.port = 0; configuration.modelRootPath = directory.path();
+    KiraService service(configuration); QString error;
+    QVERIFY(!service.start(&error)); QVERIFY(error.contains(QStringLiteral("token"), Qt::CaseInsensitive));
+}
+
+void ServiceTest::startsOnLoopbackAndLanAddress()
+{
+    const QHostAddress lan = availableLanAddress();
+    if (lan.isNull()) QSKIP("No non-loopback IPv4 address is available");
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    KiraServiceConfiguration configuration; configuration.listenAddress = lan; configuration.port = 0; configuration.token = QStringLiteral("lan-secret"); configuration.modelRootPath = directory.path();
+    KiraService service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
+    QTcpSocket local; local.connectToHost(QHostAddress(QStringLiteral("127.0.0.1")), service.serverPort()); QVERIFY(local.waitForConnected(1000));
+    QTcpSocket network; network.connectToHost(lan, service.serverPort()); QVERIFY(network.waitForConnected(1000));
+}
+
+void ServiceTest::authenticatesLoopbackWithoutToken()
+{
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    KiraServiceConfiguration configuration; configuration.listenAddress = QHostAddress(QStringLiteral("127.0.0.1")); configuration.port = 0; configuration.token = QStringLiteral("lan-secret"); configuration.modelRootPath = directory.path();
+    KiraService service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
+    QWebSocket client; QSignalSpy messages(&client, &QWebSocket::textMessageReceived);
+    client.open(QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(service.serverPort()))); QTRY_VERIFY_WITH_TIMEOUT(client.state() == QAbstractSocket::ConnectedState, 1000);
+    client.sendTextMessage(QStringLiteral("{\"type\":\"authenticate\",\"version\":3,\"token\":\"\"}"));
+    QTRY_VERIFY_WITH_TIMEOUT(messages.count() >= 1, 1000);
+    bool authenticated = false;
+    for (const QList<QVariant> &message : messages) if (QJsonDocument::fromJson(message.first().toString().toUtf8()).object().value(QStringLiteral("type")).toString() == QStringLiteral("authenticated")) authenticated = true;
+    QVERIFY(authenticated);
+}
+
+void ServiceTest::rejectsLanAuthenticationWithoutToken()
+{
+    const QHostAddress lan = availableLanAddress();
+    if (lan.isNull()) QSKIP("No non-loopback IPv4 address is available");
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    KiraServiceConfiguration configuration; configuration.listenAddress = lan; configuration.port = 0; configuration.token = QStringLiteral("lan-secret"); configuration.modelRootPath = directory.path();
+    KiraService service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
+    QWebSocket client; QSignalSpy messages(&client, &QWebSocket::textMessageReceived);
+    client.open(QUrl(QStringLiteral("ws://%1:%2").arg(lan.toString()).arg(service.serverPort()))); QTRY_VERIFY_WITH_TIMEOUT(client.state() == QAbstractSocket::ConnectedState, 1000);
+    client.sendTextMessage(QStringLiteral("{\"type\":\"authenticate\",\"version\":3,\"token\":\"\"}"));
+    QTRY_VERIFY_WITH_TIMEOUT(messages.count() >= 1, 1000);
+    bool rejected = false;
+    for (const QList<QVariant> &message : messages) {
+        const QJsonObject response = QJsonDocument::fromJson(message.first().toString().toUtf8()).object();
+        if (response.value(QStringLiteral("type")).toString() == QStringLiteral("error") && response.value(QStringLiteral("code")).toString() == QStringLiteral("authentication-failed")) rejected = true;
+    }
+    QVERIFY(rejected);
+}
+
+void ServiceTest::rollsBackWhenLanListenerFails()
+{
+    const QHostAddress lan = availableLanAddress();
+    if (lan.isNull()) QSKIP("No non-loopback IPv4 address is available");
+    QTcpServer blocker; QVERIFY(blocker.listen(lan, 0));
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    KiraServiceConfiguration configuration; configuration.listenAddress = lan; configuration.port = blocker.serverPort(); configuration.token = QStringLiteral("lan-secret"); configuration.modelRootPath = directory.path();
+    KiraService service(configuration); QString error; QVERIFY(!service.start(&error));
+    QTcpSocket local; local.connectToHost(QHostAddress(QStringLiteral("127.0.0.1")), blocker.serverPort()); QVERIFY(!local.waitForConnected(100));
 }
 
 void ServiceTest::installsModelAtomically()
@@ -67,6 +155,20 @@ void ServiceTest::installsModelAtomically()
     QTRY_COMPARE(finished.count(), 1);
     const QString finalPath = directory.filePath(QStringLiteral("upscale/model.gguf"));
     QVERIFY(QFileInfo::exists(finalPath)); QVERIFY(!QFileInfo::exists(finalPath + QStringLiteral(".part")));
+}
+
+void ServiceTest::removesModelByOpaqueId()
+{
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QVERIFY(QDir().mkpath(directory.filePath(QStringLiteral("upscale"))));
+    QFile model(directory.filePath(QStringLiteral("upscale/two-x.gguf"))); QVERIFY(model.open(QIODevice::WriteOnly)); model.write("model"); model.close();
+    ModelCatalog catalog(directory.path(), true);
+    const std::optional<ModelInfo> info = catalog.modelById(QStringLiteral("upscaler:two-x.gguf"));
+    QVERIFY(info.has_value()); QCOMPARE(info->fileName, QStringLiteral("two-x.gguf"));
+    QString error; QVERIFY(catalog.remove(QStringLiteral("upscaler:two-x.gguf"), &error)); QVERIFY(error.isEmpty());
+    QVERIFY(!QFileInfo::exists(model.fileName()));
+    QVERIFY(!catalog.remove(QStringLiteral("upscaler:two-x.gguf"), &error)); QVERIFY(!error.isEmpty());
+    QVERIFY(!catalog.remove(QStringLiteral("upscaler:../two-x.gguf"), &error));
 }
 
 void ServiceTest::rejectsInvalidModelInstall()

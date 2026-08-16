@@ -8,6 +8,6 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Run the daemon with `./build/src/kira-service`. Run the local administrator UI with `./build/src/kira-service-manager`. Use the root installer only for Linux systemd deployments.
+Run the daemon with `./build/src/kira-service`. Run the local administrator UI with `./build/src/kira-service-manager --gui`, or exercise the manager CLI with `./build/src/kira-service-manager --help`. Use the root installer only for Linux systemd deployments.
 
 Keep protocol v3 compatible with existing Canvas clients. Do not create an inter-repository library; update the protocol document and each local implementation together.

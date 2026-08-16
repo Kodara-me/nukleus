@@ -9,6 +9,7 @@
 #include <QTemporaryDir>
 
 #include <memory>
+#include <vector>
 
 class ModelCatalog;
 class QWebSocket;
@@ -43,13 +44,14 @@ private:
     struct Job;
 
     void initializeBackend();
-    void acceptConnection();
+    void acceptConnection(QWebSocketServer *server);
     void disconnectClient(QWebSocket *socket);
     void processTextMessage(QWebSocket *socket, const QString &message);
     void processBinaryMessage(QWebSocket *socket, const QByteArray &data);
     void submit(QWebSocket *socket, const QJsonObject &message);
     void listModels(QWebSocket *socket) const;
     void installModel(QWebSocket *socket, const QJsonObject &message);
+    void deleteModel(QWebSocket *socket, const QJsonObject &message);
     void enqueue(std::shared_ptr<Job> job);
     void startNextJob();
     void cancelJobsFor(QWebSocket *socket);
@@ -60,10 +62,11 @@ private:
     void send(QWebSocket *socket, QJsonObject object) const;
     void sendError(QWebSocket *socket, const QString &code, const QString &message, const QString &jobId = {}) const;
     bool isReady() const;
+    bool modelInUse(const QString &path) const;
     std::shared_ptr<Job> jobForId(const QString &id) const;
 
     KiraServiceConfiguration m_configuration;
-    std::unique_ptr<QWebSocketServer> m_server;
+    std::vector<std::unique_ptr<QWebSocketServer>> m_servers;
     std::unique_ptr<ModelCatalog> m_models;
     std::unique_ptr<SdCliRunner> m_runner;
     QHash<QWebSocket *, bool> m_authenticatedClients;

@@ -10,9 +10,12 @@ readonly DEFAULT_PORT=9384
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd -- "$script_dir/.." && pwd)"
 binary_path="$project_root/build/src/kira-service"
+manager_binary_path="$project_root/build/src/kira-service-manager"
 listen_address=""
 token=""
 install_root=""
+user_bin_path=""
+manager_user=""
 dry_run=false
 enable_service=true
 
@@ -20,12 +23,16 @@ usage() {
     cat <<'EOF'
 Usage: sudo scripts/install-kira-service.sh [options]
 
-Install or update the Kira Service systemd unit. Fresh interactive installs
-offer loopback-only binding and detected LAN IPv4 addresses.
+Install or update the Kira Service systemd unit and local model manager.
+Fresh interactive installs offer loopback-only binding and detected LAN IPv4
+addresses. A LAN address also keeps the service available on loopback.
 
 Options:
   --binary PATH       Built kira-service executable (default: build/src/kira-service)
-  --listen ADDRESS    Bind address for a fresh or incomplete installation
+  --manager-binary PATH
+                      Built kira-service-manager executable (default: build/src/kira-service-manager)
+  --user-bin PATH     User-local bin directory for kira-service-manager
+  --listen ADDRESS    LAN bind address, or 127.0.0.1 for local-only service
   --token TOKEN       Shared LAN passphrase; avoid this option in a shared shell history
   --root PATH         Stage files under PATH instead of the live filesystem
   --dry-run           Print actions without modifying the filesystem
@@ -50,6 +57,7 @@ destination() { printf '%s%s' "$install_root" "$1"; }
 
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 )); }
 valid_address() { [[ "$1" =~ ^[0-9A-Fa-f:.]+$ ]]; }
+is_any_address() { [[ "$1" == "0.0.0.0" || "$1" == "::" ]]; }
 is_loopback_address() { [[ "$1" == "127.0.0.1" || "$1" == "::1" ]]; }
 token_has_content() { [[ -n "$(tr -d '[:space:]' <<<"$1")" ]]; }
 
@@ -98,6 +106,8 @@ choose_listen_address() {
 while (( $# > 0 )); do
     case "$1" in
     --binary) binary_path="${2:-}"; shift 2 ;;
+    --manager-binary) manager_binary_path="${2:-}"; shift 2 ;;
+    --user-bin) user_bin_path="${2:-}"; shift 2 ;;
     --listen) listen_address="${2:-}"; shift 2 ;;
     --token) token="${2:-}"; shift 2 ;;
     --root) install_root="${2:-}"; shift 2 ;;
@@ -110,7 +120,40 @@ done
 
 [[ -n "$install_root" || $EUID -eq 0 ]] || fail "Run with sudo, or use --root for a staging installation."
 [[ -x "$binary_path" ]] || fail "Kira Service executable is not executable: $binary_path"
+[[ -x "$manager_binary_path" ]] || fail "Kira Service Manager executable is not executable: $manager_binary_path"
 [[ -f "$project_root/packaging/systemd/kira-service.service.in" ]] || fail "Systemd unit template is missing."
+
+if [[ -z "$user_bin_path" ]]; then
+    if [[ "$EUID" -eq 0 ]]; then
+        [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]] || fail "Provide --user-bin when running as root without SUDO_USER."
+        manager_user="$SUDO_USER"
+        user_home="$(getent passwd "$manager_user" | cut -d: -f6)"
+        [[ -n "$user_home" ]] || fail "Could not resolve the home directory for $manager_user."
+        user_bin_path="$user_home/.local/bin"
+    else
+        manager_user="${USER:-}"
+        [[ -n "$manager_user" ]] || fail "Could not resolve the current user."
+        user_bin_path="${HOME:?}/.local/bin"
+    fi
+else
+    [[ "$user_bin_path" == /* ]] || fail "--user-bin must be an absolute path."
+    if [[ "$EUID" -eq 0 ]]; then
+        [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]] || fail "Provide --user-bin with SUDO_USER when running as root."
+        manager_user="$SUDO_USER"
+    else
+        manager_user="${USER:-}"
+    fi
+fi
+
+manager_bin_dir="$(destination "$user_bin_path")"
+manager_path="$manager_bin_dir/kira-service-manager"
+manager_uid=""
+manager_gid=""
+if [[ -z "$install_root" ]]; then
+    [[ -n "$manager_user" ]] || fail "Could not resolve the manager installation user."
+    manager_uid="$(id -u "$manager_user")"
+    manager_gid="$(id -g "$manager_user")"
+fi
 
 program_dir="$(destination "/usr/local/libexec/$SERVICE_NAME")"
 config_dir="$(destination "/etc/$SERVICE_NAME")"
@@ -121,6 +164,7 @@ config_path="$(destination "/etc/$SERVICE_NAME/$SERVICE_NAME.conf")"
 unit_path="$(destination "/usr/lib/systemd/system/$SERVICE_NAME.service")"
 legacy_models_path="$(destination "/var/lib/$SERVICE_NAME/data/kira-canvas/models")"
 service_models_path="$(destination "/var/lib/$SERVICE_NAME/data/kira-service/models")"
+service_models_parent="$(dirname "$service_models_path")"
 
 existing_listen=""
 existing_port=""
@@ -160,6 +204,7 @@ else
         choose_listen_address
     fi
     valid_address "$listen_address" || fail "The listen address contains unsupported characters."
+    ! is_any_address "$listen_address" || fail "The listen address must identify one interface address, not all interfaces."
     if ! is_loopback_address "$listen_address" && ! token_has_content "$token"; then
         if [[ -t 0 ]]; then
             read -r -s -p "Shared LAN passphrase: " token
@@ -201,9 +246,22 @@ fi
 run install -d -m 0755 "$program_dir" "$config_dir" "$unit_dir"
 run install -d -m 0750 "$state_dir"
 run install -m 0755 "$binary_path" "$program_dir/$SERVICE_NAME"
+if [[ -z "$install_root" ]]; then
+    run install -d -o "$manager_uid" -g "$manager_gid" -m 0755 "$manager_bin_dir"
+    run install -o "$manager_uid" -g "$manager_gid" -m 0755 "$manager_binary_path" "$manager_path"
+else
+    run install -d -m 0755 "$manager_bin_dir"
+    run install -m 0755 "$manager_binary_path" "$manager_path"
+fi
 
 if [[ -z "$install_root" ]]; then
     run chown "$SERVICE_USER:$SERVICE_GROUP" "$state_dir"
+    if [[ -d "$service_models_parent" ]]; then
+        # Legacy model trees may have been created by a root-run installer.
+        # The daemon must own the complete service model subtree so it can
+        # create, update, and remove models after an upgrade.
+        run chown -R "$SERVICE_USER:$SERVICE_GROUP" "$service_models_parent"
+    fi
 fi
 
 if "$write_configuration"; then
@@ -268,9 +326,11 @@ printf 'Logs: journalctl -u %s -f\n' "$SERVICE_NAME"
 if is_loopback_address "$listen_address"; then
     printf 'The service listens only on this computer at 127.0.0.1:%s.\n' "$port"
 else
+    printf 'The service listens on 127.0.0.1:%s and %s:%s.\n' "$port" "$listen_address" "$port"
     printf 'Firewall rules were not changed. Allow TCP port %s only from your LAN' "$port"
     if [[ -n "$subnet" ]]; then
         printf ' (%s)' "$subnet"
     fi
     printf '.\n'
 fi
+printf 'Model manager installed at %s. Start the GUI with: %s --gui\n' "$manager_path" "$manager_path"

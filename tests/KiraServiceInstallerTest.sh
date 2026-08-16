@@ -4,6 +4,7 @@ set -euo pipefail
 
 project_root="$1"
 service_binary="$2"
+manager_binary="$3"
 stage_root="$(mktemp -d)"
 mock_bin="$(mktemp -d)"
 interactive_root="$(mktemp -d)"
@@ -18,16 +19,20 @@ chmod +x "$mock_bin/ip"
 "$project_root/scripts/install-kira-service.sh" \
     --root "$stage_root" \
     --binary "$service_binary" \
+    --manager-binary "$manager_binary" \
+    --user-bin /home/kira-test/.local/bin \
     --listen 10.0.0.93 \
     --token "correct horse battery staple" \
     --no-enable
 
 program="$stage_root/usr/local/libexec/kira-service/kira-service"
+manager="$stage_root/home/kira-test/.local/bin/kira-service-manager"
 config="$stage_root/etc/kira-service/kira-service.conf"
 token="$stage_root/etc/kira-service/token"
 unit="$stage_root/usr/lib/systemd/system/kira-service.service"
 
 [[ -x "$program" ]]
+[[ -x "$manager" ]]
 [[ "$(stat -c '%a' "$config")" == "600" ]]
 [[ "$(stat -c '%a' "$token")" == "640" ]]
 [[ "$(stat -c '%a' "$unit")" == "644" ]]
@@ -46,6 +51,8 @@ printf 'legacy model' > "$stage_root/var/lib/kira-service/data/kira-canvas/model
 "$project_root/scripts/install-kira-service.sh" \
     --root "$stage_root" \
     --binary "$replacement_binary" \
+    --manager-binary "$manager_binary" \
+    --user-bin /home/kira-test/.local/bin \
     --listen 10.0.0.99 \
     --token "replace me" \
     --no-enable > "$stage_root/update-output"
@@ -57,33 +64,36 @@ grep -q '^Updated Kira Service\.$' "$stage_root/update-output"
 [[ "$(<"$stage_root/var/lib/kira-service/data/kira-service/models/legacy.safetensors")" == 'legacy model' ]]
 
 mkdir -p "$stage_root/var/lib/kira-service/data/kira-canvas/models" "$stage_root/var/lib/kira-service/data/kira-service/models"
-if "$project_root/scripts/install-kira-service.sh" --root "$stage_root" --binary "$replacement_binary" --no-enable; then
+if "$project_root/scripts/install-kira-service.sh" --root "$stage_root" --binary "$replacement_binary" --manager-binary "$manager_binary" --user-bin /home/kira-test/.local/bin --no-enable; then
     printf 'Expected conflicting model roots to be rejected\n' >&2
     exit 1
 fi
 rm -rf "$stage_root/var/lib/kira-service/data/kira-canvas"
 
 printf '\ninteractive LAN token\n' | PATH="$mock_bin:$PATH" script -qec \
-    "'$project_root/scripts/install-kira-service.sh' --root '$interactive_root' --binary '$service_binary' --no-enable" /dev/null \
+    "'$project_root/scripts/install-kira-service.sh' --root '$interactive_root' --binary '$service_binary' --manager-binary '$manager_binary' --user-bin /home/kira-test/.local/bin --no-enable" /dev/null \
     > "$interactive_root-output"
 grep -qx 'KIRA_SERVICE_LISTEN=10.0.0.93' "$interactive_root/etc/kira-service/kira-service.conf"
 grep -qx 'interactive LAN token' "$interactive_root/etc/kira-service/token"
 
 printf '1\n' | PATH="$mock_bin:$PATH" script -qec \
-    "'$project_root/scripts/install-kira-service.sh' --root '$loopback_root' --binary '$service_binary' --no-enable" /dev/null \
+    "'$project_root/scripts/install-kira-service.sh' --root '$loopback_root' --binary '$service_binary' --manager-binary '$manager_binary' --user-bin /home/kira-test/.local/bin --no-enable" /dev/null \
     > "$loopback_root-output"
 grep -qx 'KIRA_SERVICE_LISTEN=127.0.0.1' "$loopback_root/etc/kira-service/kira-service.conf"
 [[ -z "$(tr -d '\n\r' < "$loopback_root/etc/kira-service/token")" ]]
 
 mkdir -p "$stage_root/var/lib/kira-service/data"
-"$project_root/scripts/uninstall-kira-service.sh" --root "$stage_root" --purge --yes
+"$project_root/scripts/uninstall-kira-service.sh" --root "$stage_root" --user-bin /home/kira-test/.local/bin --purge --yes
 [[ ! -e "$program" ]]
+[[ ! -e "$manager" ]]
 [[ ! -e "$config" ]]
 [[ ! -e "$stage_root/var/lib/kira-service" ]]
 
 "$project_root/scripts/install-kira-service.sh" \
     --root "$stage_root" \
     --binary "$service_binary" \
+    --manager-binary "$manager_binary" \
+    --user-bin /home/kira-test/.local/bin \
     --listen 10.0.0.93 \
     --token "dry run token" \
     --no-enable \

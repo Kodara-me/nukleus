@@ -120,6 +120,29 @@ std::optional<ModelInfo> ModelCatalog::model(ModelCategory category, const QStri
     return model == availableModels.cend() ? std::nullopt : std::optional<ModelInfo>(*model);
 }
 
+std::optional<ModelInfo> ModelCatalog::modelById(const QString &id) const
+{
+    const qsizetype separator = id.indexOf(QLatin1Char(':'));
+    if (separator <= 0 || separator == id.size() - 1) return std::nullopt;
+    const std::optional<ModelCategory> category = categoryFromName(id.left(separator));
+    if (!category.has_value()) return std::nullopt;
+    return model(*category, id);
+}
+
+bool ModelCatalog::remove(const QString &id, QString *errorMessage)
+{
+    const std::optional<ModelInfo> modelInfo = modelById(id);
+    if (!modelInfo.has_value()) {
+        if (errorMessage) *errorMessage = tr("The requested model is not installed");
+        return false;
+    }
+    if (!QFile::remove(modelInfo->filePath)) {
+        if (errorMessage) *errorMessage = tr("Could not remove the model");
+        return false;
+    }
+    return true;
+}
+
 bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMessage)
 {
     if (request.installId.isEmpty()) {

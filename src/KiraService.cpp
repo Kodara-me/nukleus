@@ -84,29 +84,46 @@ KiraService::~KiraService()
 {
     // Closing the server while the client bookkeeping is still alive prevents
     // disconnect callbacks from accessing members already being destroyed.
-    m_server.reset();
+    m_servers.clear();
 }
 
 bool KiraService::start(QString *errorMessage)
 {
+    if (!m_configuration.listenAddress.isLoopback()
+        && (m_configuration.listenAddress.protocol() != QAbstractSocket::IPv4Protocol
+            || m_configuration.listenAddress == QHostAddress::AnyIPv4
+            || m_configuration.listenAddress == QHostAddress::Any)) {
+        if (errorMessage) *errorMessage = tr("The LAN listen address must be an IPv4 address");
+        return false;
+    }
     if (!m_configuration.listenAddress.isLoopback() && m_configuration.token.isEmpty()) {
         if (errorMessage) *errorMessage = tr("A token is required when listening on the LAN");
         return false;
     }
     if (m_configuration.modelRootPath.isEmpty() && !ServicePaths::ensureModelDirectories(errorMessage)) return false;
-    m_server = std::make_unique<QWebSocketServer>(QStringLiteral("Kira Service"), QWebSocketServer::NonSecureMode, this);
-    if (!m_server->listen(m_configuration.listenAddress, m_configuration.port)) {
-        if (errorMessage) *errorMessage = m_server->errorString();
-        return false;
+    m_servers.clear();
+    QList<QHostAddress> addresses{QHostAddress(QStringLiteral("127.0.0.1"))};
+    if (!m_configuration.listenAddress.isLoopback()) addresses.append(m_configuration.listenAddress);
+    quint16 port = m_configuration.port;
+    for (const QHostAddress &address : addresses) {
+        auto server = std::make_unique<QWebSocketServer>(QStringLiteral("Kira Service"), QWebSocketServer::NonSecureMode, this);
+        if (!server->listen(address, port)) {
+            if (errorMessage) *errorMessage = tr("Could not listen on %1:%2: %3").arg(address.toString()).arg(port).arg(server->errorString());
+            m_servers.clear();
+            return false;
+        }
+        if (port == 0) port = server->serverPort();
+        QWebSocketServer *serverPointer = server.get();
+        connect(serverPointer, &QWebSocketServer::newConnection, this, [this, serverPointer] { acceptConnection(serverPointer); });
+        m_servers.push_back(std::move(server));
     }
-    connect(m_server.get(), &QWebSocketServer::newConnection, this, &KiraService::acceptConnection);
     initializeBackend();
     return true;
 }
 
 quint16 KiraService::serverPort() const
 {
-    return m_server ? m_server->serverPort() : 0;
+    return m_servers.empty() ? 0 : m_servers.front()->serverPort();
 }
 
 void KiraService::initializeBackend()
@@ -133,9 +150,9 @@ bool KiraService::isReady() const
     return !m_backendUnavailable && m_runner != nullptr;
 }
 
-void KiraService::acceptConnection()
+void KiraService::acceptConnection(QWebSocketServer *server)
 {
-    QWebSocket *socket = m_server->nextPendingConnection();
+    QWebSocket *socket = server->nextPendingConnection();
     socket->setMaxAllowedIncomingMessageSize(m_configuration.maximumImageBytes + 4096);
     connect(socket, &QWebSocket::textMessageReceived, this, [this, socket](const QString &message) { processTextMessage(socket, message); });
     connect(socket, &QWebSocket::binaryMessageReceived, this, [this, socket](const QByteArray &data) { processBinaryMessage(socket, data); });
@@ -161,8 +178,10 @@ void KiraService::processTextMessage(QWebSocket *socket, const QString &message)
     const QJsonObject object = document.object();
     const QString type = object.value(QStringLiteral("type")).toString();
     if (!m_authenticatedClients.contains(socket)) {
+        const bool loopbackPeer = socket->peerAddress().isLoopback();
+        const QString token = object.value(QStringLiteral("token")).toString();
         if (type != QStringLiteral("authenticate") || object.value(QStringLiteral("version")).toInt() != ServiceProtocol::Version
-            || (!m_configuration.token.isEmpty() && object.value(QStringLiteral("token")).toString() != m_configuration.token)) {
+            || (!loopbackPeer && (m_configuration.token.isEmpty() || token != m_configuration.token))) {
             qWarning().noquote() << QStringLiteral("[Kira Service] Rejected authentication from %1.").arg(socket->peerAddress().toString());
             sendError(socket, QStringLiteral("authentication-failed"), tr("Authentication failed")); socket->close(); return;
         }
@@ -176,6 +195,7 @@ void KiraService::processTextMessage(QWebSocket *socket, const QString &message)
     else if (type == QStringLiteral("capabilities")) sendCapabilities(socket);
     else if (type == QStringLiteral("models.list")) listModels(socket);
     else if (type == QStringLiteral("models.install")) installModel(socket, object);
+    else if (type == QStringLiteral("models.delete")) deleteModel(socket, object);
     else sendError(socket, QStringLiteral("unsupported-message"), tr("Unsupported message"));
 }
 
@@ -265,6 +285,41 @@ void KiraService::installModel(QWebSocket *socket, const QJsonObject &message)
         return;
     }
     send(socket, {{QStringLiteral("type"), QStringLiteral("models.install.accepted")}, {QStringLiteral("installId"), installId}});
+}
+
+void KiraService::deleteModel(QWebSocket *socket, const QJsonObject &message)
+{
+    const QString id = message.value(QStringLiteral("id")).toString();
+    const std::optional<ModelInfo> model = m_models->modelById(id);
+    if (!model.has_value()) {
+        send(socket, {{QStringLiteral("type"), QStringLiteral("error")}, {QStringLiteral("code"), QStringLiteral("invalid-model-delete")},
+                     {QStringLiteral("message"), tr("The requested model is not installed")}, {QStringLiteral("id"), id}});
+        return;
+    }
+    if (modelInUse(model->filePath)) {
+        send(socket, {{QStringLiteral("type"), QStringLiteral("error")}, {QStringLiteral("code"), QStringLiteral("model-in-use")},
+                     {QStringLiteral("message"), tr("The model is currently used by queued or active work")}, {QStringLiteral("id"), id}});
+        return;
+    }
+    QString error;
+    if (!m_models->remove(id, &error)) {
+        send(socket, {{QStringLiteral("type"), QStringLiteral("error")}, {QStringLiteral("code"), QStringLiteral("model-delete-failed")},
+                     {QStringLiteral("message"), error}, {QStringLiteral("id"), id}});
+        return;
+    }
+    send(socket, {{QStringLiteral("type"), QStringLiteral("models.delete.completed")}, {QStringLiteral("id"), id}});
+}
+
+bool KiraService::modelInUse(const QString &path) const
+{
+    if (m_activeJob && m_activeJob->modelPath == path) return true;
+    for (const auto &job : m_queue) {
+        if (job->modelPath == path) return true;
+    }
+    for (auto it = m_pendingUploads.cbegin(); it != m_pendingUploads.cend(); ++it) {
+        if (it.value() && it.value()->modelPath == path) return true;
+    }
+    return false;
 }
 
 void KiraService::processBinaryMessage(QWebSocket *socket, const QByteArray &data)

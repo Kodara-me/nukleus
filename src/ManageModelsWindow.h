@@ -21,13 +21,11 @@ private:
     void populateModels();
     void populateInstalls();
     void updateInstallButton();
-    void connectService();
+    void updateDeleteButton();
     void startInstall();
-    bool validLocalHost(const QString &host) const;
+    void deleteSelectedModel();
 
     ManagerServiceClient *m_client;
-    QLineEdit *m_host = nullptr;
-    QLineEdit *m_token = nullptr;
     QLabel *m_status = nullptr;
     QListWidget *m_generationModels = nullptr;
     QListWidget *m_upscaleModels = nullptr;
@@ -36,5 +34,6 @@ private:
     QLineEdit *m_url = nullptr;
     QLineEdit *m_sha256 = nullptr;
     QPushButton *m_installButton = nullptr;
+    QPushButton *m_deleteButton = nullptr;
     QTreeWidget *m_installs = nullptr;
 };
