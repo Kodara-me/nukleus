@@ -1,0 +1,16 @@
+{
+    "C_Cpp.intelliSenseEngine": "disabled",
+
+    "cmake.buildDirectory": "${workspaceFolder}/build",
+
+    "cmake.configureSettings": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+    },
+
+    "cmake.debugConfig": {
+        "type": "lldb",
+        "request": "launch",
+        "stopOnEntry": false
+    }
+}

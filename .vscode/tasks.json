@@ -1,0 +1,19 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build Kira Service",
+            "type": "shell",
+            "command": "cmake --build build --target kira-service",
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "Build Kira Service Manager",
+            "type": "shell",
+            "command": "cmake --build build --target kira-service-manager",
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": ["$gcc"]
+        }
+    ]
+}
