@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ServiceProtocol.h"
+#include <kira/service/ServiceProtocol.h>
 
 #include <QHostAddress>
 #include <QObject>
@@ -15,26 +15,25 @@ class ModelCatalog;
 class QWebSocket;
 class QWebSocketServer;
 class SdCliRunner;
-struct GenerationProgress;
 struct SdCliGenerationResult;
 struct SdCliUpscaleResult;
 
 struct KiraServiceConfiguration
 {
     QHostAddress listenAddress = QHostAddress::LocalHost;
-    quint16 port = ServiceProtocol::DefaultPort;
+    quint16 port = KiraService::Protocol::DefaultPort;
     QString token;
     qint64 maximumImageBytes = 64LL * 1024 * 1024;
     QString modelRootPath;
 };
 
-class KiraService final : public QObject
+class KiraServiceDaemon final : public QObject
 {
     Q_OBJECT
 
 public:
-    explicit KiraService(KiraServiceConfiguration configuration, QObject *parent = nullptr);
-    ~KiraService() override;
+    explicit KiraServiceDaemon(KiraServiceConfiguration configuration, QObject *parent = nullptr);
+    ~KiraServiceDaemon() override;
     bool start(QString *errorMessage = nullptr);
     quint16 serverPort() const;
 

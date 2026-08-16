@@ -26,7 +26,7 @@ SdCliRunner::SdCliRunner(const QString &executablePath, QObject *parent)
     m_process->setProcessChannelMode(QProcess::SeparateChannels);
     qRegisterMetaType<SdCliGenerationResult>();
     qRegisterMetaType<SdCliUpscaleResult>();
-    qRegisterMetaType<GenerationProgress>();
+    qRegisterMetaType<KiraService::GenerationProgress>();
     connect(m_process, &QProcess::started, this, [this] {
         if (m_requestType != RequestType::Generation) {
             return;
@@ -165,7 +165,7 @@ void SdCliRunner::emitGenerationFinished(bool succeeded, int exitCode)
 {
     flushGenerationOutput(false);
     flushGenerationOutput(true);
-    const std::optional<GenerationProgress> progress = succeeded ? m_progressParser.complete() : m_progressParser.failed();
+    const std::optional<KiraService::GenerationProgress> progress = succeeded ? m_progressParser.complete() : m_progressParser.failed();
     if (progress.has_value()) {
         emit generationProgressChanged(*progress);
     }
@@ -236,7 +236,7 @@ void SdCliRunner::flushGenerationOutput(bool standardError)
 
 void SdCliRunner::processGenerationLine(const QString &line)
 {
-    if (const std::optional<GenerationProgress> progress = m_progressParser.processLine(line)) {
+    if (const std::optional<KiraService::GenerationProgress> progress = m_progressParser.processLine(line)) {
         emit generationProgressChanged(*progress);
     }
 }

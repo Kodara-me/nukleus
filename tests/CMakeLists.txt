@@ -7,7 +7,7 @@ find_package(Qt6 6.2 REQUIRED COMPONENTS Network Test WebSockets)
 add_executable(kira-service-test
     ServiceTest.cpp
     ../src/daemon/GenerationRequest.h
-    ../src/protocol/GenerationProgress.h
+    ../src/sdk/include/kira/service/GenerationProgress.h
     ../src/daemon/KiraService.cpp
     ../src/daemon/KiraService.h
     ../src/daemon/ModelCatalog.cpp
@@ -19,15 +19,16 @@ add_executable(kira-service-test
     ../src/daemon/ServiceJobResult.h
     ../src/daemon/ServicePaths.cpp
     ../src/daemon/ServicePaths.h
-    ../src/protocol/ServiceProtocol.cpp
-    ../src/protocol/ServiceProtocol.h
 )
 target_include_directories(kira-service-test PRIVATE
     ../src/daemon
-    ../src/protocol
 )
-target_link_libraries(kira-service-test PRIVATE Qt6::Network Qt6::Test Qt6::WebSockets)
+target_link_libraries(kira-service-test PRIVATE KiraService::Protocol Qt6::Network Qt6::Test Qt6::WebSockets)
 add_test(NAME kira-service-test COMMAND kira-service-test)
+
+add_executable(kira-service-sdk-test ServiceSdkTest.cpp)
+target_link_libraries(kira-service-sdk-test PRIVATE KiraService::SDK Qt6::Network Qt6::Test Qt6::WebSockets)
+add_test(NAME kira-service-sdk-test COMMAND kira-service-sdk-test)
 
 add_test(NAME kira-service-installer-test
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/KiraServiceInstallerTest.sh

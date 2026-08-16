@@ -1,7 +1,7 @@
 #pragma once
 
 #include "GenerationRequest.h"
-#include "GenerationProgress.h"
+#include <kira/service/GenerationProgress.h>
 #include "ServiceJobResult.h"
 #include "SdCliProgressParser.h"
 
@@ -31,7 +31,7 @@ public:
 signals:
     void helpFinished(bool succeeded);
     void generationOutput(const QString &stream, const QString &text);
-    void generationProgressChanged(const GenerationProgress &progress);
+    void generationProgressChanged(const KiraService::GenerationProgress &progress);
     void generationFinished(const SdCliGenerationResult &result);
     void upscaleFinished(const SdCliUpscaleResult &result);
 

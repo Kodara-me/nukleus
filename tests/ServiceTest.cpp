@@ -1,7 +1,7 @@
 #include "KiraService.h"
 #include "ModelCatalog.h"
 #include "ServicePaths.h"
-#include "ServiceProtocol.h"
+#include <kira/service/ServiceProtocol.h>
 
 #include <QDir>
 #include <QFile>
@@ -77,8 +77,8 @@ QHostAddress availableLanAddress()
 
 void ServiceTest::preservesProtocolV3()
 {
-    QCOMPARE(ServiceProtocol::Version, 3);
-    QCOMPARE(ServiceProtocol::DefaultPort, quint16(9384));
+    QCOMPARE(KiraService::Protocol::Version, 3);
+    QCOMPARE(KiraService::Protocol::DefaultPort, quint16(9384));
 }
 
 void ServiceTest::rejectsLanWithoutToken()
@@ -87,7 +87,7 @@ void ServiceTest::rejectsLanWithoutToken()
     if (lan.isNull()) QSKIP("No non-loopback IPv4 address is available");
     QTemporaryDir directory; QVERIFY(directory.isValid());
     KiraServiceConfiguration configuration; configuration.listenAddress = lan; configuration.port = 0; configuration.modelRootPath = directory.path();
-    KiraService service(configuration); QString error;
+    KiraServiceDaemon service(configuration); QString error;
     QVERIFY(!service.start(&error)); QVERIFY(error.contains(QStringLiteral("token"), Qt::CaseInsensitive));
 }
 
@@ -97,7 +97,7 @@ void ServiceTest::startsOnLoopbackAndLanAddress()
     if (lan.isNull()) QSKIP("No non-loopback IPv4 address is available");
     QTemporaryDir directory; QVERIFY(directory.isValid());
     KiraServiceConfiguration configuration; configuration.listenAddress = lan; configuration.port = 0; configuration.token = QStringLiteral("lan-secret"); configuration.modelRootPath = directory.path();
-    KiraService service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
+    KiraServiceDaemon service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
     QTcpSocket local; local.connectToHost(QHostAddress(QStringLiteral("127.0.0.1")), service.serverPort()); QVERIFY(local.waitForConnected(1000));
     QTcpSocket network; network.connectToHost(lan, service.serverPort()); QVERIFY(network.waitForConnected(1000));
 }
@@ -106,7 +106,7 @@ void ServiceTest::authenticatesLoopbackWithoutToken()
 {
     QTemporaryDir directory; QVERIFY(directory.isValid());
     KiraServiceConfiguration configuration; configuration.listenAddress = QHostAddress(QStringLiteral("127.0.0.1")); configuration.port = 0; configuration.token = QStringLiteral("lan-secret"); configuration.modelRootPath = directory.path();
-    KiraService service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
+    KiraServiceDaemon service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
     QWebSocket client; QSignalSpy messages(&client, &QWebSocket::textMessageReceived);
     client.open(QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(service.serverPort()))); QTRY_VERIFY_WITH_TIMEOUT(client.state() == QAbstractSocket::ConnectedState, 1000);
     client.sendTextMessage(QStringLiteral("{\"type\":\"authenticate\",\"version\":3,\"token\":\"\"}"));
@@ -122,7 +122,7 @@ void ServiceTest::rejectsLanAuthenticationWithoutToken()
     if (lan.isNull()) QSKIP("No non-loopback IPv4 address is available");
     QTemporaryDir directory; QVERIFY(directory.isValid());
     KiraServiceConfiguration configuration; configuration.listenAddress = lan; configuration.port = 0; configuration.token = QStringLiteral("lan-secret"); configuration.modelRootPath = directory.path();
-    KiraService service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
+    KiraServiceDaemon service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
     QWebSocket client; QSignalSpy messages(&client, &QWebSocket::textMessageReceived);
     client.open(QUrl(QStringLiteral("ws://%1:%2").arg(lan.toString()).arg(service.serverPort()))); QTRY_VERIFY_WITH_TIMEOUT(client.state() == QAbstractSocket::ConnectedState, 1000);
     client.sendTextMessage(QStringLiteral("{\"type\":\"authenticate\",\"version\":3,\"token\":\"\"}"));
@@ -142,7 +142,7 @@ void ServiceTest::rollsBackWhenLanListenerFails()
     QTcpServer blocker; QVERIFY(blocker.listen(lan, 0));
     QTemporaryDir directory; QVERIFY(directory.isValid());
     KiraServiceConfiguration configuration; configuration.listenAddress = lan; configuration.port = blocker.serverPort(); configuration.token = QStringLiteral("lan-secret"); configuration.modelRootPath = directory.path();
-    KiraService service(configuration); QString error; QVERIFY(!service.start(&error));
+    KiraServiceDaemon service(configuration); QString error; QVERIFY(!service.start(&error));
     QTcpSocket local; local.connectToHost(QHostAddress(QStringLiteral("127.0.0.1")), blocker.serverPort()); QVERIFY(!local.waitForConnected(100));
 }
 

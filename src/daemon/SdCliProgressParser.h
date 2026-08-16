@@ -1,6 +1,6 @@
 #pragma once
 
-#include "GenerationProgress.h"
+#include <kira/service/GenerationProgress.h>
 
 #include <optional>
 
@@ -9,14 +9,14 @@ class QString;
 class SdCliProgressParser final
 {
 public:
-    GenerationProgress begin(int samplingSteps);
-    std::optional<GenerationProgress> starting();
-    std::optional<GenerationProgress> processLine(const QString &line);
-    std::optional<GenerationProgress> complete();
-    std::optional<GenerationProgress> failed();
+    KiraService::GenerationProgress begin(int samplingSteps);
+    std::optional<KiraService::GenerationProgress> starting();
+    std::optional<KiraService::GenerationProgress> processLine(const QString &line);
+    std::optional<KiraService::GenerationProgress> complete();
+    std::optional<KiraService::GenerationProgress> failed();
 
 private:
-    std::optional<GenerationProgress> update(GenerationProgressStage stage,
+    std::optional<KiraService::GenerationProgress> update(KiraService::GenerationProgressStage stage,
                                              int percentage,
                                              const QString &statusText,
                                              std::optional<int> currentStep = std::nullopt,
@@ -24,7 +24,7 @@ private:
 
     int m_samplingSteps = 0;
     int m_percentage = 0;
-    GenerationProgressStage m_stage = GenerationProgressStage::Preparing;
+    KiraService::GenerationProgressStage m_stage = KiraService::GenerationProgressStage::Preparing;
     bool m_samplingStarted = false;
     bool m_hasProgress = false;
 };

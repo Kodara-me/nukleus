@@ -5,40 +5,40 @@
 
 #include <algorithm>
 
-GenerationProgress SdCliProgressParser::begin(int samplingSteps)
+KiraService::GenerationProgress SdCliProgressParser::begin(int samplingSteps)
 {
     m_samplingSteps = samplingSteps;
     m_percentage = 0;
-    m_stage = GenerationProgressStage::Preparing;
+    m_stage = KiraService::GenerationProgressStage::Preparing;
     m_samplingStarted = false;
     m_hasProgress = true;
-    return {GenerationProgressStage::Preparing,
+    return {KiraService::GenerationProgressStage::Preparing,
             std::nullopt,
             std::nullopt,
             0,
             QObject::tr("Preparing generation…")};
 }
 
-std::optional<GenerationProgress> SdCliProgressParser::starting()
+std::optional<KiraService::GenerationProgress> SdCliProgressParser::starting()
 {
-    return update(GenerationProgressStage::Starting, 2, QObject::tr("Starting image generation…"));
+    return update(KiraService::GenerationProgressStage::Starting, 2, QObject::tr("Starting image generation…"));
 }
 
-std::optional<GenerationProgress> SdCliProgressParser::processLine(const QString &line)
+std::optional<KiraService::GenerationProgress> SdCliProgressParser::processLine(const QString &line)
 {
     if (line.contains(QStringLiteral("loading model from"), Qt::CaseInsensitive)) {
-        return update(GenerationProgressStage::LoadingModel, 5, QObject::tr("Loading image generation model…"));
+        return update(KiraService::GenerationProgressStage::LoadingModel, 5, QObject::tr("Loading image generation model…"));
     }
     if (line.contains(QStringLiteral("generate_image"), Qt::CaseInsensitive)
         || line.contains(QStringLiteral("sampling using"), Qt::CaseInsensitive)) {
-        return update(GenerationProgressStage::Starting, 10, QObject::tr("Starting image generation…"));
+        return update(KiraService::GenerationProgressStage::Starting, 10, QObject::tr("Starting image generation…"));
     }
     if (line.contains(QStringLiteral("generating image:"), Qt::CaseInsensitive)) {
         m_samplingStarted = true;
-        return update(GenerationProgressStage::Sampling, 15, QObject::tr("Sampling image…"));
+        return update(KiraService::GenerationProgressStage::Sampling, 15, QObject::tr("Sampling image…"));
     }
     if (line.contains(QStringLiteral("sampling completed"), Qt::CaseInsensitive)) {
-        return update(GenerationProgressStage::Sampling,
+        return update(KiraService::GenerationProgressStage::Sampling,
                       90,
                       QObject::tr("Sampling %1 / %2").arg(m_samplingSteps).arg(m_samplingSteps),
                       m_samplingSteps,
@@ -46,10 +46,10 @@ std::optional<GenerationProgress> SdCliProgressParser::processLine(const QString
     }
     if (line.contains(QStringLiteral("decoding "), Qt::CaseInsensitive)
         || line.contains(QStringLiteral("decode_first_stage"), Qt::CaseInsensitive)) {
-        return update(GenerationProgressStage::Decoding, 94, QObject::tr("Decoding image…"));
+        return update(KiraService::GenerationProgressStage::Decoding, 94, QObject::tr("Decoding image…"));
     }
     if (line.contains(QStringLiteral("save result image"), Qt::CaseInsensitive)) {
-        return update(GenerationProgressStage::Saving, 99, QObject::tr("Saving image…"));
+        return update(KiraService::GenerationProgressStage::Saving, 99, QObject::tr("Saving image…"));
     }
 
     if (!m_samplingStarted || m_samplingSteps <= 0) {
@@ -69,30 +69,30 @@ std::optional<GenerationProgress> SdCliProgressParser::processLine(const QString
     }
 
     const int percentage = 15 + (currentStep * 75 + totalSteps / 2) / totalSteps;
-    return update(GenerationProgressStage::Sampling,
+    return update(KiraService::GenerationProgressStage::Sampling,
                   percentage,
                   QObject::tr("Sampling %1 / %2").arg(currentStep).arg(totalSteps),
                   currentStep,
                   totalSteps);
 }
 
-std::optional<GenerationProgress> SdCliProgressParser::complete()
+std::optional<KiraService::GenerationProgress> SdCliProgressParser::complete()
 {
-    return update(GenerationProgressStage::Complete, 100, QObject::tr("Generation complete"));
+    return update(KiraService::GenerationProgressStage::Complete, 100, QObject::tr("Generation complete"));
 }
 
-std::optional<GenerationProgress> SdCliProgressParser::failed()
+std::optional<KiraService::GenerationProgress> SdCliProgressParser::failed()
 {
-    return update(GenerationProgressStage::Failed, m_percentage, QObject::tr("Generation failed"));
+    return update(KiraService::GenerationProgressStage::Failed, m_percentage, QObject::tr("Generation failed"));
 }
 
-std::optional<GenerationProgress> SdCliProgressParser::update(GenerationProgressStage stage,
+std::optional<KiraService::GenerationProgress> SdCliProgressParser::update(KiraService::GenerationProgressStage stage,
                                                                 int percentage,
                                                                 const QString &statusText,
                                                                 std::optional<int> currentStep,
                                                                 std::optional<int> totalSteps)
 {
-    if (stage != GenerationProgressStage::Failed && m_hasProgress && percentage < m_percentage) {
+    if (stage != KiraService::GenerationProgressStage::Failed && m_hasProgress && percentage < m_percentage) {
         return std::nullopt;
     }
     percentage = std::max(percentage, m_percentage);
@@ -103,5 +103,5 @@ std::optional<GenerationProgress> SdCliProgressParser::update(GenerationProgress
     m_stage = stage;
     m_percentage = percentage;
     m_hasProgress = true;
-    return GenerationProgress{stage, currentStep, totalSteps, percentage, statusText};
+    return KiraService::GenerationProgress{stage, currentStep, totalSteps, percentage, statusText};
 }

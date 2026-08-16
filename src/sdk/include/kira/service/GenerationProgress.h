@@ -5,6 +5,8 @@
 
 #include <optional>
 
+namespace KiraService
+{
 enum class GenerationProgressStage
 {
     Preparing,
@@ -25,5 +27,6 @@ struct GenerationProgress
     int percentage = 0;
     QString statusText;
 };
+}
 
-Q_DECLARE_METATYPE(GenerationProgress)
+Q_DECLARE_METATYPE(KiraService::GenerationProgress)

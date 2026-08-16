@@ -1,7 +1,7 @@
 #include "ManageModelsWindow.h"
 
 #include "ManagerServiceClient.h"
-#include "ServiceProtocol.h"
+#include <kira/service/ServiceProtocol.h>
 
 #include <QComboBox>
 #include <QFormLayout>

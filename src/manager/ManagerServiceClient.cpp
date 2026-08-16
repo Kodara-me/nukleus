@@ -1,6 +1,6 @@
 #include "ManagerServiceClient.h"
 
-#include "ServiceProtocol.h"
+#include <kira/service/ServiceProtocol.h>
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -83,7 +83,7 @@ bool ManagerServiceClient::deleteModel(const QString &id)
 void ManagerServiceClient::authenticate()
 {
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument({{QStringLiteral("type"), QStringLiteral("authenticate")},
-        {QStringLiteral("version"), ServiceProtocol::Version}, {QStringLiteral("token"), QString()}}).toJson(QJsonDocument::Compact)));
+        {QStringLiteral("version"), KiraService::Protocol::Version}, {QStringLiteral("token"), QString()}}).toJson(QJsonDocument::Compact)));
 }
 
 void ManagerServiceClient::handleTextMessage(const QString &message)

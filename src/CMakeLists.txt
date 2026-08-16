@@ -1,10 +1,5 @@
 include(GNUInstallDirs)
-
-set(SERVICE_PROTOCOL_SOURCES
-    protocol/GenerationProgress.h
-    protocol/ServiceProtocol.cpp
-    protocol/ServiceProtocol.h
-)
+add_subdirectory(sdk)
 
 set(SERVICE_DAEMON_SOURCES
     daemon/GenerationRequest.h
@@ -23,14 +18,12 @@ set(SERVICE_DAEMON_SOURCES
 
 add_executable(kira-service
     daemon/kira-service-main.cpp
-    ${SERVICE_PROTOCOL_SOURCES}
     ${SERVICE_DAEMON_SOURCES}
 )
 target_include_directories(kira-service PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/daemon
-    ${CMAKE_CURRENT_SOURCE_DIR}/protocol
 )
-target_link_libraries(kira-service PRIVATE Qt6::Network Qt6::WebSockets)
+target_link_libraries(kira-service PRIVATE KiraService::Protocol Qt6::Network Qt6::WebSockets)
 
 add_executable(kira-service-manager
     manager/kira-service-manager-main.cpp
@@ -38,13 +31,11 @@ add_executable(kira-service-manager
     manager/ManageModelsWindow.h
     manager/ManagerServiceClient.cpp
     manager/ManagerServiceClient.h
-    ${SERVICE_PROTOCOL_SOURCES}
 )
 target_include_directories(kira-service-manager PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/manager
-    ${CMAKE_CURRENT_SOURCE_DIR}/protocol
 )
-target_link_libraries(kira-service-manager PRIVATE Qt6::Network Qt6::WebSockets Qt6::Widgets)
+target_link_libraries(kira-service-manager PRIVATE KiraService::Protocol Qt6::Network Qt6::WebSockets Qt6::Widgets)
 
 install(TARGETS kira-service
     RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/kira-service

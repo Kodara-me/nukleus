@@ -3,7 +3,7 @@
 #include "GenerationRequest.h"
 #include "ModelCatalog.h"
 #include "ServicePaths.h"
-#include "ServiceProtocol.h"
+#include <kira/service/ServiceProtocol.h>
 #include "SdCliRunner.h"
 
 #include <QDebug>
@@ -29,7 +29,7 @@ bool validPositiveInteger(const QJsonObject &object, const QString &name, int mi
 }
 }
 
-struct KiraService::Submission
+struct KiraServiceDaemon::Submission
 {
     QString id;
     Operation operation = Operation::Generate;
@@ -38,7 +38,7 @@ struct KiraService::Submission
     QPointer<QWebSocket> client;
 };
 
-struct KiraService::Job
+struct KiraServiceDaemon::Job
 {
     QString id;
     Operation operation = Operation::Generate;
@@ -50,7 +50,7 @@ struct KiraService::Job
     QString outputPath;
 };
 
-KiraService::KiraService(KiraServiceConfiguration configuration, QObject *parent)
+KiraServiceDaemon::KiraServiceDaemon(KiraServiceConfiguration configuration, QObject *parent)
     : QObject(parent)
     , m_configuration(std::move(configuration))
     , m_models(m_configuration.modelRootPath.isEmpty()
@@ -80,14 +80,14 @@ KiraService::KiraService(KiraServiceConfiguration configuration, QObject *parent
     });
 }
 
-KiraService::~KiraService()
+KiraServiceDaemon::~KiraServiceDaemon()
 {
     // Closing the server while the client bookkeeping is still alive prevents
     // disconnect callbacks from accessing members already being destroyed.
     m_servers.clear();
 }
 
-bool KiraService::start(QString *errorMessage)
+bool KiraServiceDaemon::start(QString *errorMessage)
 {
     if (!m_configuration.listenAddress.isLoopback()
         && (m_configuration.listenAddress.protocol() != QAbstractSocket::IPv4Protocol
@@ -121,12 +121,12 @@ bool KiraService::start(QString *errorMessage)
     return true;
 }
 
-quint16 KiraService::serverPort() const
+quint16 KiraServiceDaemon::serverPort() const
 {
     return m_servers.empty() ? 0 : m_servers.front()->serverPort();
 }
 
-void KiraService::initializeBackend()
+void KiraServiceDaemon::initializeBackend()
 {
     const QString executable = QStandardPaths::findExecutable(QStringLiteral("sd-cli"));
     if (executable.isEmpty()) {
@@ -135,22 +135,22 @@ void KiraService::initializeBackend()
         return;
     }
     m_runner = std::make_unique<SdCliRunner>(executable);
-    connect(m_runner.get(), &SdCliRunner::generationProgressChanged, this, [this](const GenerationProgress &progress) {
-        if (m_activeJob) send(m_activeJob->client, {{QStringLiteral("type"), QStringLiteral("progress")}, {QStringLiteral("jobId"), m_activeJob->id}, {QStringLiteral("progress"), ServiceProtocol::progressToJson(progress)}});
+    connect(m_runner.get(), &SdCliRunner::generationProgressChanged, this, [this](const KiraService::GenerationProgress &progress) {
+        if (m_activeJob) send(m_activeJob->client, {{QStringLiteral("type"), QStringLiteral("progress")}, {QStringLiteral("jobId"), m_activeJob->id}, {QStringLiteral("progress"), KiraService::Protocol::progressToJson(progress)}});
     });
     connect(m_runner.get(), &SdCliRunner::generationOutput, this, [this](const QString &stream, const QString &text) {
         if (m_activeJob) send(m_activeJob->client, {{QStringLiteral("type"), QStringLiteral("output")}, {QStringLiteral("jobId"), m_activeJob->id}, {QStringLiteral("stream"), stream}, {QStringLiteral("text"), text}});
     });
-    connect(m_runner.get(), &SdCliRunner::generationFinished, this, &KiraService::handleGenerationFinished);
-    connect(m_runner.get(), &SdCliRunner::upscaleFinished, this, &KiraService::handleUpscaleFinished);
+    connect(m_runner.get(), &SdCliRunner::generationFinished, this, &KiraServiceDaemon::handleGenerationFinished);
+    connect(m_runner.get(), &SdCliRunner::upscaleFinished, this, &KiraServiceDaemon::handleUpscaleFinished);
 }
 
-bool KiraService::isReady() const
+bool KiraServiceDaemon::isReady() const
 {
     return !m_backendUnavailable && m_runner != nullptr;
 }
 
-void KiraService::acceptConnection(QWebSocketServer *server)
+void KiraServiceDaemon::acceptConnection(QWebSocketServer *server)
 {
     QWebSocket *socket = server->nextPendingConnection();
     socket->setMaxAllowedIncomingMessageSize(m_configuration.maximumImageBytes + 4096);
@@ -159,7 +159,7 @@ void KiraService::acceptConnection(QWebSocketServer *server)
     connect(socket, &QWebSocket::disconnected, this, [this, socket] { disconnectClient(socket); });
 }
 
-void KiraService::disconnectClient(QWebSocket *socket)
+void KiraServiceDaemon::disconnectClient(QWebSocket *socket)
 {
     cancelJobsFor(socket);
     QStringList installIds;
@@ -171,7 +171,7 @@ void KiraService::disconnectClient(QWebSocket *socket)
     socket->deleteLater();
 }
 
-void KiraService::processTextMessage(QWebSocket *socket, const QString &message)
+void KiraServiceDaemon::processTextMessage(QWebSocket *socket, const QString &message)
 {
     const QJsonDocument document = QJsonDocument::fromJson(message.toUtf8());
     if (!document.isObject()) { sendError(socket, QStringLiteral("invalid-message"), tr("Expected a JSON object")); return; }
@@ -180,7 +180,7 @@ void KiraService::processTextMessage(QWebSocket *socket, const QString &message)
     if (!m_authenticatedClients.contains(socket)) {
         const bool loopbackPeer = socket->peerAddress().isLoopback();
         const QString token = object.value(QStringLiteral("token")).toString();
-        if (type != QStringLiteral("authenticate") || object.value(QStringLiteral("version")).toInt() != ServiceProtocol::Version
+        if (type != QStringLiteral("authenticate") || object.value(QStringLiteral("version")).toInt() != KiraService::Protocol::Version
             || (!loopbackPeer && (m_configuration.token.isEmpty() || token != m_configuration.token))) {
             qWarning().noquote() << QStringLiteral("[Kira Service] Rejected authentication from %1.").arg(socket->peerAddress().toString());
             sendError(socket, QStringLiteral("authentication-failed"), tr("Authentication failed")); socket->close(); return;
@@ -199,7 +199,7 @@ void KiraService::processTextMessage(QWebSocket *socket, const QString &message)
     else sendError(socket, QStringLiteral("unsupported-message"), tr("Unsupported message"));
 }
 
-void KiraService::submit(QWebSocket *socket, const QJsonObject &message)
+void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
 {
     const QString operationName = message.value(QStringLiteral("operation")).toString();
     const bool generate = operationName == QStringLiteral("image.generate");
@@ -245,7 +245,7 @@ void KiraService::submit(QWebSocket *socket, const QJsonObject &message)
     enqueue(job);
 }
 
-void KiraService::listModels(QWebSocket *socket) const
+void KiraServiceDaemon::listModels(QWebSocket *socket) const
 {
     QJsonArray categories;
     for (const ModelCategory category : ModelCatalog::categories()) {
@@ -259,7 +259,7 @@ void KiraService::listModels(QWebSocket *socket) const
     send(socket, {{QStringLiteral("type"), QStringLiteral("models.list.result")}, {QStringLiteral("categories"), categories}});
 }
 
-void KiraService::installModel(QWebSocket *socket, const QJsonObject &message)
+void KiraServiceDaemon::installModel(QWebSocket *socket, const QJsonObject &message)
 {
     const QString installId = message.value(QStringLiteral("installId")).toString();
     const std::optional<ModelCategory> category = ModelCatalog::categoryFromName(message.value(QStringLiteral("category")).toString());
@@ -287,7 +287,7 @@ void KiraService::installModel(QWebSocket *socket, const QJsonObject &message)
     send(socket, {{QStringLiteral("type"), QStringLiteral("models.install.accepted")}, {QStringLiteral("installId"), installId}});
 }
 
-void KiraService::deleteModel(QWebSocket *socket, const QJsonObject &message)
+void KiraServiceDaemon::deleteModel(QWebSocket *socket, const QJsonObject &message)
 {
     const QString id = message.value(QStringLiteral("id")).toString();
     const std::optional<ModelInfo> model = m_models->modelById(id);
@@ -310,7 +310,7 @@ void KiraService::deleteModel(QWebSocket *socket, const QJsonObject &message)
     send(socket, {{QStringLiteral("type"), QStringLiteral("models.delete.completed")}, {QStringLiteral("id"), id}});
 }
 
-bool KiraService::modelInUse(const QString &path) const
+bool KiraServiceDaemon::modelInUse(const QString &path) const
 {
     if (m_activeJob && m_activeJob->modelPath == path) return true;
     for (const auto &job : m_queue) {
@@ -322,7 +322,7 @@ bool KiraService::modelInUse(const QString &path) const
     return false;
 }
 
-void KiraService::processBinaryMessage(QWebSocket *socket, const QByteArray &data)
+void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArray &data)
 {
     const auto submission = m_pendingUploads.take(socket);
     if (!submission) { sendError(socket, QStringLiteral("unexpected-binary"), tr("No image upload was requested")); return; }
@@ -341,7 +341,7 @@ void KiraService::processBinaryMessage(QWebSocket *socket, const QByteArray &dat
     enqueue(job);
 }
 
-void KiraService::enqueue(std::shared_ptr<Job> job)
+void KiraServiceDaemon::enqueue(std::shared_ptr<Job> job)
 {
     m_queue.enqueue(job);
     send(job->client, {{QStringLiteral("type"), QStringLiteral("queued")}, {QStringLiteral("jobId"), job->id}});
@@ -349,7 +349,7 @@ void KiraService::enqueue(std::shared_ptr<Job> job)
     startNextJob();
 }
 
-void KiraService::startNextJob()
+void KiraServiceDaemon::startNextJob()
 {
     if (m_activeJob || m_queue.isEmpty() || !m_runner) return;
     m_activeJob = m_queue.dequeue();
@@ -374,7 +374,7 @@ void KiraService::startNextJob()
     broadcastQueuePositions();
 }
 
-void KiraService::handleGenerationFinished(const SdCliGenerationResult &result)
+void KiraServiceDaemon::handleGenerationFinished(const SdCliGenerationResult &result)
 {
     if (!m_activeJob) return;
     const auto job = m_activeJob;
@@ -383,7 +383,7 @@ void KiraService::handleGenerationFinished(const SdCliGenerationResult &result)
     m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
 }
 
-void KiraService::handleUpscaleFinished(const SdCliUpscaleResult &result)
+void KiraServiceDaemon::handleUpscaleFinished(const SdCliUpscaleResult &result)
 {
     if (!m_activeJob) return;
     const auto job = m_activeJob;
@@ -392,7 +392,7 @@ void KiraService::handleUpscaleFinished(const SdCliUpscaleResult &result)
     m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
 }
 
-void KiraService::cancelJobsFor(QWebSocket *socket)
+void KiraServiceDaemon::cancelJobsFor(QWebSocket *socket)
 {
     QQueue<std::shared_ptr<Job>> kept;
     while (!m_queue.isEmpty()) { const auto job = m_queue.dequeue(); if (job->client != socket) kept.enqueue(job); }
@@ -401,12 +401,12 @@ void KiraService::cancelJobsFor(QWebSocket *socket)
     broadcastQueuePositions();
 }
 
-void KiraService::broadcastQueuePositions()
+void KiraServiceDaemon::broadcastQueuePositions()
 {
     for (int i = 0; i < m_queue.size(); ++i) send(m_queue.at(i)->client, {{QStringLiteral("type"), QStringLiteral("queue-position")}, {QStringLiteral("jobId"), m_queue.at(i)->id}, {QStringLiteral("position"), i + 1}});
 }
 
-void KiraService::sendCapabilities(QWebSocket *socket) const
+void KiraServiceDaemon::sendCapabilities(QWebSocket *socket) const
 {
     const QString state = isReady() ? QStringLiteral("ready") : QStringLiteral("unavailable");
     QJsonArray operations;
@@ -417,19 +417,19 @@ void KiraService::sendCapabilities(QWebSocket *socket) const
     send(socket, {{QStringLiteral("type"), QStringLiteral("capabilities")}, {QStringLiteral("state"), state}, {QStringLiteral("operations"), operations}});
 }
 
-void KiraService::send(QWebSocket *socket, QJsonObject object) const
+void KiraServiceDaemon::send(QWebSocket *socket, QJsonObject object) const
 {
     if (socket) socket->sendTextMessage(QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact)));
 }
 
-void KiraService::sendError(QWebSocket *socket, const QString &code, const QString &message, const QString &jobId) const
+void KiraServiceDaemon::sendError(QWebSocket *socket, const QString &code, const QString &message, const QString &jobId) const
 {
     QJsonObject event{{QStringLiteral("type"), QStringLiteral("error")}, {QStringLiteral("code"), code}, {QStringLiteral("message"), message}};
     if (!jobId.isEmpty()) event.insert(QStringLiteral("jobId"), jobId);
     send(socket, event);
 }
 
-std::shared_ptr<KiraService::Job> KiraService::jobForId(const QString &id) const
+std::shared_ptr<KiraServiceDaemon::Job> KiraServiceDaemon::jobForId(const QString &id) const
 {
     if (m_activeJob && m_activeJob->id == id) return m_activeJob;
     for (const auto &job : m_queue) if (job->id == id) return job;

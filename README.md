@@ -22,8 +22,15 @@ installation, including configuration, service-account setup, model storage,
 and the user-local manager installation.
 
 Sources are organized under `src/daemon/`, `src/manager/`, and
-`src/protocol/`. The executable targets remain declared by
+`src/sdk/`. The executable targets remain declared by
 `src/CMakeLists.txt`, so built binaries continue to appear under `build/src/`.
+
+The reusable image client is exported as `KiraService::SDK`; the namespaced
+wire implementation is `KiraService::Protocol`. Install the static SDK and
+headers with `cmake --install build --prefix "$HOME/.local"`, then consume it
+with `find_package(KiraServiceSdk CONFIG REQUIRED)`. The SDK supports image
+generation, fixed 2× upscaling, model discovery, progress, and binary results.
+LLM model metadata is discoverable, but LLM submission is future work.
 
 `kira-service` is the daemon. `kira-service-manager` is a native Qt administrator app installed into the invoking user's `~/.local/bin`. Start its GUI with `kira-service-manager --gui`; it automatically connects to the local service at `127.0.0.1:9384` and retries while the service is unavailable.
 

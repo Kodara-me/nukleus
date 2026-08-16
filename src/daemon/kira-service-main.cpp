@@ -1,5 +1,5 @@
 #include "KiraService.h"
-#include "ServiceProtocol.h"
+#include <kira/service/ServiceProtocol.h>
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -15,7 +15,7 @@ int main(int argc, char *argv[])
     parser.setApplicationDescription(QStringLiteral("Kira Canvas image service"));
     parser.addHelpOption();
     parser.addOption({QStringLiteral("listen"), QStringLiteral("Optional LAN IPv4 address; 127.0.0.1 is always also bound (default: 127.0.0.1)."), QStringLiteral("address"), QStringLiteral("127.0.0.1")});
-    parser.addOption({QStringLiteral("port"), QStringLiteral("WebSocket port."), QStringLiteral("port"), QString::number(ServiceProtocol::DefaultPort)});
+    parser.addOption({QStringLiteral("port"), QStringLiteral("WebSocket port."), QStringLiteral("port"), QString::number(KiraService::Protocol::DefaultPort)});
     parser.addOption({QStringLiteral("token-file"), QStringLiteral("File containing the shared LAN token."), QStringLiteral("path")});
     parser.process(application);
     KiraServiceConfiguration config;
@@ -24,7 +24,7 @@ int main(int argc, char *argv[])
     config.port = static_cast<quint16>(port);
     const QString tokenPath = parser.value(QStringLiteral("token-file"));
     if (!tokenPath.isEmpty()) { QFile tokenFile(tokenPath); if (!tokenFile.open(QIODevice::ReadOnly | QIODevice::Text)) { QTextStream(stderr) << "Could not read token file\n"; return 2; } config.token = QString::fromUtf8(tokenFile.readAll()).trimmed(); }
-    KiraService service(config); QString error;
+    KiraServiceDaemon service(config); QString error;
     if (!service.start(&error)) { QTextStream(stderr) << error << '\n'; return 1; }
     QTextStream output(stdout);
     output << "Kira Service listening on 127.0.0.1:" << config.port;
