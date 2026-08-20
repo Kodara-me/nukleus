@@ -39,6 +39,27 @@ QStringList extensionsFor(ModelCategory category)
     }
     return {};
 }
+
+bool isHuggingFaceHost(const QString &host)
+{
+    return host.compare(QStringLiteral("huggingface.co"), Qt::CaseInsensitive) == 0
+           || host.compare(QStringLiteral("www.huggingface.co"), Qt::CaseInsensitive) == 0;
+}
+
+QUrl normalizedModelUrl(const QUrl &url)
+{
+    if (!isHuggingFaceHost(url.host())) return url;
+
+    const QStringList path = url.path(QUrl::FullyDecoded).split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    if (path.size() >= 5 && path.at(2) == QStringLiteral("blob")) {
+        QUrl normalized = url;
+        QStringList normalizedPath = path;
+        normalizedPath[2] = QStringLiteral("resolve");
+        normalized.setPath(QLatin1Char('/') + normalizedPath.join(QLatin1Char('/')));
+        return normalized;
+    }
+    return url;
+}
 }
 
 struct ModelCatalog::InstallJob
@@ -149,11 +170,12 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
         if (errorMessage) *errorMessage = tr("An installation ID is required");
         return false;
     }
-    if (!acceptsUrl(request.url)) {
-        if (errorMessage) *errorMessage = tr("Model URLs must be direct HTTPS Hugging Face resolve URLs");
+    const QUrl downloadUrl = normalizedModelUrl(request.url);
+    if (!acceptsUrl(downloadUrl)) {
+        if (errorMessage) *errorMessage = tr("Model URLs must be HTTPS URLs to supported model files");
         return false;
     }
-    const QString fileName = fileNameForUrl(request.url);
+    const QString fileName = fileNameForUrl(downloadUrl);
     if (!acceptsFileName(request.category, fileName)) {
         if (errorMessage) *errorMessage = tr("The URL filename is not supported for this model category");
         return false;
@@ -181,6 +203,7 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
     }
     auto job = std::make_unique<InstallJob>();
     job->request = request;
+    job->request.url = downloadUrl;
     job->fileName = fileName;
     job->finalPath = finalPath;
     job->partPath = finalPath + QStringLiteral(".part");
@@ -244,23 +267,20 @@ bool ModelCatalog::ensureDirectory(ModelCategory category, QString *errorMessage
 
 bool ModelCatalog::acceptsUrl(const QUrl &url) const
 {
-    if (!url.isValid() || url.userInfo().size() > 0) return false;
+    if (!url.isValid() || url.userInfo().size() > 0 || url.host().isEmpty() || url.hasFragment()) return false;
     const bool allowedScheme = url.scheme() == QStringLiteral("https")
                                || (m_allowInsecureTestUrls && url.scheme() == QStringLiteral("http"));
-    const bool allowedHost = url.host().compare(QStringLiteral("huggingface.co"), Qt::CaseInsensitive) == 0
+    const bool allowedHost = url.scheme() == QStringLiteral("https")
                              || (m_allowInsecureTestUrls && url.host() == QStringLiteral("127.0.0.1"));
     const QStringList path = url.path(QUrl::FullyDecoded).split(QLatin1Char('/'), Qt::SkipEmptyParts);
-    return allowedScheme && allowedHost && path.size() >= 5 && path.at(2) == QStringLiteral("resolve")
-           && !path.at(0).isEmpty() && !path.at(1).isEmpty() && !path.at(3).isEmpty() && isSafeFileName(path.constLast());
+    return allowedScheme && allowedHost && !path.isEmpty() && isSafeFileName(path.constLast());
 }
 
 bool ModelCatalog::acceptsRedirectUrl(const QUrl &url) const
 {
     if (!url.isValid() || !url.userInfo().isEmpty()) return false;
     if (m_allowInsecureTestUrls && url.scheme() == QStringLiteral("http") && url.host() == QStringLiteral("127.0.0.1")) return true;
-    const QString host = url.host().toLower();
-    return url.scheme() == QStringLiteral("https")
-           && (host == QStringLiteral("cdn-lfs.huggingface.co") || host.endsWith(QStringLiteral(".hf.co")));
+    return url.scheme() == QStringLiteral("https") && !url.host().isEmpty() && !url.hasFragment();
 }
 
 bool ModelCatalog::acceptsFileName(ModelCategory category, const QString &fileName) const

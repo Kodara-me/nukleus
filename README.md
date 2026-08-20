@@ -1,6 +1,6 @@
 # Kira Service
 
-Kira Service is the standalone backend for Kira applications. It owns installed models, Hugging Face downloads, the `sd-cli` execution queue, and the versioned WebSocket API. Client applications select opaque installed-model IDs and submit jobs; they do not manage service files.
+Kira Service is the standalone backend for Kira applications. It owns installed models, HTTPS model downloads, the `sd-cli` execution queue, and the versioned WebSocket API. Client applications select opaque installed-model IDs and submit jobs; they do not manage service files.
 
 ## Build
 
@@ -46,7 +46,7 @@ Use `--help` for all options. CLI and GUI manager connections are local-only and
 
 ## Models
 
-Service models live in `$XDG_DATA_HOME/kira-service/models/`: image-generation files in `models/`, upscalers in `models/upscale/`, and LLM chat files in `models/llm/`. The manager installs direct HTTPS Hugging Face `resolve` URLs, optionally verifies SHA-256, and never overwrites an existing filename.
+Service models live in `$XDG_DATA_HOME/kira-service/models/`: image-generation files in `models/`, upscalers in `models/upscale/`, and LLM chat files in `models/llm/`. The manager installs HTTPS model-file URLs from Hugging Face or other hosts, optionally verifies SHA-256, and never overwrites an existing filename. Hugging Face `blob` links are normalized to their downloadable `resolve` URLs.
 
 The Linux installer moves legacy models from `$XDG_DATA_HOME/kira-canvas/models/` during an upgrade. It aborts without changing either directory if both model roots already exist.
 

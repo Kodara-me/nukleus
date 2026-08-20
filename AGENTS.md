@@ -1,7 +1,7 @@
 # Kira Service Development Contract
 
 - Kira Service is a C++20 Qt 6 backend project. Keep the daemon and native manager separate executables, and keep reusable image transport code in the installable SDK under `src/sdk/`.
-- The daemon owns model storage, Hugging Face downloads, temporary jobs, and one FIFO `sd-cli` worker. It never exposes service paths over WebSocket.
+- The daemon owns model storage, HTTPS model downloads, temporary jobs, and one FIFO `sd-cli` worker. It never exposes service paths over WebSocket.
 - The manager is local-only: it connects to `127.0.0.1:9384`, supports GUI and `list`/`add`/`delete` CLI modes, and is installed into the invoking user's `~/.local/bin`.
 - Sources are organized under `src/daemon/`, `src/manager/`, and `src/sdk/`; the daemon and manager executable targets remain declared by `src/CMakeLists.txt`. Export `KiraService::Protocol` and `KiraService::SDK` from the SDK.
 - The daemon always listens on `127.0.0.1`; a configured LAN IPv4 address adds a second listener on the same port. Loopback authentication is tokenless; LAN authentication remains token-protected.

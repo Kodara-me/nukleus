@@ -43,11 +43,10 @@ QString installStateText(const ManagedInstall &install)
     return QObject::tr("Failed");
 }
 
-bool directHuggingFaceUrl(const QUrl &url)
+bool validModelUrl(const QUrl &url)
 {
-    const QStringList path = url.path(QUrl::FullyDecoded).split(QLatin1Char('/'), Qt::SkipEmptyParts);
-    return url.isValid() && url.scheme() == QStringLiteral("https") && url.host().compare(QStringLiteral("huggingface.co"), Qt::CaseInsensitive) == 0
-           && path.size() >= 5 && path.at(2) == QStringLiteral("resolve");
+    return url.isValid() && url.scheme() == QStringLiteral("https") && !url.host().isEmpty()
+           && url.userInfo().isEmpty() && !url.hasFragment() && !url.fileName().isEmpty();
 }
 }
 
@@ -59,7 +58,7 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent)
     auto *central = new QWidget(this); setCentralWidget(central); auto *layout = new QVBoxLayout(central);
     auto *connection = new QGroupBox(tr("Local Kira Service"), central); auto *connectionLayout = new QVBoxLayout(connection);
     m_status = new QLabel(tr("Connecting to the local Kira Service…"), connection); m_status->setWordWrap(true); connectionLayout->addWidget(m_status); layout->addWidget(connection);
-    auto *description = new QLabel(tr("Install direct Hugging Face resolve file URLs. Files remain on this service host."), central); description->setWordWrap(true); layout->addWidget(description);
+    auto *description = new QLabel(tr("Install HTTPS model file URLs from Hugging Face or another host. Files remain on this service host."), central); description->setWordWrap(true); layout->addWidget(description);
     auto *modelsGroup = new QGroupBox(tr("Installed models"), central); auto *modelsLayout = new QFormLayout(modelsGroup);
     m_generationModels = new QListWidget(modelsGroup); m_upscaleModels = new QListWidget(modelsGroup); m_llmChatModels = new QListWidget(modelsGroup);
     for (QListWidget *list : {m_generationModels, m_upscaleModels, m_llmChatModels}) { list->setMaximumHeight(90); list->setSelectionMode(QAbstractItemView::SingleSelection); }
@@ -67,7 +66,7 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent)
     m_deleteButton = new QPushButton(tr("Delete selected model"), modelsGroup); m_deleteButton->setEnabled(false); modelsLayout->addRow(m_deleteButton);
     auto *installGroup = new QGroupBox(tr("Install model"), central); auto *installLayout = new QFormLayout(installGroup);
     m_category = new QComboBox(installGroup); m_category->addItem(tr("Image-generation"), QStringLiteral("image-generation")); m_category->addItem(tr("Upscaler"), QStringLiteral("upscaler")); m_category->addItem(tr("LLM-chat"), QStringLiteral("llm-chat"));
-    m_url = new QLineEdit(installGroup); m_url->setPlaceholderText(QStringLiteral("https://huggingface.co/owner/repo/resolve/main/model.safetensors"));
+    m_url = new QLineEdit(installGroup); m_url->setPlaceholderText(QStringLiteral("https://example.com/models/model.gguf"));
     m_sha256 = new QLineEdit(installGroup); m_sha256->setPlaceholderText(tr("Optional 64-character SHA-256"));
     m_installButton = new QPushButton(tr("Install"), installGroup);
     installLayout->addRow(tr("Category"), m_category); installLayout->addRow(tr("File URL"), m_url); installLayout->addRow(tr("SHA-256"), m_sha256); installLayout->addRow(m_installButton); layout->addWidget(installGroup);
@@ -108,7 +107,7 @@ void ManageModelsWindow::updateInstallButton()
     const QString category = m_category->currentData().toString();
     const QList<ManagedInstall> installs = m_client->installs();
     const bool duplicate = std::any_of(installs.cbegin(), installs.cend(), [&category, &url](const ManagedInstall &install) { return install.category == category && install.url == url && install.state != ManagedInstallState::Completed && install.state != ManagedInstallState::Failed; });
-    m_installButton->setEnabled(m_client->isAuthenticated() && directHuggingFaceUrl(url) && checksumValid && !duplicate);
+    m_installButton->setEnabled(m_client->isAuthenticated() && validModelUrl(url) && checksumValid && !duplicate);
 }
 
 void ManageModelsWindow::startInstall()

@@ -57,6 +57,7 @@ private slots:
     void listsSupportedModelsWithoutPathLeak();
     void removesModelByOpaqueId();
     void installsModelAtomically();
+    void acceptsExternalModelUrls();
     void rejectsInvalidModelInstall();
     void migratesLegacyModelRoot();
     void rejectsConflictingModelRoots();
@@ -155,6 +156,17 @@ void ServiceTest::installsModelAtomically()
     QTRY_COMPARE(finished.count(), 1);
     const QString finalPath = directory.filePath(QStringLiteral("upscale/model.gguf"));
     QVERIFY(QFileInfo::exists(finalPath)); QVERIFY(!QFileInfo::exists(finalPath + QStringLiteral(".part")));
+}
+
+void ServiceTest::acceptsExternalModelUrls()
+{
+    QTemporaryDir directory; QVERIFY(directory.isValid()); ModelCatalog catalog(directory.path(), true);
+    QString error;
+    const ModelInstallRequest request{QStringLiteral("external-1"), ModelCategory::LlmChat,
+                                      QUrl(QStringLiteral("https://models.example.test/releases/chat-model.gguf")), {}};
+    QVERIFY(catalog.install(request, &error));
+    QVERIFY(error.isEmpty());
+    catalog.cancel(request.installId);
 }
 
 void ServiceTest::removesModelByOpaqueId()
