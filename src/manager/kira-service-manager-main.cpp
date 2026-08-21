@@ -52,6 +52,11 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
         QTextStream(stderr) << "add requires --category <category>.\n";
         return 2;
     }
+    if (command == QStringLiteral("add") && parser.isSet(QStringLiteral("companion-lora"))
+        && parser.value(QStringLiteral("category")) != QStringLiteral("ip-adapter")) {
+        QTextStream(stderr) << "--companion-lora requires --category ip-adapter.\n";
+        return 2;
+    }
     if (command == QStringLiteral("delete") && positional.size() != 2) {
         QTextStream(stderr) << "delete requires <id>.\n";
         return 2;
@@ -97,26 +102,29 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
                 QString category;
                 QString id;
                 QString fileName;
+                QString companion;
                 QString size;
             };
             QList<ModelRow> rows;
-            for (const QString &category : {QStringLiteral("image-generation"), QStringLiteral("upscaler"), QStringLiteral("llm-chat")}) {
+            for (const QString &category : {QStringLiteral("image-generation"), QStringLiteral("upscaler"), QStringLiteral("llm-chat"), QStringLiteral("ip-adapter")}) {
                 const QList<ManagedModelInfo> models = client.models(category);
                 if (models.isEmpty()) {
-                    rows.append({category, QStringLiteral("(none)"), QStringLiteral("-"), QStringLiteral("-")});
+                    rows.append({category, QStringLiteral("(none)"), QStringLiteral("-"), QStringLiteral("-"), QStringLiteral("-")});
                     continue;
                 }
-                for (const ManagedModelInfo &model : models) rows.append({category, model.id, model.fileName, sizeText(model.fileSize)});
+                for (const ManagedModelInfo &model : models) rows.append({category, model.id, model.fileName, model.companionFileName.isEmpty() ? QStringLiteral("-") : model.companionFileName, sizeText(model.fileSize)});
             }
 
             int categoryWidth = QStringLiteral("Category").size();
             int idWidth = QStringLiteral("ID").size();
             int fileNameWidth = QStringLiteral("Filename").size();
+            int companionWidth = QStringLiteral("Companion").size();
             int sizeWidth = QStringLiteral("Size").size();
             for (const ModelRow &row : rows) {
                 categoryWidth = qMax(categoryWidth, row.category.size());
                 idWidth = qMax(idWidth, row.id.size());
                 fileNameWidth = qMax(fileNameWidth, row.fileName.size());
+                companionWidth = qMax(companionWidth, row.companion.size());
                 sizeWidth = qMax(sizeWidth, row.size.size());
             }
 
@@ -124,15 +132,18 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
             output << QStringLiteral("Category").leftJustified(categoryWidth) << "  "
                    << QStringLiteral("ID").leftJustified(idWidth) << "  "
                    << QStringLiteral("Filename").leftJustified(fileNameWidth) << "  "
+                   << QStringLiteral("Companion").leftJustified(companionWidth) << "  "
                    << QStringLiteral("Size").rightJustified(sizeWidth) << '\n';
             output << QString(categoryWidth, '-') << "  "
                    << QString(idWidth, '-') << "  "
                    << QString(fileNameWidth, '-') << "  "
+                   << QString(companionWidth, '-') << "  "
                    << QString(sizeWidth, '-') << '\n';
             for (const ModelRow &row : rows) {
                 output << row.category.leftJustified(categoryWidth) << "  "
                        << row.id.leftJustified(idWidth) << "  "
                        << row.fileName.leftJustified(fileNameWidth) << "  "
+                       << row.companion.leftJustified(companionWidth) << "  "
                        << row.size.rightJustified(sizeWidth) << '\n';
             }
             finish(0);
@@ -141,7 +152,7 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
         QString installId;
         QObject::connect(&client, &ManagerServiceClient::serviceStateChanged, &loop, [&](const QString &state, const QString &) {
             if (state != QStringLiteral("connected") || !installId.isEmpty()) return;
-            installId = client.installModel(parser.value(QStringLiteral("category")), QUrl(argument), parser.value(QStringLiteral("sha256")));
+            installId = client.installModel(parser.value(QStringLiteral("category")), QUrl(argument), parser.value(QStringLiteral("sha256")), QUrl(parser.value(QStringLiteral("companion-lora"))));
             if (installId.isEmpty()) finish(1, QStringLiteral("Could not start model installation."));
         });
         QObject::connect(&client, &ManagerServiceClient::installsChanged, &loop, [&] {
@@ -184,13 +195,14 @@ int main(int argc, char *argv[])
     parser.addOption({QStringLiteral("gui"), QStringLiteral("Start the graphical manager.")});
     parser.addOption({QStringLiteral("category"), QStringLiteral("Model category for add."), QStringLiteral("category")});
     parser.addOption({QStringLiteral("sha256"), QStringLiteral("Optional SHA-256 checksum for add."), QStringLiteral("checksum")});
+    parser.addOption({QStringLiteral("companion-lora"), QStringLiteral("Optional companion LoRA URL for an IP-Adapter add."), QStringLiteral("url")});
     parser.addOption({QStringLiteral("yes"), QStringLiteral("Confirm deletion without prompting.")});
     parser.addPositionalArgument(QStringLiteral("command"), QStringLiteral("list, add, or delete."));
     parser.addPositionalArgument(QStringLiteral("argument"), QStringLiteral("URL for add or opaque ID for delete."), QStringLiteral("[url-or-id]"));
     parser.process(*application);
 
     if (guiRequested) {
-        if (!parser.positionalArguments().isEmpty() || parser.isSet(QStringLiteral("category")) || parser.isSet(QStringLiteral("sha256")) || parser.isSet(QStringLiteral("yes"))) {
+        if (!parser.positionalArguments().isEmpty() || parser.isSet(QStringLiteral("category")) || parser.isSet(QStringLiteral("sha256")) || parser.isSet(QStringLiteral("companion-lora")) || parser.isSet(QStringLiteral("yes"))) {
             QTextStream(stderr) << "--gui cannot be combined with a CLI command.\n";
             return 2;
         }

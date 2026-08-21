@@ -25,7 +25,7 @@ public:
                 if (type == QStringLiteral("authenticate")) {
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"authenticated\"}"));
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\",\"image.upscale\"]}"));
-                    socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list.result\",\"categories\":[{\"category\":\"image-generation\",\"models\":[{\"id\":\"image-generation:test.safetensors\",\"name\":\"Test\",\"fileName\":\"test.safetensors\",\"bytes\":1}]},{\"category\":\"upscaler\",\"models\":[{\"id\":\"upscaler:test.gguf\",\"name\":\"Test 2x\",\"fileName\":\"test.gguf\",\"bytes\":2}]},{\"category\":\"llm-chat\",\"models\":[{\"id\":\"llm-chat:test.gguf\",\"name\":\"Test LLM\",\"fileName\":\"llm.gguf\",\"bytes\":3}]}]}"));
+                    socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list.result\",\"categories\":[{\"category\":\"image-generation\",\"models\":[{\"id\":\"image-generation:test.safetensors\",\"name\":\"Test\",\"fileName\":\"test.safetensors\",\"bytes\":1}]},{\"category\":\"upscaler\",\"models\":[{\"id\":\"upscaler:test.gguf\",\"name\":\"Test 2x\",\"fileName\":\"test.gguf\",\"bytes\":2}]},{\"category\":\"llm-chat\",\"models\":[{\"id\":\"llm-chat:test.gguf\",\"name\":\"Test LLM\",\"fileName\":\"llm.gguf\",\"bytes\":3}]},{\"category\":\"ip-adapter\",\"models\":[{\"id\":\"ip-adapter:test.bin\",\"name\":\"Test Adapter\",\"fileName\":\"test.bin\",\"bytes\":4,\"companionFileName\":\"companions/test.bin/test-lora.safetensors\"}]}]}"));
                 } else if (type == QStringLiteral("submit")) {
                     const QString jobId = message.value(QStringLiteral("jobId")).toString();
                     if (message.value(QStringLiteral("options")).toObject().value(QStringLiteral("hasInput")).toBool()) {
@@ -91,6 +91,9 @@ void ServiceSdkTest::authenticatesAndDiscoversModels()
     QCOMPARE(client.models(KiraService::ModelCategory::ImageGeneration).size(), 1);
     QCOMPARE(client.models(KiraService::ModelCategory::Upscaler).size(), 1);
     QCOMPARE(client.models(KiraService::ModelCategory::LlmChat).size(), 1);
+    const QList<KiraService::ModelInfo> ipAdapters = client.models(KiraService::ModelCategory::IpAdapter);
+    QCOMPARE(ipAdapters.size(), 1);
+    QCOMPARE(ipAdapters.first().companionFileName, QStringLiteral("companions/test.bin/test-lora.safetensors"));
 }
 
 void ServiceSdkTest::submitsBinaryInputAndReturnsBinaryOutput()

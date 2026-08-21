@@ -6,11 +6,14 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPointer>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QTimer>
 
 #include <algorithm>
@@ -33,6 +36,8 @@ QStringList extensionsFor(ModelCategory category)
     switch (category) {
     case ModelCategory::ImageGeneration:
         return {QStringLiteral("safetensors"), QStringLiteral("ckpt"), QStringLiteral("gguf")};
+    case ModelCategory::IpAdapter:
+        return {QStringLiteral("bin"), QStringLiteral("safetensors"), QStringLiteral("ckpt"), QStringLiteral("gguf")};
     case ModelCategory::Upscaler:
     case ModelCategory::LlmChat:
         return {QStringLiteral("gguf")};
@@ -68,6 +73,10 @@ struct ModelCatalog::InstallJob
     QString fileName;
     QString finalPath;
     QString partPath;
+    QString companionFileName;
+    QString companionFinalPath;
+    QString companionPartPath;
+    bool downloadingCompanion = false;
     std::unique_ptr<QFile> partFile;
     std::unique_ptr<QFile> verificationFile;
     QPointer<QNetworkReply> reply;
@@ -95,7 +104,7 @@ ModelCatalog::~ModelCatalog() = default;
 
 QList<ModelCategory> ModelCatalog::categories()
 {
-    return {ModelCategory::ImageGeneration, ModelCategory::Upscaler, ModelCategory::LlmChat};
+    return {ModelCategory::ImageGeneration, ModelCategory::Upscaler, ModelCategory::LlmChat, ModelCategory::IpAdapter};
 }
 
 QString ModelCatalog::categoryName(ModelCategory category)
@@ -104,6 +113,7 @@ QString ModelCatalog::categoryName(ModelCategory category)
     case ModelCategory::ImageGeneration: return QStringLiteral("image-generation");
     case ModelCategory::Upscaler: return QStringLiteral("upscaler");
     case ModelCategory::LlmChat: return QStringLiteral("llm-chat");
+    case ModelCategory::IpAdapter: return QStringLiteral("ip-adapter");
     }
     return {};
 }
@@ -120,11 +130,14 @@ QList<ModelInfo> ModelCatalog::models(ModelCategory category) const
 {
     QList<ModelInfo> models;
     QDir directory(directoryPath(category));
+    const QHash<QString, QString> metadata = category == ModelCategory::IpAdapter ? companionMetadata() : QHash<QString, QString>();
     for (const QFileInfo &fileInfo : directory.entryInfoList(QDir::Files | QDir::Readable, QDir::Name)) {
         if (!acceptsFileName(category, fileInfo.fileName())) continue;
         const QString fileName = fileInfo.fileName();
+        const QString companionFileName = metadata.value(fileName);
+        if (!companionFileName.isEmpty() && !QFileInfo(companionPath(fileName, companionFileName)).isFile()) continue;
         models.append({categoryName(category) + QLatin1Char(':') + fileName,
-                       fileInfo.completeBaseName(), fileName, fileInfo.size(), fileInfo.absoluteFilePath()});
+                       fileInfo.completeBaseName(), fileName, fileInfo.size(), fileInfo.absoluteFilePath(), companionFileName});
     }
     std::sort(models.begin(), models.end(), [](const ModelInfo &left, const ModelInfo &right) {
         return QString::compare(left.fileName, right.fileName, Qt::CaseInsensitive) < 0;
@@ -161,6 +174,15 @@ bool ModelCatalog::remove(const QString &id, QString *errorMessage)
         if (errorMessage) *errorMessage = tr("Could not remove the model");
         return false;
     }
+    if (!modelInfo->companionFileName.isEmpty()) {
+        QFile::remove(companionPath(QFileInfo(modelInfo->fileName).fileName(), modelInfo->companionFileName));
+        QHash<QString, QString> metadata = companionMetadata();
+        metadata.remove(modelInfo->fileName);
+        if (!writeCompanionMetadata(metadata)) {
+            if (errorMessage) *errorMessage = tr("Could not update IP-Adapter metadata");
+            return false;
+        }
+    }
     return true;
 }
 
@@ -180,12 +202,36 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
         if (errorMessage) *errorMessage = tr("The URL filename is not supported for this model category");
         return false;
     }
+    std::optional<QUrl> companionUrl;
+    QString companionFileName;
+    QString companionRelativePath;
+    if (request.companionUrl.has_value()) {
+        if (request.category != ModelCategory::IpAdapter) {
+            if (errorMessage) *errorMessage = tr("A companion LoRA is only supported for IP-Adapter models");
+            return false;
+        }
+        const QUrl normalizedCompanionUrl = normalizedModelUrl(*request.companionUrl);
+        if (!acceptsUrl(normalizedCompanionUrl)) {
+            if (errorMessage) *errorMessage = tr("The companion LoRA URL must be an HTTPS URL to a supported model file");
+            return false;
+        }
+        companionFileName = fileNameForUrl(normalizedCompanionUrl);
+        if (!isSafeFileName(companionFileName)
+            || !QStringList{QStringLiteral("safetensors"), QStringLiteral("ckpt"), QStringLiteral("gguf")}
+                    .contains(QFileInfo(companionFileName).suffix(), Qt::CaseInsensitive)) {
+            if (errorMessage) *errorMessage = tr("The companion LoRA filename is not supported");
+            return false;
+        }
+        companionUrl = normalizedCompanionUrl;
+        companionRelativePath = QStringLiteral("companions/%1/%2").arg(fileName, companionFileName);
+    }
     if (request.expectedSha256.has_value()
         && !QRegularExpression(QStringLiteral("^[0-9a-fA-F]{64}$")).match(*request.expectedSha256).hasMatch()) {
         if (errorMessage) *errorMessage = tr("The SHA-256 checksum must contain 64 hexadecimal characters");
         return false;
     }
     const QString finalPath = QDir(directoryPath(request.category)).filePath(fileName);
+    const QString companionFinalPath = companionRelativePath.isEmpty() ? QString() : companionPath(fileName, companionRelativePath);
     for (const auto &pending : m_pendingInstalls) {
         if (pending->request.installId == request.installId || pending->finalPath == finalPath) {
             if (errorMessage) *errorMessage = tr("A matching model installation is already queued");
@@ -201,12 +247,20 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
         if (errorMessage) *errorMessage = tr("A model with this filename is already installed");
         return false;
     }
+    if (!companionFinalPath.isEmpty() && QFileInfo::exists(companionFinalPath)) {
+        if (errorMessage) *errorMessage = tr("The companion LoRA is already installed for this model");
+        return false;
+    }
     auto job = std::make_unique<InstallJob>();
     job->request = request;
     job->request.url = downloadUrl;
+    job->request.companionUrl = companionUrl;
     job->fileName = fileName;
     job->finalPath = finalPath;
     job->partPath = finalPath + QStringLiteral(".part");
+    job->companionFileName = companionRelativePath;
+    job->companionFinalPath = companionFinalPath;
+    job->companionPartPath = companionFinalPath.isEmpty() ? QString() : companionFinalPath + QStringLiteral(".part");
     m_pendingInstalls.push_back(std::move(job));
     QTimer::singleShot(0, this, [this, installId = request.installId] {
         if (m_activeInstall && m_activeInstall->request.installId == installId) {
@@ -243,6 +297,46 @@ QString ModelCatalog::rootPath() const
     return m_rootPathOverride.has_value() ? *m_rootPathOverride : ServicePaths::modelsPath();
 }
 
+QString ModelCatalog::companionMetadataPath() const
+{
+    return QDir(directoryPath(ModelCategory::IpAdapter)).filePath(QStringLiteral("metadata.json"));
+}
+
+QString ModelCatalog::companionPath(const QString &primaryFileName, const QString &companionFileName) const
+{
+    if (primaryFileName.isEmpty() || !companionFileName.startsWith(QStringLiteral("companions/"))
+        || companionFileName.contains(QStringLiteral(".."))) return {};
+    Q_UNUSED(primaryFileName)
+    return QDir(directoryPath(ModelCategory::IpAdapter)).filePath(companionFileName);
+}
+
+QHash<QString, QString> ModelCatalog::companionMetadata() const
+{
+    QHash<QString, QString> metadata;
+    QFile file(companionMetadataPath());
+    if (!file.open(QIODevice::ReadOnly)) return metadata;
+    const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
+    if (!document.isObject()) return metadata;
+    const QJsonObject object = document.object();
+    for (auto it = object.constBegin(); it != object.constEnd(); ++it) {
+        if (!it.value().isString() || it.key().isEmpty()) continue;
+        const QString relativePath = it.value().toString();
+        if (!relativePath.startsWith(QStringLiteral("companions/")) || relativePath.contains(QStringLiteral(".."))) continue;
+        metadata.insert(it.key(), relativePath);
+    }
+    return metadata;
+}
+
+bool ModelCatalog::writeCompanionMetadata(const QHash<QString, QString> &metadata) const
+{
+    QSaveFile file(companionMetadataPath());
+    if (!file.open(QIODevice::WriteOnly)) return false;
+    QJsonObject object;
+    for (auto it = metadata.constBegin(); it != metadata.constEnd(); ++it) object.insert(it.key(), it.value());
+    if (file.write(QJsonDocument(object).toJson(QJsonDocument::Compact)) < 0) return false;
+    return file.commit();
+}
+
 QString ModelCatalog::directoryPath(ModelCategory category) const
 {
     const QString root = rootPath();
@@ -251,6 +345,7 @@ QString ModelCatalog::directoryPath(ModelCategory category) const
     case ModelCategory::ImageGeneration: return root;
     case ModelCategory::Upscaler: return QDir(root).filePath(QStringLiteral("upscale"));
     case ModelCategory::LlmChat: return QDir(root).filePath(QStringLiteral("llm"));
+    case ModelCategory::IpAdapter: return QDir(root).filePath(QStringLiteral("ip-adapter"));
     }
     return {};
 }
@@ -303,11 +398,17 @@ void ModelCatalog::startNextInstall()
         failActiveInstall(error);
         return;
     }
+    if (!m_activeInstall->companionFinalPath.isEmpty()
+        && !QDir().mkpath(QFileInfo(m_activeInstall->companionFinalPath).absolutePath())) {
+        failActiveInstall(tr("Could not create companion model storage"));
+        return;
+    }
     if (QFileInfo::exists(m_activeInstall->finalPath)) {
         failActiveInstall(tr("A model with this filename is already installed"));
         return;
     }
     QFile::remove(m_activeInstall->partPath);
+    if (!m_activeInstall->companionPartPath.isEmpty()) QFile::remove(m_activeInstall->companionPartPath);
     m_activeInstall->partFile = std::make_unique<QFile>(m_activeInstall->partPath);
     if (!m_activeInstall->partFile->open(QIODevice::WriteOnly)) {
         failActiveInstall(tr("Could not prepare model storage"));
@@ -343,6 +444,20 @@ void ModelCatalog::startRequest(const QUrl &url)
     emitProgress(ModelInstallState::Downloading);
 }
 
+void ModelCatalog::startCompanionInstall()
+{
+    if (!m_activeInstall || !m_activeInstall->request.companionUrl.has_value()) return;
+    m_activeInstall->downloadingCompanion = true;
+    m_activeInstall->bytesDownloaded = 0;
+    m_activeInstall->totalBytes.reset();
+    m_activeInstall->partFile = std::make_unique<QFile>(m_activeInstall->companionPartPath);
+    if (!m_activeInstall->partFile->open(QIODevice::WriteOnly)) {
+        failActiveInstall(tr("Could not prepare companion model storage"));
+        return;
+    }
+    startRequest(*m_activeInstall->request.companionUrl);
+}
+
 void ModelCatalog::finishNetworkRequest()
 {
     QNetworkReply *reply = m_activeInstall->reply;
@@ -367,6 +482,10 @@ void ModelCatalog::finishNetworkRequest()
     m_activeInstall->reply = nullptr;
     reply->deleteLater();
     m_activeInstall->partFile->close();
+    if (m_activeInstall->downloadingCompanion) {
+        completeInstall();
+        return;
+    }
     startVerification();
 }
 
@@ -415,16 +534,47 @@ void ModelCatalog::verifyNextChunk()
 void ModelCatalog::completeInstall()
 {
     if (!m_activeInstall) return;
-    const QByteArray partPath = QFile::encodeName(m_activeInstall->partPath);
-    const QByteArray finalPath = QFile::encodeName(m_activeInstall->finalPath);
-    if (::link(partPath.constData(), finalPath.constData()) != 0) {
-        failActiveInstall(errno == EEXIST ? tr("A model with this filename is already installed") : tr("Could not install the model"));
+    if (!m_activeInstall->request.companionUrl.has_value() && !m_activeInstall->downloadingCompanion) {
+        const QByteArray partPath = QFile::encodeName(m_activeInstall->partPath);
+        const QByteArray finalPath = QFile::encodeName(m_activeInstall->finalPath);
+        if (::link(partPath.constData(), finalPath.constData()) != 0) {
+            failActiveInstall(errno == EEXIST ? tr("A model with this filename is already installed") : tr("Could not install the model"));
+            return;
+        }
+        QFile::remove(m_activeInstall->partPath);
+    } else if (!m_activeInstall->downloadingCompanion) {
+        startCompanionInstall();
         return;
+    } else {
+        m_activeInstall->partFile->close();
+        const QByteArray companionPartPath = QFile::encodeName(m_activeInstall->companionPartPath);
+        const QByteArray companionFinalPath = QFile::encodeName(m_activeInstall->companionFinalPath);
+        if (::link(companionPartPath.constData(), companionFinalPath.constData()) != 0) {
+            failActiveInstall(errno == EEXIST ? tr("The companion LoRA is already installed") : tr("Could not install the companion LoRA"));
+            return;
+        }
+        const QByteArray partPath = QFile::encodeName(m_activeInstall->partPath);
+        const QByteArray finalPath = QFile::encodeName(m_activeInstall->finalPath);
+        if (::link(partPath.constData(), finalPath.constData()) != 0) {
+            QFile::remove(m_activeInstall->companionFinalPath);
+            failActiveInstall(errno == EEXIST ? tr("A model with this filename is already installed") : tr("Could not install the model"));
+            return;
+        }
+        QHash<QString, QString> metadata = companionMetadata();
+        metadata.insert(m_activeInstall->fileName, m_activeInstall->companionFileName);
+        if (!writeCompanionMetadata(metadata)) {
+            QFile::remove(m_activeInstall->finalPath);
+            QFile::remove(m_activeInstall->companionFinalPath);
+            failActiveInstall(tr("Could not save IP-Adapter metadata"));
+            return;
+        }
+        QFile::remove(m_activeInstall->partPath);
+        QFile::remove(m_activeInstall->companionPartPath);
     }
-    QFile::remove(m_activeInstall->partPath);
     const ModelInfo model{categoryName(m_activeInstall->request.category) + QLatin1Char(':') + m_activeInstall->fileName,
                           QFileInfo(m_activeInstall->fileName).completeBaseName(), m_activeInstall->fileName,
-                          QFileInfo(m_activeInstall->finalPath).size(), m_activeInstall->finalPath};
+                          QFileInfo(m_activeInstall->finalPath).size(), m_activeInstall->finalPath,
+                          m_activeInstall->companionFileName};
     const QString installId = m_activeInstall->request.installId;
     m_activeInstall.reset();
     emit installFinished(installId, model);

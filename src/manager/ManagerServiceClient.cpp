@@ -26,7 +26,7 @@ ManagerServiceClient::ManagerServiceClient(QObject *parent)
     connect(m_socket, &QWebSocket::disconnected, this, [this] {
         m_authenticated = false;
         m_modelListAvailable = false;
-        m_generationModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear();
+        m_generationModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_ipAdapterModels.clear();
         failActiveInstalls(tr("Service connection was closed"));
         emit modelsChanged();
         emit serviceStateChanged(QStringLiteral("offline"), tr("Service connection was closed"));
@@ -54,19 +54,23 @@ QList<ManagedModelInfo> ManagerServiceClient::models(const QString &category) co
     if (category == QStringLiteral("image-generation")) return m_generationModels;
     if (category == QStringLiteral("upscaler")) return m_upscaleModels;
     if (category == QStringLiteral("llm-chat")) return m_llmChatModels;
+    if (category == QStringLiteral("ip-adapter")) return m_ipAdapterModels;
     return {};
 }
 QList<ManagedInstall> ManagerServiceClient::installs() const { return m_installs; }
 void ManagerServiceClient::requestModels() { if (m_authenticated) m_socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list\"}")); }
 
-QString ManagerServiceClient::installModel(const QString &category, const QUrl &url, const QString &sha256)
+QString ManagerServiceClient::installModel(const QString &category, const QUrl &url, const QString &sha256, const QUrl &companionUrl)
 {
     if (!m_authenticated) return {};
     const QString installId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    m_installs.append({installId, category, url, ManagedInstallState::Requesting, 0, {}, {}});
+    m_installs.append({installId, category, url, companionUrl, {}, ManagedInstallState::Requesting, 0, {}, {}});
     QJsonObject message{{QStringLiteral("type"), QStringLiteral("models.install")}, {QStringLiteral("installId"), installId},
                         {QStringLiteral("category"), category}, {QStringLiteral("url"), url.toString()}};
     if (!sha256.isEmpty()) message.insert(QStringLiteral("sha256"), sha256);
+    if (category == QStringLiteral("ip-adapter") && companionUrl.isValid() && !companionUrl.isEmpty()) {
+        message.insert(QStringLiteral("companionUrl"), companionUrl.toString());
+    }
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     emit installsChanged();
     return installId;
@@ -92,18 +96,20 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
     const QJsonObject object = document.object(); const QString type = object.value(QStringLiteral("type")).toString();
     if (type == QStringLiteral("authenticated")) { m_authenticated = true; requestModels(); emit serviceStateChanged(QStringLiteral("connected"), tr("Connected to service")); return; }
     if (type == QStringLiteral("models.list.result")) {
-        m_generationModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear();
+        m_generationModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_ipAdapterModels.clear();
         for (const QJsonValue &categoryValue : object.value(QStringLiteral("categories")).toArray()) {
             const QJsonObject category = categoryValue.toObject(); QList<ManagedModelInfo> *modelsForCategory = nullptr;
             const QString name = category.value(QStringLiteral("category")).toString();
             if (name == QStringLiteral("image-generation")) modelsForCategory = &m_generationModels;
             else if (name == QStringLiteral("upscaler")) modelsForCategory = &m_upscaleModels;
             else if (name == QStringLiteral("llm-chat")) modelsForCategory = &m_llmChatModels;
+            else if (name == QStringLiteral("ip-adapter")) modelsForCategory = &m_ipAdapterModels;
             if (!modelsForCategory) continue;
             for (const QJsonValue &modelValue : category.value(QStringLiteral("models")).toArray()) {
                 const QJsonObject model = modelValue.toObject();
                 modelsForCategory->append({model.value(QStringLiteral("id")).toString(), model.value(QStringLiteral("name")).toString(),
-                    model.value(QStringLiteral("fileName")).toString(), model.value(QStringLiteral("bytes")).toVariant().toLongLong()});
+                    model.value(QStringLiteral("fileName")).toString(), model.value(QStringLiteral("bytes")).toVariant().toLongLong(),
+                    model.value(QStringLiteral("companionFileName")).toString()});
             }
         }
         m_modelListAvailable = true; emit modelsChanged(); return;
@@ -115,7 +121,7 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
         install->bytesDownloaded = object.value(QStringLiteral("bytesDownloaded")).toVariant().toLongLong();
         install->totalBytes = object.contains(QStringLiteral("totalBytes")) ? std::optional<qint64>(object.value(QStringLiteral("totalBytes")).toVariant().toLongLong()) : std::nullopt;
         emit installsChanged(); } return; }
-    if (type == QStringLiteral("models.install.completed")) { if (auto *install = findInstall(object.value(QStringLiteral("installId")).toString())) { install->state = ManagedInstallState::Completed; install->message = tr("Installed"); emit installsChanged(); } requestModels(); return; }
+    if (type == QStringLiteral("models.install.completed")) { if (auto *install = findInstall(object.value(QStringLiteral("installId")).toString())) { install->companionFileName = object.value(QStringLiteral("model")).toObject().value(QStringLiteral("companionFileName")).toString(); install->state = ManagedInstallState::Completed; install->message = tr("Installed"); emit installsChanged(); } requestModels(); return; }
     if (type == QStringLiteral("models.delete.completed")) { emit modelDeleted(object.value(QStringLiteral("id")).toString()); requestModels(); return; }
     if (type == QStringLiteral("error")) {
         const QString installId = object.value(QStringLiteral("installId")).toString();

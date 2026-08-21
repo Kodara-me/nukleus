@@ -11,6 +11,7 @@ enum class ModelCategory
     ImageGeneration,
     Upscaler,
     LlmChat,
+    IpAdapter,
     Unknown
 };
 
@@ -21,6 +22,7 @@ struct ModelInfo
     QString fileName;
     qint64 fileSize = 0;
     ModelCategory category = ModelCategory::Unknown;
+    QString companionFileName;
 };
 
 enum class ImageOperation

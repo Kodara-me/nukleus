@@ -39,5 +39,9 @@ add_test(NAME kira-service-cmake-install-test
             ${CMAKE_BINARY_DIR})
 
 add_test(NAME kira-service-manager-help COMMAND $<TARGET_FILE:kira-service-manager> --help)
+add_test(NAME kira-service-manager-rejects-companion-category
+    COMMAND $<TARGET_FILE:kira-service-manager> add https://example.test/model.gguf
+            --category upscaler --companion-lora https://example.test/companion.safetensors)
+set_tests_properties(kira-service-manager-rejects-companion-category PROPERTIES WILL_FAIL TRUE)
 add_test(NAME kira-service-manager-unavailable COMMAND $<TARGET_FILE:kira-service-manager> list)
 set_tests_properties(kira-service-manager-unavailable PROPERTIES WILL_FAIL TRUE)

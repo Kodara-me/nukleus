@@ -15,6 +15,7 @@ struct ManagedModelInfo
     QString name;
     QString fileName;
     qint64 fileSize = 0;
+    QString companionFileName;
 };
 
 enum class ManagedInstallState { Requesting, Accepted, Queued, Downloading, Verifying, Completed, Failed };
@@ -24,6 +25,8 @@ struct ManagedInstall
     QString installId;
     QString category;
     QUrl url;
+    QUrl companionUrl;
+    QString companionFileName;
     ManagedInstallState state = ManagedInstallState::Requesting;
     qint64 bytesDownloaded = 0;
     std::optional<qint64> totalBytes;
@@ -44,7 +47,7 @@ public:
     QList<ManagedModelInfo> models(const QString &category) const;
     QList<ManagedInstall> installs() const;
     void requestModels();
-    QString installModel(const QString &category, const QUrl &url, const QString &sha256 = {});
+    QString installModel(const QString &category, const QUrl &url, const QString &sha256 = {}, const QUrl &companionUrl = {});
     bool deleteModel(const QString &id);
 
 signals:
@@ -68,5 +71,6 @@ private:
     QList<ManagedModelInfo> m_generationModels;
     QList<ManagedModelInfo> m_upscaleModels;
     QList<ManagedModelInfo> m_llmChatModels;
+    QList<ManagedModelInfo> m_ipAdapterModels;
     QList<ManagedInstall> m_installs;
 };

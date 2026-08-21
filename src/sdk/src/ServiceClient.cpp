@@ -13,6 +13,7 @@ KiraService::ModelCategory categoryFromName(const QString &name)
     if (name == QStringLiteral("image-generation")) return KiraService::ModelCategory::ImageGeneration;
     if (name == QStringLiteral("upscaler")) return KiraService::ModelCategory::Upscaler;
     if (name == QStringLiteral("llm-chat")) return KiraService::ModelCategory::LlmChat;
+    if (name == QStringLiteral("ip-adapter")) return KiraService::ModelCategory::IpAdapter;
     return KiraService::ModelCategory::Unknown;
 }
 
@@ -190,7 +191,8 @@ void ServiceClient::handleTextMessage(const QString &message)
                                  model.value(QStringLiteral("name")).toString(),
                                  model.value(QStringLiteral("fileName")).toString(),
                                  model.value(QStringLiteral("bytes")).toVariant().toLongLong(),
-                                 category});
+                                 category,
+                                 model.value(QStringLiteral("companionFileName")).toString()});
             }
         }
         m_modelListAvailable = true;

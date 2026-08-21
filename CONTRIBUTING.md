@@ -23,4 +23,5 @@ The SDK targets are `KiraService::Protocol` and `KiraService::SDK`. A source
 checkout can add `src/sdk` directly, while installed consumers use
 `find_package(KiraServiceSdk CONFIG REQUIRED)`. The SDK owns WebSocket and
 protocol behavior; applications own settings, files, and UI messages. Keep
-protocol v3 compatible. LLM submission is not part of the SDK yet.
+protocol v3 compatible. Model management includes the `ip-adapter` category
+and optional paired companion metadata. LLM submission is not part of the SDK yet.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QList>
+#include <QHash>
 #include <QObject>
 #include <QUrl>
 
@@ -11,7 +12,8 @@ enum class ModelCategory
 {
     ImageGeneration,
     Upscaler,
-    LlmChat
+    LlmChat,
+    IpAdapter
 };
 
 struct ModelInfo
@@ -21,6 +23,7 @@ struct ModelInfo
     QString fileName;
     qint64 fileSize = 0;
     QString filePath;
+    QString companionFileName;
 };
 
 Q_DECLARE_METATYPE(ModelInfo)
@@ -31,6 +34,7 @@ struct ModelInstallRequest
     ModelCategory category = ModelCategory::ImageGeneration;
     QUrl url;
     std::optional<QString> expectedSha256;
+    std::optional<QUrl> companionUrl;
 };
 
 enum class ModelInstallState
@@ -77,6 +81,10 @@ private:
 
     QString rootPath() const;
     QString directoryPath(ModelCategory category) const;
+    QString companionMetadataPath() const;
+    QString companionPath(const QString &primaryFileName, const QString &companionFileName) const;
+    QHash<QString, QString> companionMetadata() const;
+    bool writeCompanionMetadata(const QHash<QString, QString> &metadata) const;
     bool ensureDirectory(ModelCategory category, QString *errorMessage) const;
     bool acceptsUrl(const QUrl &url) const;
     bool acceptsRedirectUrl(const QUrl &url) const;
@@ -84,6 +92,7 @@ private:
     QString fileNameForUrl(const QUrl &url) const;
     void startNextInstall();
     void startRequest(const QUrl &url);
+    void startCompanionInstall();
     void finishNetworkRequest();
     void writeAvailableData();
     void startVerification();

@@ -35,7 +35,10 @@ public:
     }
 
     bool start() { return m_server.listen(QHostAddress::LocalHost); }
-    QUrl url() const { return QUrl(QStringLiteral("http://127.0.0.1:%1/owner/repo/resolve/main/model.gguf").arg(m_server.serverPort())); }
+    QUrl url(const QString &fileName = QStringLiteral("model.gguf")) const
+    {
+        return QUrl(QStringLiteral("http://127.0.0.1:%1/owner/repo/resolve/main/%2?utm_source=chatgpt.com").arg(m_server.serverPort()).arg(fileName));
+    }
 
 private:
     QTcpServer m_server;
@@ -57,6 +60,7 @@ private slots:
     void listsSupportedModelsWithoutPathLeak();
     void removesModelByOpaqueId();
     void installsModelAtomically();
+    void installsIpAdapterPair();
     void acceptsExternalModelUrls();
     void rejectsInvalidModelInstall();
     void migratesLegacyModelRoot();
@@ -80,6 +84,9 @@ void ServiceTest::preservesProtocolV3()
 {
     QCOMPARE(KiraService::Protocol::Version, 3);
     QCOMPARE(KiraService::Protocol::DefaultPort, quint16(9384));
+    QVERIFY(ModelCatalog::categories().contains(ModelCategory::IpAdapter));
+    QVERIFY(ModelCatalog::categoryFromName(QStringLiteral("ip-adapter")).has_value());
+    QCOMPARE(*ModelCatalog::categoryFromName(QStringLiteral("ip-adapter")), ModelCategory::IpAdapter);
 }
 
 void ServiceTest::rejectsLanWithoutToken()
@@ -158,6 +165,32 @@ void ServiceTest::installsModelAtomically()
     QVERIFY(QFileInfo::exists(finalPath)); QVERIFY(!QFileInfo::exists(finalPath + QStringLiteral(".part")));
 }
 
+void ServiceTest::installsIpAdapterPair()
+{
+    TestHttpServer server(QByteArray("model-bytes")); QVERIFY(server.start());
+    QTemporaryDir directory; QVERIFY(directory.isValid()); ModelCatalog catalog(directory.path(), true);
+    QSignalSpy finished(&catalog, &ModelCatalog::installFinished); QString error;
+    const ModelInstallRequest request{QStringLiteral("ip-adapter-install"), ModelCategory::IpAdapter,
+                                      server.url(QStringLiteral("ip-adapter-faceid-plusv2_sdxl.bin")), {},
+                                      server.url(QStringLiteral("ip-adapter-faceid-plusv2_sdxl_lora.safetensors"))};
+    QVERIFY(catalog.install(request, &error));
+    QTRY_COMPARE(finished.count(), 1);
+    const QString primaryPath = directory.filePath(QStringLiteral("ip-adapter/ip-adapter-faceid-plusv2_sdxl.bin"));
+    const QString companionRelativePath = QStringLiteral("companions/ip-adapter-faceid-plusv2_sdxl.bin/ip-adapter-faceid-plusv2_sdxl_lora.safetensors");
+    const QString companionPath = directory.filePath(QStringLiteral("ip-adapter/%1").arg(companionRelativePath));
+    QVERIFY(QFileInfo::exists(primaryPath));
+    QVERIFY(QFileInfo::exists(companionPath));
+    QVERIFY(!QFileInfo::exists(primaryPath + QStringLiteral(".part")));
+    const QList<ModelInfo> models = catalog.models(ModelCategory::IpAdapter);
+    QCOMPARE(models.size(), 1);
+    QCOMPARE(models.first().companionFileName, companionRelativePath);
+    ModelCatalog restoredCatalog(directory.path(), true);
+    QCOMPARE(restoredCatalog.models(ModelCategory::IpAdapter).first().companionFileName, companionRelativePath);
+    QVERIFY(catalog.remove(models.first().id, &error));
+    QVERIFY(!QFileInfo::exists(primaryPath));
+    QVERIFY(!QFileInfo::exists(companionPath));
+}
+
 void ServiceTest::acceptsExternalModelUrls()
 {
     QTemporaryDir directory; QVERIFY(directory.isValid()); ModelCatalog catalog(directory.path(), true);
@@ -187,6 +220,11 @@ void ServiceTest::rejectsInvalidModelInstall()
 {
     QTemporaryDir directory; QVERIFY(directory.isValid()); ModelCatalog catalog(directory.path(), true); QString error;
     QVERIFY(!catalog.install({QStringLiteral("bad"), ModelCategory::Upscaler, QUrl(QStringLiteral("http://127.0.0.1:1/owner/repo/resolve/main/model.bin")), {}}, &error));
+    QVERIFY(!error.isEmpty());
+    error.clear();
+    QVERIFY(!catalog.install({QStringLiteral("bad-companion"), ModelCategory::IpAdapter,
+                              QUrl(QStringLiteral("https://models.example.test/ip-adapter.bin")), {},
+                              QUrl(QStringLiteral("https://models.example.test/companion.txt"))}, &error));
     QVERIFY(!error.isEmpty());
 }
 

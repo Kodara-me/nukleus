@@ -69,9 +69,11 @@ KiraServiceDaemon::KiraServiceDaemon(KiraServiceConfiguration configuration, QOb
     });
     connect(m_models.get(), &ModelCatalog::installFinished, this, [this](const QString &installId, const ModelInfo &model) {
         const QPointer<QWebSocket> client = m_installClients.take(installId);
+        QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
+                                {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
+        if (!model.companionFileName.isEmpty()) modelObject.insert(QStringLiteral("companionFileName"), model.companionFileName);
         send(client, {{QStringLiteral("type"), QStringLiteral("models.install.completed")},
-                      {QStringLiteral("installId"), installId},
-                      {QStringLiteral("model"), QJsonObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name}, {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}}}});
+                      {QStringLiteral("installId"), installId}, {QStringLiteral("model"), modelObject}});
     });
     connect(m_models.get(), &ModelCatalog::installFailed, this, [this](const QString &installId, const QString &errorMessage) {
         const QPointer<QWebSocket> client = m_installClients.take(installId);
@@ -251,8 +253,10 @@ void KiraServiceDaemon::listModels(QWebSocket *socket) const
     for (const ModelCategory category : ModelCatalog::categories()) {
         QJsonArray models;
         for (const ModelInfo &model : m_models->models(category)) {
-            models.append(QJsonObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
-                                      {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}});
+            QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
+                                    {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
+            if (!model.companionFileName.isEmpty()) modelObject.insert(QStringLiteral("companionFileName"), model.companionFileName);
+            models.append(modelObject);
         }
         categories.append(QJsonObject{{QStringLiteral("category"), ModelCatalog::categoryName(category)}, {QStringLiteral("models"), models}});
     }
@@ -275,7 +279,9 @@ void KiraServiceDaemon::installModel(QWebSocket *socket, const QJsonObject &mess
     }
     std::optional<QString> sha256;
     if (message.contains(QStringLiteral("sha256"))) sha256 = message.value(QStringLiteral("sha256")).toString();
-    ModelInstallRequest request{installId, *category, QUrl(message.value(QStringLiteral("url")).toString()), sha256};
+    std::optional<QUrl> companionUrl;
+    if (message.contains(QStringLiteral("companionUrl"))) companionUrl = QUrl(message.value(QStringLiteral("companionUrl")).toString());
+    ModelInstallRequest request{installId, *category, QUrl(message.value(QStringLiteral("url")).toString()), sha256, companionUrl};
     m_installClients.insert(installId, socket);
     QString error;
     if (!m_models->install(request, &error)) {

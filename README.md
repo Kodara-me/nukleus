@@ -39,6 +39,7 @@ The manager also provides local CLI operations:
 ```sh
 kira-service-manager list
 kira-service-manager add https://huggingface.co/owner/repo/resolve/main/model.gguf --category upscaler
+kira-service-manager add https://huggingface.co/h94/IP-Adapter-FaceID/resolve/main/ip-adapter-faceid-plusv2_sdxl.bin?utm_source=chatgpt.com --category ip-adapter --companion-lora 'https://huggingface.co/h94/IP-Adapter-FaceID/resolve/main/ip-adapter-faceid-plusv2_sdxl_lora.safetensors?utm_source=chatgpt.com'
 kira-service-manager delete upscaler:model.gguf
 ```
 
@@ -46,7 +47,7 @@ Use `--help` for all options. CLI and GUI manager connections are local-only and
 
 ## Models
 
-Service models live in `$XDG_DATA_HOME/kira-service/models/`: image-generation files in `models/`, upscalers in `models/upscale/`, and LLM chat files in `models/llm/`. The manager installs HTTPS model-file URLs from Hugging Face or other hosts, optionally verifies SHA-256, and never overwrites an existing filename. Hugging Face `blob` links are normalized to their downloadable `resolve` URLs.
+Service models live in `$XDG_DATA_HOME/kira-service/models/`: image-generation files in `models/`, upscalers in `models/upscale/`, LLM chat files in `models/llm/`, and IP-Adapters in `models/ip-adapter/`. IP-Adapter companions are kept under a private `companions/` subdirectory and paired through atomic metadata. The manager installs HTTPS model-file URLs from Hugging Face or other hosts, optionally verifies SHA-256 for the primary file, and never overwrites an existing filename. IP-Adapter primary files support `.bin`, `.safetensors`, `.ckpt`, and `.gguf`; companion LoRAs support the existing model extensions. Query-bearing Hugging Face URLs are accepted and filenames are derived from the URL path. Hugging Face `blob` links are normalized to their downloadable `resolve` URLs. The GUI exposes the optional “Companion LoRA URL” field only for IP-Adapters.
 
 The Linux installer moves legacy models from `$XDG_DATA_HOME/kira-canvas/models/` during an upgrade. It aborts without changing either directory if both model roots already exist.
 

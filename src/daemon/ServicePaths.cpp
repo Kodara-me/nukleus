@@ -31,6 +31,12 @@ QString ServicePaths::chatModelsPath()
     return root.isEmpty() ? QString() : QDir(root).filePath(QStringLiteral("llm"));
 }
 
+QString ServicePaths::ipAdapterModelsPath()
+{
+    const QString root = modelsPath();
+    return root.isEmpty() ? QString() : QDir(root).filePath(QStringLiteral("ip-adapter"));
+}
+
 QString ServicePaths::legacyModelsPath()
 {
     const QString dataPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
@@ -65,7 +71,7 @@ bool ServicePaths::ensureModelDirectories(QString *errorMessage)
         if (errorMessage) *errorMessage = QObject::tr("Service data directory is unavailable");
         return false;
     }
-    const std::array<QString, 4> paths = {root, modelsPath(), upscaleModelsPath(), chatModelsPath()};
+    const std::array<QString, 5> paths = {root, modelsPath(), upscaleModelsPath(), chatModelsPath(), ipAdapterModelsPath()};
     for (const QString &path : paths) {
         if (!QDir().mkpath(path)) {
             if (errorMessage) *errorMessage = QObject::tr("Could not create %1").arg(path);
