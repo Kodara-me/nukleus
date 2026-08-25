@@ -12,7 +12,6 @@
 #include <vector>
 
 class ModelCatalog;
-class LlamaCliRunner;
 class QWebSocket;
 class QWebSocketServer;
 class SdCliRunner;
@@ -39,7 +38,7 @@ public:
     quint16 serverPort() const;
 
 private:
-    enum class Operation { Generate, Upscale, PromptConversion };
+    enum class Operation { Generate, Upscale };
     struct Submission;
     struct Job;
 
@@ -58,12 +57,10 @@ private:
     void broadcastQueuePositions();
     void handleGenerationFinished(const SdCliGenerationResult &result);
     void handleUpscaleFinished(const SdCliUpscaleResult &result);
-    void handlePromptConversionFinished(bool succeeded, const QString &text, const QString &errorMessage);
     void sendCapabilities(QWebSocket *socket) const;
     void send(QWebSocket *socket, QJsonObject object) const;
     void sendError(QWebSocket *socket, const QString &code, const QString &message, const QString &jobId = {}) const;
     bool isImageReady() const;
-    bool isPromptConversionReady() const;
     bool modelInUse(const QString &path) const;
     std::shared_ptr<Job> jobForId(const QString &id) const;
 
@@ -71,7 +68,6 @@ private:
     std::vector<std::unique_ptr<QWebSocketServer>> m_servers;
     std::unique_ptr<ModelCatalog> m_models;
     std::unique_ptr<SdCliRunner> m_sdRunner;
-    std::unique_ptr<LlamaCliRunner> m_llamaRunner;
     QHash<QWebSocket *, bool> m_authenticatedClients;
     QHash<QWebSocket *, std::shared_ptr<Submission>> m_pendingUploads;
     QHash<QString, QPointer<QWebSocket>> m_installClients;

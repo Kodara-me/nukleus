@@ -39,7 +39,6 @@ ServiceClient::ServiceClient(QObject *parent)
     : QObject(parent)
     , m_socket(new QWebSocket(QStringLiteral("Kira Service SDK"), QWebSocketProtocol::VersionLatest, this))
 {
-    qRegisterMetaType<PromptConversionResult>();
     connect(m_socket, &QWebSocket::connected, this, &ServiceClient::authenticate);
     connect(m_socket, &QWebSocket::textMessageReceived, this, &ServiceClient::handleTextMessage);
     connect(m_socket, &QWebSocket::binaryMessageReceived, this, &ServiceClient::handleBinaryMessage);
@@ -49,7 +48,6 @@ ServiceClient::ServiceClient(QObject *parent)
         clearCatalog();
         failActiveInstalls(QStringLiteral("The service connection was closed."));
         failAllJobs(QStringLiteral("connection-closed"), QStringLiteral("The service connection was closed."));
-        failAllPromptConversions(QStringLiteral("connection-closed"), QStringLiteral("The service connection was closed."));
         const QString code = m_connectionErrorCode.isEmpty() ? QStringLiteral("disconnected") : m_connectionErrorCode;
         const QString detail = m_connectionErrorDetail.isEmpty() ? QStringLiteral("The service connection was closed.") : m_connectionErrorDetail;
         m_connectionErrorCode.clear();
@@ -109,11 +107,6 @@ bool ServiceClient::canSubmit(ImageOperation operation, const QString &modelId) 
 {
     const ModelCategory category = operation == ImageOperation::Generate ? ModelCategory::ImageGeneration : ModelCategory::Upscaler;
     return m_authenticated && supports(operation) && containsModel(modelId, category);
-}
-
-bool ServiceClient::canConvertPrompt(const QString &modelId) const
-{
-    return m_authenticated && m_capabilities.promptConversion && containsModel(modelId, ModelCategory::LlmChat);
 }
 
 bool ServiceClient::modelListAvailable() const { return m_modelListAvailable; }
@@ -190,20 +183,6 @@ QString ServiceClient::submitUpscale(const ImageUpscaleRequest &request)
                   request.sourceImageData);
 }
 
-QString ServiceClient::submitPromptConversion(const PromptConversionRequest &request)
-{
-    if (request.message.trimmed().isEmpty() || !canConvertPrompt(request.modelId)) return {};
-    const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    m_pendingPromptConversions.insert(jobId);
-    const QJsonObject message{{QStringLiteral("type"), QStringLiteral("submit")},
-                              {QStringLiteral("jobId"), jobId},
-                              {QStringLiteral("operation"), QStringLiteral("llm.prompt.convert")},
-                              {QStringLiteral("options"), QJsonObject{{QStringLiteral("message"), request.message},
-                                                                        {QStringLiteral("modelId"), request.modelId}}}};
-    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
-    return jobId;
-}
-
 QString ServiceClient::submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData)
 {
     if (!canSubmit(operation, options.value(QStringLiteral("modelId")).toString())) return {};
@@ -239,8 +218,7 @@ void ServiceClient::handleTextMessage(const QString &message)
     }
     if (type == QStringLiteral("capabilities")) {
         const QJsonArray operations = object.value(QStringLiteral("operations")).toArray();
-        updateCapabilities({operations.contains(QStringLiteral("image.generate")), operations.contains(QStringLiteral("image.upscale")),
-                            operations.contains(QStringLiteral("llm.prompt.convert"))});
+        updateCapabilities({operations.contains(QStringLiteral("image.generate")), operations.contains(QStringLiteral("image.upscale"))});
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
         return;
@@ -311,17 +289,11 @@ void ServiceClient::handleTextMessage(const QString &message)
             m_connectionErrorCode = code;
             m_connectionErrorDetail = detail;
             m_socket->close();
-        } else if (!jobId.isEmpty() && m_pendingPromptConversions.contains(jobId)) {
-            failPromptConversion(jobId, code, detail);
         } else if (!jobId.isEmpty()) {
             failJob(jobId, code, detail);
         } else {
             emit serviceStateChanged(ServiceConnectionState::Error, code, detail);
         }
-        return;
-    }
-    if (type == QStringLiteral("prompt-conversion.result") && m_pendingPromptConversions.remove(jobId)) {
-        emit promptConversionFinished({jobId, true, object.value(QStringLiteral("text")).toString(), {}, {}});
         return;
     }
     if (!m_pendingJobs.contains(jobId)) return;
@@ -355,8 +327,7 @@ void ServiceClient::handleBinaryMessage(const QByteArray &data)
 
 void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
 {
-    if (m_capabilities.imageGeneration == capabilities.imageGeneration && m_capabilities.imageUpscale == capabilities.imageUpscale
-        && m_capabilities.promptConversion == capabilities.promptConversion) return;
+    if (m_capabilities.imageGeneration == capabilities.imageGeneration && m_capabilities.imageUpscale == capabilities.imageUpscale) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
 }
@@ -401,18 +372,6 @@ void ServiceClient::failAllJobs(const QString &errorCode, const QString &message
     const QStringList jobIds = m_pendingJobs.keys();
     for (const QString &jobId : jobIds) failJob(jobId, errorCode, message);
     m_resultJobs.clear();
-}
-
-void ServiceClient::failPromptConversion(const QString &jobId, const QString &errorCode, const QString &message)
-{
-    if (!m_pendingPromptConversions.remove(jobId)) return;
-    emit promptConversionFinished({jobId, false, {}, errorCode, message});
-}
-
-void ServiceClient::failAllPromptConversions(const QString &errorCode, const QString &message)
-{
-    const QSet<QString> jobIds = m_pendingPromptConversions;
-    for (const QString &jobId : jobIds) failPromptConversion(jobId, errorCode, message);
 }
 
 bool ServiceClient::containsModel(const QString &modelId, ModelCategory category) const

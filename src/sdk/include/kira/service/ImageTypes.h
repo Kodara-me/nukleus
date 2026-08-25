@@ -80,21 +80,6 @@ struct ImageUpscaleRequest
     QString modelId;
 };
 
-struct PromptConversionRequest
-{
-    QString message;
-    QString modelId;
-};
-
-struct PromptConversionResult
-{
-    QString jobId;
-    bool succeeded = false;
-    QString text;
-    QString errorCode;
-    QString message;
-};
-
 struct ImageJobResult
 {
     QString jobId;
@@ -110,7 +95,6 @@ struct ServiceCapabilities
 {
     bool imageGeneration = false;
     bool imageUpscale = false;
-    bool promptConversion = false;
 };
 
 enum class ServiceConnectionState
@@ -137,8 +121,6 @@ Q_DECLARE_METATYPE(KiraService::ModelInstall)
 Q_DECLARE_METATYPE(KiraService::ImageGenerationRequest)
 Q_DECLARE_METATYPE(KiraService::ImageUpscaleRequest)
 Q_DECLARE_METATYPE(KiraService::ImageJobResult)
-Q_DECLARE_METATYPE(KiraService::PromptConversionRequest)
-Q_DECLARE_METATYPE(KiraService::PromptConversionResult)
 Q_DECLARE_METATYPE(KiraService::ServiceCapabilities)
 Q_DECLARE_METATYPE(KiraService::ServiceConnectionState)
 Q_DECLARE_METATYPE(KiraService::JobState)

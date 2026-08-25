@@ -10,8 +10,6 @@ add_executable(kira-service-test
     ../src/sdk/include/kira/service/GenerationProgress.h
     ../src/daemon/KiraService.cpp
     ../src/daemon/KiraService.h
-    ../src/daemon/LlamaCliRunner.cpp
-    ../src/daemon/LlamaCliRunner.h
     ../src/daemon/ModelCatalog.cpp
     ../src/daemon/ModelCatalog.h
     ../src/daemon/SdCliRunner.cpp
