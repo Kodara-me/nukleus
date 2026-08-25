@@ -8,6 +8,8 @@
 #include <QWebSocketServer>
 #include <QtTest>
 
+#include <algorithm>
+
 namespace
 {
 class FakeSdkService final : public QObject
@@ -24,11 +26,15 @@ public:
                 const QString type = message.value(QStringLiteral("type")).toString();
                 if (type == QStringLiteral("authenticate")) {
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"authenticated\"}"));
-                    socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\",\"image.upscale\"]}"));
+                    socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\",\"image.upscale\",\"llm.prompt.convert\"]}"));
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list.result\",\"categories\":[{\"category\":\"image-generation\",\"models\":[{\"id\":\"image-generation:test.safetensors\",\"name\":\"Test\",\"fileName\":\"test.safetensors\",\"bytes\":1}]},{\"category\":\"upscaler\",\"models\":[{\"id\":\"upscaler:test.gguf\",\"name\":\"Test 2x\",\"fileName\":\"test.gguf\",\"bytes\":2}]},{\"category\":\"llm-chat\",\"models\":[{\"id\":\"llm-chat:test.gguf\",\"name\":\"Test LLM\",\"fileName\":\"llm.gguf\",\"bytes\":3}]},{\"category\":\"ip-adapter\",\"models\":[{\"id\":\"ip-adapter:test.bin\",\"name\":\"Test Adapter\",\"fileName\":\"test.bin\",\"bytes\":4,\"companionFileName\":\"companions/test.bin/test-lora.safetensors\"}]}]}"));
                 } else if (type == QStringLiteral("submit")) {
                     const QString jobId = message.value(QStringLiteral("jobId")).toString();
-                    if (message.value(QStringLiteral("options")).toObject().value(QStringLiteral("hasInput")).toBool()) {
+                    if (message.value(QStringLiteral("operation")).toString() == QStringLiteral("llm.prompt.convert")) {
+                        socket->sendTextMessage(QStringLiteral("{\"type\":\"queued\",\"jobId\":\"%1\"}").arg(jobId));
+                        socket->sendTextMessage(QStringLiteral("{\"type\":\"running\",\"jobId\":\"%1\"}").arg(jobId));
+                        socket->sendTextMessage(QStringLiteral("{\"type\":\"prompt-conversion.result\",\"jobId\":\"%1\",\"text\":\"1girl, solo\"}").arg(jobId));
+                    } else if (message.value(QStringLiteral("options")).toObject().value(QStringLiteral("hasInput")).toBool()) {
                         m_uploadJobs.insert(socket, jobId);
                         socket->sendTextMessage(QStringLiteral("{\"type\":\"upload-required\",\"jobId\":\"%1\"}").arg(jobId));
                     } else {
@@ -73,6 +79,7 @@ private slots:
     void authenticatesAndDiscoversModels();
     void submitsBinaryInputAndReturnsBinaryOutput();
     void supportsMultipleJobs();
+    void submitsPromptConversion();
     void reportsConnectionFailure();
 };
 
@@ -119,12 +126,40 @@ void ServiceSdkTest::supportsMultipleJobs()
     KiraService::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
     QTRY_VERIFY(client.modelListAvailable());
     QSignalSpy finished(&client, &KiraService::ServiceClient::imageJobFinished);
-    KiraService::ImageGenerationRequest first; first.prompt = QStringLiteral("one"); first.modelId = QStringLiteral("image-generation:test.safetensors");
+    KiraService::ImageGenerationRequest first; first.prompt = QStringLiteral("one"); first.modelId = QStringLiteral("image-generation:test.safetensors"); first.clipSkip = 2;
     KiraService::ImageGenerationRequest second = first; second.prompt = QStringLiteral("two");
     QTRY_VERIFY(client.canSubmit(KiraService::ImageOperation::Generate, first.modelId));
     QVERIFY(!client.submitGeneration(first).isEmpty());
     QVERIFY(!client.submitGeneration(second).isEmpty());
     QTRY_COMPARE(finished.count(), 2);
+    const auto submitted = std::find_if(service.messages().cbegin(), service.messages().cend(), [](const QJsonObject &message) {
+        return message.value(QStringLiteral("type")).toString() == QStringLiteral("submit")
+               && message.value(QStringLiteral("options")).toObject().value(QStringLiteral("prompt")).toString() == QStringLiteral("one");
+    });
+    QVERIFY(submitted != service.messages().cend());
+    QCOMPARE(submitted->value(QStringLiteral("options")).toObject().value(QStringLiteral("clipSkip")).toInt(), 2);
+}
+
+void ServiceSdkTest::submitsPromptConversion()
+{
+    FakeSdkService service; QVERIFY2(service.start(), qPrintable(service.errorString()));
+    KiraService::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+    QTRY_VERIFY(client.modelListAvailable());
+    const QString modelId = QStringLiteral("llm-chat:test.gguf");
+    QVERIFY(client.canConvertPrompt(modelId));
+    QSignalSpy finished(&client, &KiraService::ServiceClient::promptConversionFinished);
+    const QString message = QStringLiteral("Convert this description to Danbooru tags: a girl");
+    QVERIFY(!client.submitPromptConversion({message, modelId}).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    const auto result = finished.takeFirst().at(0).value<KiraService::PromptConversionResult>();
+    QVERIFY(result.succeeded);
+    QCOMPARE(result.text, QStringLiteral("1girl, solo"));
+    const auto submitted = std::find_if(service.messages().cbegin(), service.messages().cend(), [](const QJsonObject &candidate) {
+        return candidate.value(QStringLiteral("operation")).toString() == QStringLiteral("llm.prompt.convert");
+    });
+    QVERIFY(submitted != service.messages().cend());
+    QCOMPARE(submitted->value(QStringLiteral("options")).toObject().value(QStringLiteral("message")).toString(), message);
+    QCOMPARE(submitted->value(QStringLiteral("options")).toObject().value(QStringLiteral("modelId")).toString(), modelId);
 }
 
 void ServiceSdkTest::reportsConnectionFailure()

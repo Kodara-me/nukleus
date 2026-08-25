@@ -111,6 +111,7 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
         arguments.append({QStringLiteral("--init-img"), request.baseImagePath,
                           QStringLiteral("--strength"), QString::number(request.baseImageStrength, 'f', 2)});
     }
+    if (request.clipSkip > 0) arguments.append({QStringLiteral("--clip-skip"), QString::number(request.clipSkip)});
     if (m_requestType != RequestType::None || m_executablePath.isEmpty()) {
         return false;
     }
@@ -254,6 +255,7 @@ void SdCliRunner::logGenerationStart(const GenerationRequest &request, const QSt
     qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] Resolution: %1x%2").arg(request.width).arg(request.height);
     qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] Steps: %1").arg(request.steps);
     qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] CFG: %1").arg(request.cfgScale, 0, 'f', 1);
+    qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] Clip skip: %1").arg(request.clipSkip);
     qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] Sampler: %1").arg(request.sampler);
     qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] Scheduler: %1").arg(request.scheduler);
     qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] Seed: %1").arg(request.seed);

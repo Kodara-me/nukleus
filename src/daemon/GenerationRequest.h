@@ -12,6 +12,7 @@ struct GenerationRequest
     int height = 1024;
     int steps = 28;
     double cfgScale = 7.0;
+    int clipSkip = -1;
     int seed = -1;
     QString baseImagePath;
     double baseImageStrength = 0.55;

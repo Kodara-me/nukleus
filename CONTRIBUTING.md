@@ -1,6 +1,6 @@
 # Contributing to Kira Service
 
-Kira Service is a C++20 Qt 6 project. Build dependencies are CMake, Ninja, a C++20 compiler, and Qt 6.2+ Network, WebSockets, and Widgets development packages. `sd-cli` is only required on a machine that performs image work.
+Kira Service is a C++20 Qt 6 project. Build dependencies are CMake, Ninja, a C++20 compiler, and Qt 6.2+ Network, WebSockets, and Widgets development packages. `sd-cli` is required on a machine that performs image work and `llama-cli` is required for prompt conversion.
 
 ```sh
 cmake -S . -B build -G Ninja
@@ -24,4 +24,5 @@ checkout can add `src/sdk` directly, while installed consumers use
 `find_package(KiraServiceSdk CONFIG REQUIRED)`. The SDK owns WebSocket and
 protocol behavior; applications own settings, files, and UI messages. Keep
 protocol v3 compatible. Model management includes the `ip-adapter` category
-and optional paired companion metadata. LLM submission is not part of the SDK yet.
+and optional paired companion metadata. The SDK supports one-shot prompt
+conversion for installed LLM models, but not general LLM chat.

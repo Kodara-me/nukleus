@@ -5,6 +5,8 @@ set(SERVICE_DAEMON_SOURCES
     daemon/GenerationRequest.h
     daemon/KiraService.cpp
     daemon/KiraService.h
+    daemon/LlamaCliRunner.cpp
+    daemon/LlamaCliRunner.h
     daemon/ModelCatalog.cpp
     daemon/ModelCatalog.h
     daemon/SdCliProgressParser.cpp

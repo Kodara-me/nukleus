@@ -3,6 +3,9 @@
 #include <QByteArray>
 #include <QMetaType>
 #include <QString>
+#include <QUrl>
+
+#include <optional>
 
 namespace KiraService
 {
@@ -25,6 +28,29 @@ struct ModelInfo
     QString companionFileName;
 };
 
+enum class ModelInstallState
+{
+    Requesting,
+    Accepted,
+    Queued,
+    Downloading,
+    Verifying,
+    Completed,
+    Failed
+};
+
+struct ModelInstall
+{
+    QString installId;
+    ModelCategory category = ModelCategory::Unknown;
+    QUrl url;
+    QString sha256;
+    ModelInstallState state = ModelInstallState::Requesting;
+    qint64 bytesDownloaded = 0;
+    std::optional<qint64> totalBytes;
+    QString message;
+};
+
 enum class ImageOperation
 {
     Generate,
@@ -41,6 +67,7 @@ struct ImageGenerationRequest
     int height = 1024;
     int steps = 28;
     double cfgScale = 7.0;
+    int clipSkip = -1;
     int seed = -1;
     QByteArray baseImageData;
     double baseImageStrength = 0.55;
@@ -51,6 +78,21 @@ struct ImageUpscaleRequest
 {
     QByteArray sourceImageData;
     QString modelId;
+};
+
+struct PromptConversionRequest
+{
+    QString message;
+    QString modelId;
+};
+
+struct PromptConversionResult
+{
+    QString jobId;
+    bool succeeded = false;
+    QString text;
+    QString errorCode;
+    QString message;
 };
 
 struct ImageJobResult
@@ -68,6 +110,7 @@ struct ServiceCapabilities
 {
     bool imageGeneration = false;
     bool imageUpscale = false;
+    bool promptConversion = false;
 };
 
 enum class ServiceConnectionState
@@ -90,9 +133,12 @@ enum class JobState
 }
 
 Q_DECLARE_METATYPE(KiraService::ModelInfo)
+Q_DECLARE_METATYPE(KiraService::ModelInstall)
 Q_DECLARE_METATYPE(KiraService::ImageGenerationRequest)
 Q_DECLARE_METATYPE(KiraService::ImageUpscaleRequest)
 Q_DECLARE_METATYPE(KiraService::ImageJobResult)
+Q_DECLARE_METATYPE(KiraService::PromptConversionRequest)
+Q_DECLARE_METATYPE(KiraService::PromptConversionResult)
 Q_DECLARE_METATYPE(KiraService::ServiceCapabilities)
 Q_DECLARE_METATYPE(KiraService::ServiceConnectionState)
 Q_DECLARE_METATYPE(KiraService::JobState)

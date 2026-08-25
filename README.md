@@ -1,6 +1,6 @@
 # Kira Service
 
-Kira Service is the standalone backend for Kira applications. It owns installed models, HTTPS model downloads, the `sd-cli` execution queue, and the versioned WebSocket API. Client applications select opaque installed-model IDs and submit jobs; they do not manage service files.
+Kira Service is the standalone backend for Kira applications. It owns installed models, HTTPS model downloads, the `sd-cli` image queue, one-shot `llama-cli` prompt conversion, and the versioned WebSocket API. Client applications select opaque installed-model IDs and submit jobs; they do not manage service files.
 
 ## Build
 
@@ -29,8 +29,10 @@ The reusable image client is exported as `KiraService::SDK`; the namespaced
 wire implementation is `KiraService::Protocol`. Install the static SDK and
 headers with `cmake --install build --prefix "$HOME/.local"`, then consume it
 with `find_package(KiraServiceSdk CONFIG REQUIRED)`. The SDK supports image
-generation, fixed 2× upscaling, model discovery, progress, and binary results.
-LLM model metadata is discoverable, but LLM submission is future work.
+generation, fixed 2× upscaling, model discovery, progress, binary results, and
+one-shot text prompt conversion through `llama-cli`. Prompt conversion offloads
+available model layers through llama.cpp's Vulkan backend when it is installed.
+General LLM chat remains future work.
 
 `kira-service` is the daemon. `kira-service-manager` is a native Qt administrator app installed into the invoking user's `~/.local/bin`. Start its GUI with `kira-service-manager --gui`; it automatically connects to the local service at `127.0.0.1:9384` and retries while the service is unavailable.
 

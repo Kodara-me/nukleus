@@ -3,6 +3,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSet>
 #include <QUuid>
 #include <QWebSocket>
 
@@ -17,6 +18,15 @@ KiraService::ModelCategory categoryFromName(const QString &name)
     return KiraService::ModelCategory::Unknown;
 }
 
+QString categoryName(KiraService::ModelCategory category)
+{
+    if (category == KiraService::ModelCategory::ImageGeneration) return QStringLiteral("image-generation");
+    if (category == KiraService::ModelCategory::Upscaler) return QStringLiteral("upscaler");
+    if (category == KiraService::ModelCategory::LlmChat) return QStringLiteral("llm-chat");
+    if (category == KiraService::ModelCategory::IpAdapter) return QStringLiteral("ip-adapter");
+    return {};
+}
+
 QString operationName(KiraService::ImageOperation operation)
 {
     return operation == KiraService::ImageOperation::Generate ? QStringLiteral("image.generate") : QStringLiteral("image.upscale");
@@ -29,6 +39,7 @@ ServiceClient::ServiceClient(QObject *parent)
     : QObject(parent)
     , m_socket(new QWebSocket(QStringLiteral("Kira Service SDK"), QWebSocketProtocol::VersionLatest, this))
 {
+    qRegisterMetaType<PromptConversionResult>();
     connect(m_socket, &QWebSocket::connected, this, &ServiceClient::authenticate);
     connect(m_socket, &QWebSocket::textMessageReceived, this, &ServiceClient::handleTextMessage);
     connect(m_socket, &QWebSocket::binaryMessageReceived, this, &ServiceClient::handleBinaryMessage);
@@ -36,7 +47,9 @@ ServiceClient::ServiceClient(QObject *parent)
         m_authenticated = false;
         updateCapabilities({});
         clearCatalog();
+        failActiveInstalls(QStringLiteral("The service connection was closed."));
         failAllJobs(QStringLiteral("connection-closed"), QStringLiteral("The service connection was closed."));
+        failAllPromptConversions(QStringLiteral("connection-closed"), QStringLiteral("The service connection was closed."));
         const QString code = m_connectionErrorCode.isEmpty() ? QStringLiteral("disconnected") : m_connectionErrorCode;
         const QString detail = m_connectionErrorDetail.isEmpty() ? QStringLiteral("The service connection was closed.") : m_connectionErrorDetail;
         m_connectionErrorCode.clear();
@@ -98,6 +111,11 @@ bool ServiceClient::canSubmit(ImageOperation operation, const QString &modelId) 
     return m_authenticated && supports(operation) && containsModel(modelId, category);
 }
 
+bool ServiceClient::canConvertPrompt(const QString &modelId) const
+{
+    return m_authenticated && m_capabilities.promptConversion && containsModel(modelId, ModelCategory::LlmChat);
+}
+
 bool ServiceClient::modelListAvailable() const { return m_modelListAvailable; }
 
 QList<ModelInfo> ServiceClient::models(ModelCategory category) const
@@ -110,9 +128,40 @@ QList<ModelInfo> ServiceClient::models(ModelCategory category) const
     return result;
 }
 
+QList<ModelInstall> ServiceClient::installs() const { return m_installs; }
+
 void ServiceClient::requestModels()
 {
     if (m_authenticated) m_socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list\"}"));
+}
+
+QString ServiceClient::installModel(ModelCategory category, const QUrl &url, const QString &sha256)
+{
+    const QString categoryValue = categoryName(category);
+    if (!m_authenticated || categoryValue.isEmpty() || !url.isValid() || url.isEmpty()) return {};
+    const QString installId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ModelInstall install;
+    install.installId = installId;
+    install.category = category;
+    install.url = url;
+    install.sha256 = sha256;
+    m_installs.append(install);
+    QJsonObject message{{QStringLiteral("type"), QStringLiteral("models.install")},
+                        {QStringLiteral("installId"), installId},
+                        {QStringLiteral("category"), categoryValue},
+                        {QStringLiteral("url"), url.toString()}};
+    if (!sha256.isEmpty()) message.insert(QStringLiteral("sha256"), sha256);
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
+    emit installsChanged();
+    return installId;
+}
+
+bool ServiceClient::deleteModel(const QString &id)
+{
+    if (!m_authenticated || id.isEmpty()) return false;
+    const QJsonObject message{{QStringLiteral("type"), QStringLiteral("models.delete")}, {QStringLiteral("id"), id}};
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
+    return true;
 }
 
 QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
@@ -125,6 +174,7 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
                               {QStringLiteral("height"), request.height},
                               {QStringLiteral("steps"), request.steps},
                               {QStringLiteral("cfgScale"), request.cfgScale},
+                              {QStringLiteral("clipSkip"), request.clipSkip},
                               {QStringLiteral("seed"), request.seed},
                               {QStringLiteral("hasInput"), !request.baseImageData.isEmpty()},
                               {QStringLiteral("baseImageStrength"), request.baseImageStrength},
@@ -138,6 +188,20 @@ QString ServiceClient::submitUpscale(const ImageUpscaleRequest &request)
     return submit(ImageOperation::Upscale,
                   {{QStringLiteral("modelId"), request.modelId}, {QStringLiteral("hasInput"), true}},
                   request.sourceImageData);
+}
+
+QString ServiceClient::submitPromptConversion(const PromptConversionRequest &request)
+{
+    if (request.message.trimmed().isEmpty() || !canConvertPrompt(request.modelId)) return {};
+    const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_pendingPromptConversions.insert(jobId);
+    const QJsonObject message{{QStringLiteral("type"), QStringLiteral("submit")},
+                              {QStringLiteral("jobId"), jobId},
+                              {QStringLiteral("operation"), QStringLiteral("llm.prompt.convert")},
+                              {QStringLiteral("options"), QJsonObject{{QStringLiteral("message"), request.message},
+                                                                        {QStringLiteral("modelId"), request.modelId}}}};
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
+    return jobId;
 }
 
 QString ServiceClient::submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData)
@@ -175,7 +239,8 @@ void ServiceClient::handleTextMessage(const QString &message)
     }
     if (type == QStringLiteral("capabilities")) {
         const QJsonArray operations = object.value(QStringLiteral("operations")).toArray();
-        updateCapabilities({operations.contains(QStringLiteral("image.generate")), operations.contains(QStringLiteral("image.upscale"))});
+        updateCapabilities({operations.contains(QStringLiteral("image.generate")), operations.contains(QStringLiteral("image.upscale")),
+                            operations.contains(QStringLiteral("llm.prompt.convert"))});
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
         return;
@@ -199,19 +264,64 @@ void ServiceClient::handleTextMessage(const QString &message)
         emit modelsChanged();
         return;
     }
+    if (type == QStringLiteral("models.install.accepted")) {
+        if (ModelInstall *install = findInstall(object.value(QStringLiteral("installId")).toString())) {
+            install->state = ModelInstallState::Accepted;
+            emit installsChanged();
+        }
+        return;
+    }
+    if (type == QStringLiteral("models.install.progress")) {
+        if (ModelInstall *install = findInstall(object.value(QStringLiteral("installId")).toString())) {
+            const QString state = object.value(QStringLiteral("state")).toString();
+            install->state = state == QStringLiteral("queued") ? ModelInstallState::Queued
+                : state == QStringLiteral("verifying") ? ModelInstallState::Verifying : ModelInstallState::Downloading;
+            install->bytesDownloaded = object.value(QStringLiteral("bytesDownloaded")).toVariant().toLongLong();
+            install->totalBytes = object.contains(QStringLiteral("totalBytes"))
+                ? std::optional<qint64>(object.value(QStringLiteral("totalBytes")).toVariant().toLongLong()) : std::nullopt;
+            emit installsChanged();
+        }
+        return;
+    }
+    if (type == QStringLiteral("models.install.completed")) {
+        if (ModelInstall *install = findInstall(object.value(QStringLiteral("installId")).toString())) {
+            install->state = ModelInstallState::Completed;
+            install->message = tr("Installed");
+            emit installsChanged();
+        }
+        requestModels();
+        return;
+    }
+    if (type == QStringLiteral("models.delete.completed")) {
+        emit modelDeleted(object.value(QStringLiteral("id")).toString());
+        requestModels();
+        return;
+    }
     const QString jobId = object.value(QStringLiteral("jobId")).toString();
     if (type == QStringLiteral("error")) {
         const QString code = object.value(QStringLiteral("code")).toString();
         const QString detail = object.value(QStringLiteral("message")).toString();
-        if (!m_authenticated && code == QStringLiteral("authentication-failed")) {
+        if (ModelInstall *install = findInstall(object.value(QStringLiteral("installId")).toString())) {
+            install->state = ModelInstallState::Failed;
+            install->message = detail;
+            emit installsChanged();
+        } else if (!object.value(QStringLiteral("id")).toString().isEmpty()) {
+            emit modelOperationFailed(object.value(QStringLiteral("id")).toString(), detail);
+        } else if (!m_authenticated && code == QStringLiteral("authentication-failed")) {
             m_connectionErrorCode = code;
             m_connectionErrorDetail = detail;
             m_socket->close();
+        } else if (!jobId.isEmpty() && m_pendingPromptConversions.contains(jobId)) {
+            failPromptConversion(jobId, code, detail);
         } else if (!jobId.isEmpty()) {
             failJob(jobId, code, detail);
         } else {
             emit serviceStateChanged(ServiceConnectionState::Error, code, detail);
         }
+        return;
+    }
+    if (type == QStringLiteral("prompt-conversion.result") && m_pendingPromptConversions.remove(jobId)) {
+        emit promptConversionFinished({jobId, true, object.value(QStringLiteral("text")).toString(), {}, {}});
         return;
     }
     if (!m_pendingJobs.contains(jobId)) return;
@@ -245,7 +355,8 @@ void ServiceClient::handleBinaryMessage(const QByteArray &data)
 
 void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
 {
-    if (m_capabilities.imageGeneration == capabilities.imageGeneration && m_capabilities.imageUpscale == capabilities.imageUpscale) return;
+    if (m_capabilities.imageGeneration == capabilities.imageGeneration && m_capabilities.imageUpscale == capabilities.imageUpscale
+        && m_capabilities.promptConversion == capabilities.promptConversion) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
 }
@@ -256,6 +367,24 @@ void ServiceClient::clearCatalog()
     m_modelListAvailable = false;
     m_models.clear();
     if (changed) emit modelsChanged();
+}
+
+ModelInstall *ServiceClient::findInstall(const QString &installId)
+{
+    for (ModelInstall &install : m_installs) if (install.installId == installId) return &install;
+    return nullptr;
+}
+
+void ServiceClient::failActiveInstalls(const QString &message)
+{
+    bool changed = false;
+    for (ModelInstall &install : m_installs) {
+        if (install.state == ModelInstallState::Completed || install.state == ModelInstallState::Failed) continue;
+        install.state = ModelInstallState::Failed;
+        install.message = message;
+        changed = true;
+    }
+    if (changed) emit installsChanged();
 }
 
 void ServiceClient::failJob(const QString &jobId, const QString &errorCode, const QString &message)
@@ -272,6 +401,18 @@ void ServiceClient::failAllJobs(const QString &errorCode, const QString &message
     const QStringList jobIds = m_pendingJobs.keys();
     for (const QString &jobId : jobIds) failJob(jobId, errorCode, message);
     m_resultJobs.clear();
+}
+
+void ServiceClient::failPromptConversion(const QString &jobId, const QString &errorCode, const QString &message)
+{
+    if (!m_pendingPromptConversions.remove(jobId)) return;
+    emit promptConversionFinished({jobId, false, {}, errorCode, message});
+}
+
+void ServiceClient::failAllPromptConversions(const QString &errorCode, const QString &message)
+{
+    const QSet<QString> jobIds = m_pendingPromptConversions;
+    for (const QString &jobId : jobIds) failPromptConversion(jobId, errorCode, message);
 }
 
 bool ServiceClient::containsModel(const QString &modelId, ModelCategory category) const

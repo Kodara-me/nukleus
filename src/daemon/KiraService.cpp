@@ -1,6 +1,7 @@
 #include "KiraService.h"
 
 #include "GenerationRequest.h"
+#include "LlamaCliRunner.h"
 #include "ModelCatalog.h"
 #include "ServicePaths.h"
 #include <kira/service/ServiceProtocol.h>
@@ -130,26 +131,38 @@ quint16 KiraServiceDaemon::serverPort() const
 
 void KiraServiceDaemon::initializeBackend()
 {
-    const QString executable = QStandardPaths::findExecutable(QStringLiteral("sd-cli"));
-    if (executable.isEmpty()) {
+    const QString sdCliExecutable = QStandardPaths::findExecutable(QStringLiteral("sd-cli"));
+    if (sdCliExecutable.isEmpty()) {
         qCritical().noquote() << QStringLiteral("[Kira Service] sd-cli was not found on the service PATH.");
-        m_backendUnavailable = true;
-        return;
+    } else {
+        m_sdRunner = std::make_unique<SdCliRunner>(sdCliExecutable);
+        connect(m_sdRunner.get(), &SdCliRunner::generationProgressChanged, this, [this](const KiraService::GenerationProgress &progress) {
+            if (m_activeJob) send(m_activeJob->client, {{QStringLiteral("type"), QStringLiteral("progress")}, {QStringLiteral("jobId"), m_activeJob->id}, {QStringLiteral("progress"), KiraService::Protocol::progressToJson(progress)}});
+        });
+        connect(m_sdRunner.get(), &SdCliRunner::generationOutput, this, [this](const QString &stream, const QString &text) {
+            if (m_activeJob) send(m_activeJob->client, {{QStringLiteral("type"), QStringLiteral("output")}, {QStringLiteral("jobId"), m_activeJob->id}, {QStringLiteral("stream"), stream}, {QStringLiteral("text"), text}});
+        });
+        connect(m_sdRunner.get(), &SdCliRunner::generationFinished, this, &KiraServiceDaemon::handleGenerationFinished);
+        connect(m_sdRunner.get(), &SdCliRunner::upscaleFinished, this, &KiraServiceDaemon::handleUpscaleFinished);
     }
-    m_runner = std::make_unique<SdCliRunner>(executable);
-    connect(m_runner.get(), &SdCliRunner::generationProgressChanged, this, [this](const KiraService::GenerationProgress &progress) {
-        if (m_activeJob) send(m_activeJob->client, {{QStringLiteral("type"), QStringLiteral("progress")}, {QStringLiteral("jobId"), m_activeJob->id}, {QStringLiteral("progress"), KiraService::Protocol::progressToJson(progress)}});
-    });
-    connect(m_runner.get(), &SdCliRunner::generationOutput, this, [this](const QString &stream, const QString &text) {
-        if (m_activeJob) send(m_activeJob->client, {{QStringLiteral("type"), QStringLiteral("output")}, {QStringLiteral("jobId"), m_activeJob->id}, {QStringLiteral("stream"), stream}, {QStringLiteral("text"), text}});
-    });
-    connect(m_runner.get(), &SdCliRunner::generationFinished, this, &KiraServiceDaemon::handleGenerationFinished);
-    connect(m_runner.get(), &SdCliRunner::upscaleFinished, this, &KiraServiceDaemon::handleUpscaleFinished);
+    const QString llamaCliExecutable = QStandardPaths::findExecutable(QStringLiteral("llama-cli"));
+    if (llamaCliExecutable.isEmpty()) {
+        qWarning().noquote() << QStringLiteral("[Kira Service] llama-cli was not found on the service PATH; prompt conversion is unavailable.");
+    } else {
+        m_llamaRunner = std::make_unique<LlamaCliRunner>(llamaCliExecutable);
+        connect(m_llamaRunner.get(), &LlamaCliRunner::promptConversionFinished,
+                this, &KiraServiceDaemon::handlePromptConversionFinished);
+    }
 }
 
-bool KiraServiceDaemon::isReady() const
+bool KiraServiceDaemon::isImageReady() const
 {
-    return !m_backendUnavailable && m_runner != nullptr;
+    return m_sdRunner != nullptr;
+}
+
+bool KiraServiceDaemon::isPromptConversionReady() const
+{
+    return m_llamaRunner != nullptr;
 }
 
 void KiraServiceDaemon::acceptConnection(QWebSocketServer *server)
@@ -206,15 +219,19 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     const QString operationName = message.value(QStringLiteral("operation")).toString();
     const bool generate = operationName == QStringLiteral("image.generate");
     const bool upscale = operationName == QStringLiteral("image.upscale");
+    const bool promptConversion = operationName == QStringLiteral("llm.prompt.convert");
     const QJsonObject options = message.value(QStringLiteral("options")).toObject();
     const QString jobId = message.value(QStringLiteral("jobId")).toString();
     bool duplicateId = jobForId(jobId) != nullptr;
     for (const auto &pending : m_pendingUploads) {
         duplicateId = duplicateId || pending->id == jobId;
     }
-    if ((!generate && !upscale) || jobId.isEmpty() || duplicateId) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid job request")); return; }
-    if (!isReady()) { sendError(socket, QStringLiteral("backend-not-ready"), tr("The service backend is unavailable"), jobId); return; }
-    const ModelCategory category = generate ? ModelCategory::ImageGeneration : ModelCategory::Upscaler;
+    if ((!generate && !upscale && !promptConversion) || jobId.isEmpty() || duplicateId) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid job request")); return; }
+    if ((promptConversion && !isPromptConversionReady()) || (!promptConversion && !isImageReady())) {
+        sendError(socket, QStringLiteral("backend-not-ready"), tr("The requested service backend is unavailable"), jobId);
+        return;
+    }
+    const ModelCategory category = promptConversion ? ModelCategory::LlmChat : (generate ? ModelCategory::ImageGeneration : ModelCategory::Upscaler);
     const std::optional<ModelInfo> model = m_models->model(category, options.value(QStringLiteral("modelId")).toString());
     if (!model.has_value()) { sendError(socket, QStringLiteral("model-unavailable"), tr("The requested model is unavailable"), jobId); return; }
     if (upscale && options.contains(QStringLiteral("scale"))) {
@@ -226,10 +243,14 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         || !validPositiveInteger(options, QStringLiteral("width"), 64, 4096)
         || !validPositiveInteger(options, QStringLiteral("height"), 64, 4096)
         || !validPositiveInteger(options, QStringLiteral("steps"), 1, 200))) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid generation options"), jobId); return; }
+    if (promptConversion && options.value(QStringLiteral("message")).toString().trimmed().isEmpty()) {
+        sendError(socket, QStringLiteral("invalid-request"), tr("A prompt-conversion message is required"), jobId);
+        return;
+    }
     const bool needsInput = upscale || options.value(QStringLiteral("hasInput")).toBool();
     auto submission = std::make_shared<Submission>();
     submission->id = jobId;
-    submission->operation = generate ? Operation::Generate : Operation::Upscale;
+    submission->operation = promptConversion ? Operation::PromptConversion : (generate ? Operation::Generate : Operation::Upscale);
     submission->options = options;
     submission->modelPath = model->filePath;
     submission->client = socket;
@@ -357,25 +378,28 @@ void KiraServiceDaemon::enqueue(std::shared_ptr<Job> job)
 
 void KiraServiceDaemon::startNextJob()
 {
-    if (m_activeJob || m_queue.isEmpty() || !m_runner) return;
+    if (m_activeJob || m_queue.isEmpty()) return;
     m_activeJob = m_queue.dequeue();
     if (m_activeJob->client.isNull()) { m_activeJob.reset(); startNextJob(); return; }
-    m_activeJob->outputPath = m_activeJob->directory->filePath(QStringLiteral("result.png"));
     send(m_activeJob->client, {{QStringLiteral("type"), QStringLiteral("running")}, {QStringLiteral("jobId"), m_activeJob->id}});
     if (m_activeJob->operation == Operation::Generate) {
+        m_activeJob->outputPath = m_activeJob->directory->filePath(QStringLiteral("result.png"));
         GenerationRequest request;
         const QJsonObject &o = m_activeJob->options;
         request.prompt = o.value(QStringLiteral("prompt")).toString(); request.negativePrompt = o.value(QStringLiteral("negativePrompt")).toString();
         request.sampler = o.value(QStringLiteral("sampler")).toString(); request.scheduler = o.value(QStringLiteral("scheduler")).toString();
         request.width = o.value(QStringLiteral("width")).toInt(); request.height = o.value(QStringLiteral("height")).toInt(); request.steps = o.value(QStringLiteral("steps")).toInt();
-        request.cfgScale = o.value(QStringLiteral("cfgScale")).toDouble(); request.seed = o.value(QStringLiteral("seed")).toInt();
+        request.cfgScale = o.value(QStringLiteral("cfgScale")).toDouble(); request.clipSkip = o.value(QStringLiteral("clipSkip")).toInt(-1); request.seed = o.value(QStringLiteral("seed")).toInt();
         request.baseImageStrength = o.value(QStringLiteral("baseImageStrength")).toDouble(0.55); request.outputPath = m_activeJob->outputPath;
         request.modelPath = m_activeJob->modelPath;
         if (o.value(QStringLiteral("hasInput")).toBool()) request.baseImagePath = m_activeJob->inputPath;
-        if (!m_runner->runGeneration(request)) { sendError(m_activeJob->client, QStringLiteral("start-failed"), tr("Could not start generation"), m_activeJob->id); m_activeJob.reset(); startNextJob(); }
-    } else {
+        if (!m_sdRunner || !m_sdRunner->runGeneration(request)) { sendError(m_activeJob->client, QStringLiteral("start-failed"), tr("Could not start generation"), m_activeJob->id); m_activeJob.reset(); startNextJob(); }
+    } else if (m_activeJob->operation == Operation::Upscale) {
+        m_activeJob->outputPath = m_activeJob->directory->filePath(QStringLiteral("result.png"));
         const QStringList arguments = {QStringLiteral("--mode"), QStringLiteral("upscale"), QStringLiteral("--init-img"), m_activeJob->inputPath, QStringLiteral("--upscale-model"), m_activeJob->modelPath, QStringLiteral("--upscale-repeats"), QStringLiteral("1"), QStringLiteral("--upscale-tile-size"), QStringLiteral("128"), QStringLiteral("--output"), m_activeJob->outputPath};
-        if (!m_runner->runUpscale(arguments, m_activeJob->outputPath)) { sendError(m_activeJob->client, QStringLiteral("start-failed"), tr("Could not start upscaling"), m_activeJob->id); m_activeJob.reset(); startNextJob(); }
+        if (!m_sdRunner || !m_sdRunner->runUpscale(arguments, m_activeJob->outputPath)) { sendError(m_activeJob->client, QStringLiteral("start-failed"), tr("Could not start upscaling"), m_activeJob->id); m_activeJob.reset(); startNextJob(); }
+    } else if (!m_llamaRunner || !m_llamaRunner->runPromptConversion(m_activeJob->modelPath, m_activeJob->options.value(QStringLiteral("message")).toString())) {
+        sendError(m_activeJob->client, QStringLiteral("start-failed"), tr("Could not start prompt conversion"), m_activeJob->id); m_activeJob.reset(); startNextJob();
     }
     broadcastQueuePositions();
 }
@@ -398,12 +422,29 @@ void KiraServiceDaemon::handleUpscaleFinished(const SdCliUpscaleResult &result)
     m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
 }
 
+void KiraServiceDaemon::handlePromptConversionFinished(bool succeeded, const QString &text, const QString &errorMessage)
+{
+    if (!m_activeJob || m_activeJob->operation != Operation::PromptConversion) return;
+    const auto job = m_activeJob;
+    if (!succeeded || text.trimmed().isEmpty()) {
+        qWarning().noquote() << QStringLiteral("[Kira Service] Prompt conversion failed: %1").arg(errorMessage);
+        sendError(job->client, QStringLiteral("prompt-conversion-failed"), tr("Prompt conversion failed"), job->id);
+    } else {
+        send(job->client, {{QStringLiteral("type"), QStringLiteral("prompt-conversion.result")},
+                           {QStringLiteral("jobId"), job->id}, {QStringLiteral("text"), text.trimmed()}});
+    }
+    m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
+}
+
 void KiraServiceDaemon::cancelJobsFor(QWebSocket *socket)
 {
     QQueue<std::shared_ptr<Job>> kept;
     while (!m_queue.isEmpty()) { const auto job = m_queue.dequeue(); if (job->client != socket) kept.enqueue(job); }
     m_queue = std::move(kept);
-    if (m_activeJob && m_activeJob->client == socket && m_runner) m_runner->cancel();
+    if (m_activeJob && m_activeJob->client == socket) {
+        if (m_activeJob->operation == Operation::PromptConversion && m_llamaRunner) m_llamaRunner->cancel();
+        else if (m_sdRunner) m_sdRunner->cancel();
+    }
     broadcastQueuePositions();
 }
 
@@ -414,12 +455,13 @@ void KiraServiceDaemon::broadcastQueuePositions()
 
 void KiraServiceDaemon::sendCapabilities(QWebSocket *socket) const
 {
-    const QString state = isReady() ? QStringLiteral("ready") : QStringLiteral("unavailable");
+    const QString state = isImageReady() || isPromptConversionReady() ? QStringLiteral("ready") : QStringLiteral("unavailable");
     QJsonArray operations;
-    if (isReady()) {
+    if (isImageReady()) {
         operations.append(QStringLiteral("image.generate"));
         operations.append(QStringLiteral("image.upscale"));
     }
+    if (isPromptConversionReady()) operations.append(QStringLiteral("llm.prompt.convert"));
     send(socket, {{QStringLiteral("type"), QStringLiteral("capabilities")}, {QStringLiteral("state"), state}, {QStringLiteral("operations"), operations}});
 }
 
