@@ -7,7 +7,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHostAddress>
+#include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonObject>
 #include <QNetworkInterface>
 #include <QStandardPaths>
 #include <QTcpServer>
@@ -27,7 +29,11 @@ public:
         connect(&m_server, &QTcpServer::newConnection, this, [this] {
             QTcpSocket *socket = m_server.nextPendingConnection();
             connect(socket, &QTcpSocket::readyRead, this, [this, socket] {
-                socket->readAll();
+                const QByteArray request = socket->readAll();
+                if (request.contains("missing.safetensors")) {
+                    socket->write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    socket->disconnectFromHost(); return;
+                }
                 const QByteArray response = "HTTP/1.1 200 OK\r\nContent-Length: " + QByteArray::number(m_payload.size()) + "\r\nConnection: close\r\n\r\n" + m_payload;
                 socket->write(response); socket->disconnectFromHost();
             });
@@ -61,6 +67,9 @@ private slots:
     void removesModelByOpaqueId();
     void installsModelAtomically();
     void installsIpAdapterPair();
+    void managesEditionModels();
+    void installsOptionalCompanions();
+    void rollsBackFailedCompanion();
     void acceptsExternalModelUrls();
     void rejectsInvalidModelInstall();
     void migratesLegacyModelRoot();
@@ -165,13 +174,40 @@ void ServiceTest::installsModelAtomically()
     QVERIFY(QFileInfo::exists(finalPath)); QVERIFY(!QFileInfo::exists(finalPath + QStringLiteral(".part")));
 }
 
+void ServiceTest::managesEditionModels()
+{
+    QCOMPARE(ModelCatalog::categoryFromName(QStringLiteral("edition")), std::optional<ModelCategory>(ModelCategory::Edition));
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    ModelCatalog catalog(directory.path(), true);
+    TestHttpServer server(QByteArray("edition-model")); QVERIFY(server.start());
+    QSignalSpy finished(&catalog, &ModelCatalog::installFinished);
+    for (const QString &extension : {QStringLiteral("safetensors"), QStringLiteral("ckpt"), QStringLiteral("gguf")}) {
+        const QString fileName = QStringLiteral("edit-model.%1").arg(extension);
+        QString error;
+        const int previousCount = finished.count();
+        QVERIFY(catalog.install({fileName, ModelCategory::Edition, server.url(fileName), {}}, &error));
+        QTRY_COMPARE(finished.count(), previousCount + 1);
+        const QString path = directory.filePath(QStringLiteral("edition/") + fileName);
+        QVERIFY(QFileInfo::exists(path));
+        const QString id = QStringLiteral("edition:") + fileName;
+        const auto model = catalog.modelById(id); QVERIFY(model.has_value());
+        QCOMPARE(model->filePath, path);
+        QCOMPARE(catalog.models(ModelCategory::Edition).size(), 1);
+        QVERIFY(catalog.models(ModelCategory::ImageGeneration).isEmpty());
+        ModelCatalog restored(directory.path(), true);
+        QVERIFY(restored.modelById(id).has_value());
+        QVERIFY(catalog.remove(id, &error));
+        QVERIFY(!QFileInfo::exists(path));
+    }
+}
+
 void ServiceTest::installsIpAdapterPair()
 {
     TestHttpServer server(QByteArray("model-bytes")); QVERIFY(server.start());
     QTemporaryDir directory; QVERIFY(directory.isValid()); ModelCatalog catalog(directory.path(), true);
     QSignalSpy finished(&catalog, &ModelCatalog::installFinished); QString error;
     const ModelInstallRequest request{QStringLiteral("ip-adapter-install"), ModelCategory::IpAdapter,
-                                      server.url(QStringLiteral("ip-adapter-faceid-plusv2_sdxl.bin")), {},
+                                      server.url(QStringLiteral("ip-adapter-faceid-plusv2_sdxl.bin")),
                                       server.url(QStringLiteral("ip-adapter-faceid-plusv2_sdxl_lora.safetensors"))};
     QVERIFY(catalog.install(request, &error));
     QTRY_COMPARE(finished.count(), 1);
@@ -189,6 +225,97 @@ void ServiceTest::installsIpAdapterPair()
     QVERIFY(catalog.remove(models.first().id, &error));
     QVERIFY(!QFileInfo::exists(primaryPath));
     QVERIFY(!QFileInfo::exists(companionPath));
+}
+
+void ServiceTest::installsOptionalCompanions()
+{
+    TestHttpServer server(QByteArray("model-bytes")); QVERIFY(server.start());
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    ModelCatalog catalog(directory.path(), true);
+    QSignalSpy finished(&catalog, &ModelCatalog::installFinished);
+    for (const ModelCategory category : {ModelCategory::LlmChat, ModelCategory::ImageGeneration, ModelCategory::Edition}) {
+        const QString categoryName = ModelCatalog::categoryName(category);
+        const QString primaryName = QStringLiteral("shared.gguf");
+        const QString companionName = category == ModelCategory::LlmChat ? QStringLiteral("mmproj.gguf") : QStringLiteral("vae.safetensors");
+        QString error;
+        const int count = finished.count();
+        QVERIFY(catalog.install({categoryName, category, server.url(primaryName), server.url(companionName)}, &error));
+        QTRY_COMPARE(finished.count(), count + 1);
+        const QString id = categoryName + QLatin1Char(':') + primaryName;
+        const auto model = catalog.modelById(id); QVERIFY(model.has_value());
+        QCOMPARE(model->companionRole, category == ModelCategory::LlmChat ? QStringLiteral("mmproj") : QStringLiteral("vae"));
+        QCOMPARE(model->companionFileName, QStringLiteral("companions/shared.gguf/") + companionName);
+        const QString companionPath = QDir(QFileInfo(model->filePath).absolutePath()).filePath(model->companionFileName);
+        QVERIFY(QFileInfo::exists(companionPath));
+        QVERIFY(!QFileInfo::exists(companionPath + QStringLiteral(".part")));
+        ModelCatalog restored(directory.path(), true);
+        QCOMPARE(restored.modelById(id)->companionFileName, model->companionFileName);
+        QCOMPARE(restored.modelById(id)->companionRole, model->companionRole);
+        QCOMPARE(restored.models(category).size(), 1);
+    }
+    KiraServiceConfiguration configuration;
+    configuration.port = 0;
+    configuration.modelRootPath = directory.path();
+    KiraServiceDaemon service(configuration);
+    QString startError; QVERIFY2(service.start(&startError), qPrintable(startError));
+    QWebSocket socket;
+    QJsonArray listedCategories;
+    connect(&socket, &QWebSocket::textMessageReceived, this, [&socket, &listedCategories](const QString &text) {
+        const QJsonObject message = QJsonDocument::fromJson(text.toUtf8()).object();
+        if (message.value(QStringLiteral("type")) == QStringLiteral("authenticated")) {
+            socket.sendTextMessage(QStringLiteral("{\"type\":\"models.list\"}"));
+        } else if (message.value(QStringLiteral("type")) == QStringLiteral("models.list.result")) {
+            listedCategories = message.value(QStringLiteral("categories")).toArray();
+        }
+    });
+    socket.open(QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(service.serverPort())));
+    QTRY_COMPARE(socket.state(), QAbstractSocket::ConnectedState);
+    socket.sendTextMessage(QStringLiteral("{\"type\":\"authenticate\",\"version\":3}"));
+    QTRY_VERIFY(!listedCategories.isEmpty());
+    int pairedCategories = 0;
+    for (const auto &value : listedCategories) {
+        const QJsonObject category = value.toObject();
+        const auto models = category.value(QStringLiteral("models")).toArray();
+        if (models.isEmpty()) continue;
+        ++pairedCategories;
+        const auto model = models.first().toObject();
+        const QString role = category.value(QStringLiteral("category")) == QStringLiteral("llm-chat")
+            ? QStringLiteral("mmproj") : QStringLiteral("vae");
+        QCOMPARE(model.value(QStringLiteral("companionRole")).toString(), role);
+        QVERIFY(model.value(QStringLiteral("companionFileName")).toString().startsWith(QStringLiteral("companions/shared.gguf/")));
+        QVERIFY(!model.contains(QStringLiteral("filePath")));
+    }
+    QCOMPARE(pairedCategories, 3);
+    socket.close();
+    for (const ModelCategory category : {ModelCategory::LlmChat, ModelCategory::ImageGeneration, ModelCategory::Edition}) {
+        const QString id = ModelCatalog::categoryName(category) + QStringLiteral(":shared.gguf");
+        const auto model = catalog.modelById(id);
+        const QString companionPath = QDir(QFileInfo(model->filePath).absolutePath()).filePath(model->companionFileName);
+        QString error; QVERIFY(catalog.remove(id, &error));
+        QVERIFY(!QFileInfo::exists(companionPath));
+        QVERIFY(!catalog.modelById(id).has_value());
+    }
+}
+
+void ServiceTest::rollsBackFailedCompanion()
+{
+    TestHttpServer server(QByteArray("model-bytes")); QVERIFY(server.start());
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    ModelCatalog catalog(directory.path(), true);
+    QSignalSpy failed(&catalog, &ModelCatalog::installFailed);
+    QSignalSpy finished(&catalog, &ModelCatalog::installFinished);
+    QString error;
+    QVERIFY(catalog.install({QStringLiteral("failed-pair"), ModelCategory::Edition,
+        server.url(), server.url(QStringLiteral("missing.safetensors"))}, &error));
+    QTRY_COMPARE(failed.count(), 1);
+    const QString errorMessage = failed.first().at(1).toString();
+    QVERIFY(errorMessage.contains(QStringLiteral("HTTP 404")));
+    QVERIFY(errorMessage.contains(QStringLiteral("vae missing.safetensors")));
+    QCOMPARE(finished.count(), 0);
+    QVERIFY(catalog.models(ModelCategory::Edition).isEmpty());
+    QVERIFY(!QFileInfo::exists(directory.filePath(QStringLiteral("edition/model.gguf"))));
+    QVERIFY(!QFileInfo::exists(directory.filePath(QStringLiteral("edition/model.gguf.part"))));
+    QVERIFY(!QFileInfo::exists(directory.filePath(QStringLiteral("edition/companions/model.gguf/missing.safetensors.part"))));
 }
 
 void ServiceTest::acceptsExternalModelUrls()
@@ -223,9 +350,14 @@ void ServiceTest::rejectsInvalidModelInstall()
     QVERIFY(!error.isEmpty());
     error.clear();
     QVERIFY(!catalog.install({QStringLiteral("bad-companion"), ModelCategory::IpAdapter,
-                              QUrl(QStringLiteral("https://models.example.test/ip-adapter.bin")), {},
+                              QUrl(QStringLiteral("https://models.example.test/ip-adapter.bin")),
                               QUrl(QStringLiteral("https://models.example.test/companion.txt"))}, &error));
     QVERIFY(!error.isEmpty());
+    for (const ModelCategory category : {ModelCategory::LlmChat, ModelCategory::Upscaler}) {
+        QVERIFY(!catalog.install({QStringLiteral("wrong-companion"), category,
+            QUrl(QStringLiteral("https://example.test/model.gguf")),
+            QUrl(QStringLiteral("https://example.test/vae.safetensors"))}, &error));
+    }
 }
 
 void ServiceTest::listsSupportedModelsWithoutPathLeak()

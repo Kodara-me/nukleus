@@ -8,6 +8,7 @@
 - Preserve protocol v3 unless an explicit compatibility slice changes it. Canvas and other clients select opaque model IDs and submit work; Canvas may expose installation only for explicitly curated packages through the SDK, while the local manager remains the general model-management UI.
 - CMake installs the daemon to `libexec/kira-service/` and the manager to `bin/` under the selected prefix; the shell installer remains authoritative for systemd deployment and configuration.
 - CMake also installs SDK headers and static libraries and generates the `KiraServiceSdk` package. The SDK supports image operations.
-- Use `$XDG_DATA_HOME/kira-service/models/` with `upscale/` and `llm/` subdirectories. Never overwrite installed model files. Keep the legacy-root migration safe and non-merging.
+- Use `$XDG_DATA_HOME/kira-service/models/` with `upscale/`, `llm/`, and `edition/` subdirectories. The `edition` category manages image-editing model files; editing jobs remain outside its current scope. Never overwrite installed model files. Keep the legacy-root migration safe and non-merging.
 - Linux systemd deployment keeps the `kira-service` account, `/etc/kira-service`, `/var/lib/kira-service`, `/run/kira-service`, and fixed port `9384`.
+- Optional companions use category-local persistent metadata: mmproj for LLM-chat, VAE for Image-generation/Edition, and LoRA for IP-Adapter. Install and delete them with their primary model; expose only category-relative companion filenames and roles. Do not perform SHA-256 download checks. Catalog attachments do not change `sd-cli` invocation.
 - Build and run CTest after each slice. Keep README and CONTRIBUTING accurate.

@@ -45,3 +45,14 @@ add_test(NAME kira-service-manager-rejects-companion-category
 set_tests_properties(kira-service-manager-rejects-companion-category PROPERTIES WILL_FAIL TRUE)
 add_test(NAME kira-service-manager-unavailable COMMAND $<TARGET_FILE:kira-service-manager> list)
 set_tests_properties(kira-service-manager-unavailable PROPERTIES WILL_FAIL TRUE)
+
+add_executable(kira-service-manager-ui-test
+    ManagerUiTest.cpp
+    ../src/manager/ManageModelsWindow.cpp
+    ../src/manager/ManageModelsWindow.h
+    ../src/manager/ManagerServiceClient.cpp
+    ../src/manager/ManagerServiceClient.h
+)
+target_link_libraries(kira-service-manager-ui-test PRIVATE KiraService::Protocol Qt6::Widgets Qt6::Test Qt6::WebSockets)
+add_test(NAME kira-service-manager-ui-test COMMAND kira-service-manager-ui-test)
+set_tests_properties(kira-service-manager-ui-test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

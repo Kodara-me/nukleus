@@ -27,7 +27,7 @@ public:
                 if (type == QStringLiteral("authenticate")) {
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"authenticated\"}"));
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\",\"image.upscale\"]}"));
-                    socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list.result\",\"categories\":[{\"category\":\"image-generation\",\"models\":[{\"id\":\"image-generation:test.safetensors\",\"name\":\"Test\",\"fileName\":\"test.safetensors\",\"bytes\":1}]},{\"category\":\"upscaler\",\"models\":[{\"id\":\"upscaler:test.gguf\",\"name\":\"Test 2x\",\"fileName\":\"test.gguf\",\"bytes\":2}]},{\"category\":\"llm-chat\",\"models\":[{\"id\":\"llm-chat:test.gguf\",\"name\":\"Test LLM\",\"fileName\":\"llm.gguf\",\"bytes\":3}]},{\"category\":\"ip-adapter\",\"models\":[{\"id\":\"ip-adapter:test.bin\",\"name\":\"Test Adapter\",\"fileName\":\"test.bin\",\"bytes\":4,\"companionFileName\":\"companions/test.bin/test-lora.safetensors\"}]}]}"));
+                    socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list.result\",\"categories\":[{\"category\":\"image-generation\",\"models\":[{\"id\":\"image-generation:test.safetensors\",\"name\":\"Test\",\"fileName\":\"test.safetensors\",\"bytes\":1,\"companionFileName\":\"companions/test.safetensors/vae.safetensors\",\"companionRole\":\"vae\"}]},{\"category\":\"edition\",\"models\":[{\"id\":\"edition:edit.safetensors\",\"name\":\"Edit\",\"fileName\":\"edit.safetensors\",\"bytes\":5,\"companionFileName\":\"companions/edit.safetensors/vae.gguf\",\"companionRole\":\"vae\"}]},{\"category\":\"upscaler\",\"models\":[{\"id\":\"upscaler:test.gguf\",\"name\":\"Test 2x\",\"fileName\":\"test.gguf\",\"bytes\":2}]},{\"category\":\"llm-chat\",\"models\":[{\"id\":\"llm-chat:test.gguf\",\"name\":\"Test LLM\",\"fileName\":\"llm.gguf\",\"bytes\":3,\"companionFileName\":\"companions/llm.gguf/mmproj.gguf\",\"companionRole\":\"mmproj\"}]},{\"category\":\"ip-adapter\",\"models\":[{\"id\":\"ip-adapter:test.bin\",\"name\":\"Test Adapter\",\"fileName\":\"test.bin\",\"bytes\":4,\"companionFileName\":\"companions/test.bin/test-lora.safetensors\"}]}]}"));
                 } else if (type == QStringLiteral("submit")) {
                     const QString jobId = message.value(QStringLiteral("jobId")).toString();
                     if (message.value(QStringLiteral("options")).toObject().value(QStringLiteral("hasInput")).toBool()) {
@@ -75,6 +75,7 @@ private slots:
     void authenticatesAndDiscoversModels();
     void submitsBinaryInputAndReturnsBinaryOutput();
     void supportsMultipleJobs();
+    void installsModelWithCompanion();
     void reportsConnectionFailure();
 };
 
@@ -91,6 +92,13 @@ void ServiceSdkTest::authenticatesAndDiscoversModels()
     QTRY_VERIFY(client.isAuthenticated());
     QTRY_VERIFY(client.modelListAvailable());
     QCOMPARE(client.models(KiraService::ModelCategory::ImageGeneration).size(), 1);
+    const auto editionModels = client.models(KiraService::ModelCategory::Edition);
+    QCOMPARE(editionModels.size(), 1);
+    QCOMPARE(editionModels.first().companionRole, QStringLiteral("vae"));
+    QCOMPARE(client.models(KiraService::ModelCategory::LlmChat).first().companionRole, QStringLiteral("mmproj"));
+    QCOMPARE(client.models(KiraService::ModelCategory::ImageGeneration).first().companionFileName, QStringLiteral("companions/test.safetensors/vae.safetensors"));
+    QCOMPARE(editionModels.first().id, QStringLiteral("edition:edit.safetensors"));
+    QCOMPARE(editionModels.first().category, KiraService::ModelCategory::Edition);
     QCOMPARE(client.models(KiraService::ModelCategory::Upscaler).size(), 1);
     QCOMPARE(client.models(KiraService::ModelCategory::LlmChat).size(), 1);
     const QList<KiraService::ModelInfo> ipAdapters = client.models(KiraService::ModelCategory::IpAdapter);
@@ -113,6 +121,22 @@ void ServiceSdkTest::submitsBinaryInputAndReturnsBinaryOutput()
     QVERIFY(result.succeeded);
     QCOMPARE(result.imageData, QByteArray("sdk-result"));
     for (const QJsonObject &message : service.messages()) QVERIFY(!QJsonDocument(message).toJson().contains("source-bytes"));
+}
+
+void ServiceSdkTest::installsModelWithCompanion()
+{
+    FakeSdkService service; QVERIFY(service.start());
+    KiraService::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+    QTRY_VERIFY(client.modelListAvailable());
+    const QUrl companion(QStringLiteral("https://example.test/mmproj.gguf"));
+    QVERIFY(!client.installModel(KiraService::ModelCategory::LlmChat, QUrl(QStringLiteral("https://example.test/model.gguf")), companion).isEmpty());
+    QTRY_VERIFY(std::any_of(service.messages().cbegin(), service.messages().cend(), [](const QJsonObject &message) {
+        return message.value(QStringLiteral("type")).toString() == QStringLiteral("models.install");
+    }));
+    const auto message = service.messages().last();
+    QCOMPARE(message.value(QStringLiteral("companionUrl")).toString(), companion.toString());
+    QVERIFY(!message.contains(QStringLiteral("sha256")));
+    QCOMPARE(client.installs().last().companionUrl, companion);
 }
 
 void ServiceSdkTest::supportsMultipleJobs()

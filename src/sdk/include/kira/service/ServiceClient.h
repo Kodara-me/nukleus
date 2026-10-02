@@ -28,7 +28,7 @@ public:
     QList<ModelInfo> models(ModelCategory category = ModelCategory::Unknown) const;
     QList<ModelInstall> installs() const;
     void requestModels();
-    QString installModel(ModelCategory category, const QUrl &url, const QString &sha256 = {});
+    QString installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl = {});
     bool deleteModel(const QString &id);
     QString submitGeneration(const ImageGenerationRequest &request);
     QString submitUpscale(const ImageUpscaleRequest &request);

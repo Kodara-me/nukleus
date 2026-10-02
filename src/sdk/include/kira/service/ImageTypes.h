@@ -15,7 +15,8 @@ enum class ModelCategory
     Upscaler,
     LlmChat,
     IpAdapter,
-    Unknown
+    Unknown,
+    Edition
 };
 
 struct ModelInfo
@@ -26,6 +27,7 @@ struct ModelInfo
     qint64 fileSize = 0;
     ModelCategory category = ModelCategory::Unknown;
     QString companionFileName;
+    QString companionRole;
 };
 
 enum class ModelInstallState
@@ -44,7 +46,7 @@ struct ModelInstall
     QString installId;
     ModelCategory category = ModelCategory::Unknown;
     QUrl url;
-    QString sha256;
+    QUrl companionUrl;
     ModelInstallState state = ModelInstallState::Requesting;
     qint64 bytesDownloaded = 0;
     std::optional<qint64> totalBytes;

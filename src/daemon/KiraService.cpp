@@ -71,7 +71,10 @@ KiraServiceDaemon::KiraServiceDaemon(KiraServiceConfiguration configuration, QOb
         const QPointer<QWebSocket> client = m_installClients.take(installId);
         QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
                                 {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
-        if (!model.companionFileName.isEmpty()) modelObject.insert(QStringLiteral("companionFileName"), model.companionFileName);
+        if (!model.companionFileName.isEmpty()) {
+            modelObject.insert(QStringLiteral("companionFileName"), model.companionFileName);
+            modelObject.insert(QStringLiteral("companionRole"), model.companionRole);
+        }
         send(client, {{QStringLiteral("type"), QStringLiteral("models.install.completed")},
                       {QStringLiteral("installId"), installId}, {QStringLiteral("model"), modelObject}});
     });
@@ -257,7 +260,10 @@ void KiraServiceDaemon::listModels(QWebSocket *socket) const
         for (const ModelInfo &model : m_models->models(category)) {
             QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
                                     {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
-            if (!model.companionFileName.isEmpty()) modelObject.insert(QStringLiteral("companionFileName"), model.companionFileName);
+            if (!model.companionFileName.isEmpty()) {
+            modelObject.insert(QStringLiteral("companionFileName"), model.companionFileName);
+            modelObject.insert(QStringLiteral("companionRole"), model.companionRole);
+        }
             models.append(modelObject);
         }
         categories.append(QJsonObject{{QStringLiteral("category"), ModelCatalog::categoryName(category)}, {QStringLiteral("models"), models}});
@@ -279,11 +285,9 @@ void KiraServiceDaemon::installModel(QWebSocket *socket, const QJsonObject &mess
                       {QStringLiteral("message"), tr("The installation ID is already in use")}, {QStringLiteral("installId"), installId}});
         return;
     }
-    std::optional<QString> sha256;
-    if (message.contains(QStringLiteral("sha256"))) sha256 = message.value(QStringLiteral("sha256")).toString();
     std::optional<QUrl> companionUrl;
     if (message.contains(QStringLiteral("companionUrl"))) companionUrl = QUrl(message.value(QStringLiteral("companionUrl")).toString());
-    ModelInstallRequest request{installId, *category, QUrl(message.value(QStringLiteral("url")).toString()), sha256, companionUrl};
+    ModelInstallRequest request{installId, *category, QUrl(message.value(QStringLiteral("url")).toString()), companionUrl};
     m_installClients.insert(installId, socket);
     QString error;
     if (!m_models->install(request, &error)) {

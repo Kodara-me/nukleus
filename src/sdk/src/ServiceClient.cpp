@@ -15,6 +15,7 @@ KiraService::ModelCategory categoryFromName(const QString &name)
     if (name == QStringLiteral("upscaler")) return KiraService::ModelCategory::Upscaler;
     if (name == QStringLiteral("llm-chat")) return KiraService::ModelCategory::LlmChat;
     if (name == QStringLiteral("ip-adapter")) return KiraService::ModelCategory::IpAdapter;
+    if (name == QStringLiteral("edition")) return KiraService::ModelCategory::Edition;
     return KiraService::ModelCategory::Unknown;
 }
 
@@ -23,6 +24,7 @@ QString categoryName(KiraService::ModelCategory category)
     if (category == KiraService::ModelCategory::ImageGeneration) return QStringLiteral("image-generation");
     if (category == KiraService::ModelCategory::Upscaler) return QStringLiteral("upscaler");
     if (category == KiraService::ModelCategory::LlmChat) return QStringLiteral("llm-chat");
+    if (category == KiraService::ModelCategory::Edition) return QStringLiteral("edition");
     if (category == KiraService::ModelCategory::IpAdapter) return QStringLiteral("ip-adapter");
     return {};
 }
@@ -128,7 +130,7 @@ void ServiceClient::requestModels()
     if (m_authenticated) m_socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list\"}"));
 }
 
-QString ServiceClient::installModel(ModelCategory category, const QUrl &url, const QString &sha256)
+QString ServiceClient::installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl)
 {
     const QString categoryValue = categoryName(category);
     if (!m_authenticated || categoryValue.isEmpty() || !url.isValid() || url.isEmpty()) return {};
@@ -137,13 +139,13 @@ QString ServiceClient::installModel(ModelCategory category, const QUrl &url, con
     install.installId = installId;
     install.category = category;
     install.url = url;
-    install.sha256 = sha256;
+    install.companionUrl = companionUrl;
     m_installs.append(install);
     QJsonObject message{{QStringLiteral("type"), QStringLiteral("models.install")},
                         {QStringLiteral("installId"), installId},
                         {QStringLiteral("category"), categoryValue},
                         {QStringLiteral("url"), url.toString()}};
-    if (!sha256.isEmpty()) message.insert(QStringLiteral("sha256"), sha256);
+    if (!companionUrl.isEmpty()) message.insert(QStringLiteral("companionUrl"), companionUrl.toString());
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     emit installsChanged();
     return installId;
@@ -235,7 +237,8 @@ void ServiceClient::handleTextMessage(const QString &message)
                                  model.value(QStringLiteral("fileName")).toString(),
                                  model.value(QStringLiteral("bytes")).toVariant().toLongLong(),
                                  category,
-                                 model.value(QStringLiteral("companionFileName")).toString()});
+                                 model.value(QStringLiteral("companionFileName")).toString(),
+                                 model.value(QStringLiteral("companionRole")).toString()});
             }
         }
         m_modelListAvailable = true;

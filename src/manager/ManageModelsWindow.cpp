@@ -9,10 +9,9 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
-#include <QListWidget>
+#include <QFileInfo>
 #include <QMessageBox>
 #include <QPushButton>
-#include <QRegularExpression>
 #include <QTreeWidget>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -59,47 +58,77 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent)
     auto *connection = new QGroupBox(tr("Local Kira Service"), central); auto *connectionLayout = new QVBoxLayout(connection);
     m_status = new QLabel(tr("Connecting to the local Kira Service…"), connection); m_status->setWordWrap(true); connectionLayout->addWidget(m_status); layout->addWidget(connection);
     auto *description = new QLabel(tr("Install HTTPS model file URLs from Hugging Face or another host. Files remain on this service host."), central); description->setWordWrap(true); layout->addWidget(description);
-    auto *modelsGroup = new QGroupBox(tr("Installed models"), central); auto *modelsLayout = new QFormLayout(modelsGroup);
-    m_generationModels = new QListWidget(modelsGroup); m_upscaleModels = new QListWidget(modelsGroup); m_llmChatModels = new QListWidget(modelsGroup); m_ipAdapterModels = new QListWidget(modelsGroup);
-    for (QListWidget *list : {m_generationModels, m_upscaleModels, m_llmChatModels, m_ipAdapterModels}) { list->setMaximumHeight(90); list->setSelectionMode(QAbstractItemView::SingleSelection); }
-    modelsLayout->addRow(tr("Image-generation"), m_generationModels); modelsLayout->addRow(tr("Upscaler"), m_upscaleModels); modelsLayout->addRow(tr("LLM-chat"), m_llmChatModels); modelsLayout->addRow(tr("IP-Adapter"), m_ipAdapterModels); layout->addWidget(modelsGroup);
-    m_deleteButton = new QPushButton(tr("Delete selected model"), modelsGroup); m_deleteButton->setEnabled(false); modelsLayout->addRow(m_deleteButton);
+    auto *modelsGroup = new QGroupBox(tr("Installed models"), central);
+    auto *modelsLayout = new QVBoxLayout(modelsGroup);
+    m_models = new QTreeWidget(modelsGroup);
+    m_models->setObjectName(QStringLiteral("installedModelsTree"));
+    m_models->setHeaderLabels({tr("Models"), tr("File"), tr("Size")});
+    m_models->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_models->setUniformRowHeights(true);
+    m_models->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_models->header()->setSectionResizeMode(1, QHeaderView::Interactive);
+    m_models->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_models->header()->setStretchLastSection(false);
+    modelsLayout->addWidget(m_models);
+    layout->addWidget(modelsGroup, 1);
+    m_deleteButton = new QPushButton(tr("Delete selected model"), modelsGroup);
+    m_deleteButton->setEnabled(false);
+    modelsLayout->addWidget(m_deleteButton);
     auto *installGroup = new QGroupBox(tr("Install model"), central); auto *installLayout = new QFormLayout(installGroup);
-    m_category = new QComboBox(installGroup); m_category->addItem(tr("Image-generation"), QStringLiteral("image-generation")); m_category->addItem(tr("Upscaler"), QStringLiteral("upscaler")); m_category->addItem(tr("LLM-chat"), QStringLiteral("llm-chat")); m_category->addItem(tr("IP-Adapter"), QStringLiteral("ip-adapter"));
+    m_category = new QComboBox(installGroup); m_category->addItem(tr("Image-generation"), QStringLiteral("image-generation")); m_category->addItem(tr("Edition"), QStringLiteral("edition")); m_category->addItem(tr("Upscaler"), QStringLiteral("upscaler")); m_category->addItem(tr("LLM-chat"), QStringLiteral("llm-chat")); m_category->addItem(tr("IP-Adapter"), QStringLiteral("ip-adapter"));
     m_url = new QLineEdit(installGroup); m_url->setPlaceholderText(QStringLiteral("https://example.com/models/model.gguf"));
     m_companionLabel = new QLabel(tr("Companion LoRA URL"), installGroup);
-    m_companionUrl = new QLineEdit(installGroup); m_companionUrl->setObjectName(QStringLiteral("companionLoraUrl")); m_companionUrl->setPlaceholderText(QStringLiteral("Optional companion LoRA URL"));
-    m_sha256 = new QLineEdit(installGroup); m_sha256->setPlaceholderText(tr("Optional 64-character SHA-256"));
+    m_companionUrl = new QLineEdit(installGroup); m_companionUrl->setObjectName(QStringLiteral("companionUrl")); m_companionUrl->setPlaceholderText(tr("Optional companion file URL"));
     m_installButton = new QPushButton(tr("Install"), installGroup);
-    installLayout->addRow(tr("Category"), m_category); installLayout->addRow(tr("File URL"), m_url); installLayout->addRow(m_companionLabel, m_companionUrl); installLayout->addRow(tr("SHA-256"), m_sha256); installLayout->addRow(m_installButton); layout->addWidget(installGroup);
+    installLayout->addRow(tr("Category"), m_category); installLayout->addRow(tr("File URL"), m_url); installLayout->addRow(m_companionLabel, m_companionUrl); installLayout->addRow(m_installButton); layout->addWidget(installGroup);
     m_installs = new QTreeWidget(central); m_installs->setHeaderLabels({tr("Model"), tr("Status"), tr("Progress")}); m_installs->header()->setSectionResizeMode(QHeaderView::ResizeToContents); m_installs->header()->setStretchLastSection(true); layout->addWidget(m_installs, 1);
     connect(m_installButton, &QPushButton::clicked, this, &ManageModelsWindow::startInstall); connect(m_deleteButton, &QPushButton::clicked, this, &ManageModelsWindow::deleteSelectedModel);
     connect(m_category, &QComboBox::currentIndexChanged, this, [this] {
-        const bool isIpAdapter = m_category->currentData().toString() == QStringLiteral("ip-adapter");
-        m_companionLabel->setVisible(isIpAdapter);
-        m_companionUrl->setVisible(isIpAdapter);
-        m_companionUrl->setEnabled(isIpAdapter);
+        const QString category = m_category->currentData().toString();
+        const bool supportsCompanion = category != QStringLiteral("upscaler");
+        m_companionLabel->setText(category == QStringLiteral("llm-chat") ? tr("Optional mmproj URL")
+            : category == QStringLiteral("ip-adapter") ? tr("Optional companion LoRA URL") : tr("Optional VAE URL"));
+        m_companionUrl->clear();
+        m_companionLabel->setVisible(supportsCompanion);
+        m_companionUrl->setVisible(supportsCompanion);
+        m_companionUrl->setEnabled(supportsCompanion);
         updateInstallButton();
-    }); connect(m_url, &QLineEdit::textChanged, this, &ManageModelsWindow::updateInstallButton); connect(m_companionUrl, &QLineEdit::textChanged, this, &ManageModelsWindow::updateInstallButton); connect(m_sha256, &QLineEdit::textChanged, this, &ManageModelsWindow::updateInstallButton);
+    }); connect(m_url, &QLineEdit::textChanged, this, &ManageModelsWindow::updateInstallButton); connect(m_companionUrl, &QLineEdit::textChanged, this, &ManageModelsWindow::updateInstallButton);
     connect(m_client, &ManagerServiceClient::modelsChanged, this, &ManageModelsWindow::populateModels); connect(m_client, &ManagerServiceClient::installsChanged, this, [this] { populateInstalls(); updateInstallButton(); });
     connect(m_client, &ManagerServiceClient::serviceStateChanged, this, [this](const QString &, const QString &message) { m_status->setText(message); updateInstallButton(); updateDeleteButton(); });
     connect(m_client, &ManagerServiceClient::modelDeleted, this, [this](const QString &) { m_status->setText(tr("Model deleted.")); });
     connect(m_client, &ManagerServiceClient::modelOperationFailed, this, [this](const QString &, const QString &message) { m_status->setText(message); updateDeleteButton(); });
-    for (QListWidget *list : {m_generationModels, m_upscaleModels, m_llmChatModels, m_ipAdapterModels}) {
-        connect(list, &QListWidget::itemSelectionChanged, this, [this, list] {
-            if (list->currentItem() && list->currentItem()->data(Qt::UserRole).isValid()) {
-                for (QListWidget *other : {m_generationModels, m_upscaleModels, m_llmChatModels, m_ipAdapterModels}) if (other != list) other->clearSelection();
-            }
-            updateDeleteButton();
-        });
-    }
-    m_companionLabel->setVisible(false); m_companionUrl->setVisible(false); m_companionUrl->setEnabled(false); populateModels(); populateInstalls(); updateInstallButton(); updateDeleteButton(); m_client->connectToService();
+    connect(m_models, &QTreeWidget::itemSelectionChanged, this, &ManageModelsWindow::updateDeleteButton);
+    m_companionLabel->setText(tr("Optional VAE URL")); populateModels(); populateInstalls(); updateInstallButton(); updateDeleteButton(); m_client->connectToService();
 }
 
 void ManageModelsWindow::populateModels()
 {
-    const auto populate = [this](QListWidget *widget, const QString &category) { widget->clear(); const QList<ManagedModelInfo> models = m_client->models(category); if (models.isEmpty()) { auto *item = new QListWidgetItem(tr("No installed models"), widget); item->setFlags(Qt::NoItemFlags); return; } for (const ManagedModelInfo &model : models) { const QString companion = model.companionFileName.isEmpty() ? QString() : tr(" — companion: %1").arg(model.companionFileName); auto *item = new QListWidgetItem(tr("%1 (%2) — %3%4").arg(model.name, model.fileName, sizeText(model.fileSize), companion), widget); item->setData(Qt::UserRole, model.id); } };
-    populate(m_generationModels, QStringLiteral("image-generation")); populate(m_upscaleModels, QStringLiteral("upscaler")); populate(m_llmChatModels, QStringLiteral("llm-chat")); populate(m_ipAdapterModels, QStringLiteral("ip-adapter"));
+    m_models->clear();
+    auto *root = new QTreeWidgetItem(m_models, {tr("Models")});
+    root->setFlags(root->flags() & ~Qt::ItemIsSelectable);
+    const QList<QPair<QString, QString>> categories = {
+        {QStringLiteral("edition"), tr("Edition")},
+        {QStringLiteral("llm-chat"), tr("LLM")},
+        {QStringLiteral("image-generation"), tr("Image generation")},
+        {QStringLiteral("upscaler"), tr("Upscaler")},
+        {QStringLiteral("ip-adapter"), tr("IP-Adapter")}
+    };
+    for (const auto &category : categories) {
+        auto *categoryItem = new QTreeWidgetItem(root, {category.second});
+        categoryItem->setFlags(categoryItem->flags() & ~Qt::ItemIsSelectable);
+        for (const ManagedModelInfo &model : m_client->models(category.first)) {
+            auto *modelItem = new QTreeWidgetItem(categoryItem, {model.name, model.fileName, sizeText(model.fileSize)});
+            modelItem->setData(0, Qt::UserRole, model.id);
+            modelItem->setToolTip(1, model.fileName);
+            if (!model.companionFileName.isEmpty()) {
+                const QString role = model.companionRole.isEmpty() ? tr("Companion") : model.companionRole;
+                auto *companion = new QTreeWidgetItem(modelItem, {role, QFileInfo(model.companionFileName).fileName()});
+                companion->setToolTip(1, model.companionFileName);
+            }
+        }
+    }
+    m_models->expandAll();
     updateDeleteButton();
 }
 
@@ -110,40 +139,32 @@ void ManageModelsWindow::populateInstalls()
 
 void ManageModelsWindow::updateInstallButton()
 {
-    const QUrl url(m_url->text().trimmed()); const QString checksum = m_sha256->text().trimmed();
+    const QUrl url(m_url->text().trimmed());
     const QUrl companionUrl(m_companionUrl->text().trimmed());
-    const bool checksumValid = checksum.isEmpty() || QRegularExpression(QStringLiteral("^[0-9a-fA-F]{64}$")).match(checksum).hasMatch();
     const QString category = m_category->currentData().toString();
-    const bool companionValid = category != QStringLiteral("ip-adapter") || m_companionUrl->text().trimmed().isEmpty() || validModelUrl(companionUrl);
+    const bool companionValid = category == QStringLiteral("upscaler") || m_companionUrl->text().trimmed().isEmpty() || validModelUrl(companionUrl);
     const QList<ManagedInstall> installs = m_client->installs();
     const bool duplicate = std::any_of(installs.cbegin(), installs.cend(), [&category, &url](const ManagedInstall &install) { return install.category == category && install.url == url && install.state != ManagedInstallState::Completed && install.state != ManagedInstallState::Failed; });
-    m_installButton->setEnabled(m_client->isAuthenticated() && validModelUrl(url) && checksumValid && companionValid && !duplicate);
+    m_installButton->setEnabled(m_client->isAuthenticated() && validModelUrl(url) && companionValid && !duplicate);
 }
 
 void ManageModelsWindow::startInstall()
 {
     const QString category = m_category->currentData().toString();
-    if (!m_client->installModel(category, QUrl(m_url->text().trimmed()), m_sha256->text().trimmed(), category == QStringLiteral("ip-adapter") ? QUrl(m_companionUrl->text().trimmed()) : QUrl()).isEmpty()) { m_url->clear(); m_companionUrl->clear(); m_sha256->clear(); }
+    if (!m_client->installModel(category, QUrl(m_url->text().trimmed()), category != QStringLiteral("upscaler") ? QUrl(m_companionUrl->text().trimmed()) : QUrl()).isEmpty()) { m_url->clear(); m_companionUrl->clear(); }
 }
 
 void ManageModelsWindow::updateDeleteButton()
 {
-    bool hasSelection = false;
-    for (QListWidget *list : {m_generationModels, m_upscaleModels, m_llmChatModels, m_ipAdapterModels}) {
-        if (list->currentItem() && list->currentItem()->data(Qt::UserRole).isValid()) { hasSelection = true; break; }
-    }
+    const auto selected = m_models->selectedItems();
+    const bool hasSelection = !selected.isEmpty() && !selected.first()->data(0, Qt::UserRole).toString().isEmpty();
     m_deleteButton->setEnabled(m_client->isAuthenticated() && hasSelection);
 }
 
 void ManageModelsWindow::deleteSelectedModel()
 {
-    QString id;
-    for (QListWidget *list : {m_generationModels, m_upscaleModels, m_llmChatModels, m_ipAdapterModels}) {
-        if (list->currentItem()) {
-            id = list->currentItem()->data(Qt::UserRole).toString();
-            if (!id.isEmpty()) break;
-        }
-    }
+    const auto selected = m_models->selectedItems();
+    const QString id = selected.isEmpty() ? QString() : selected.first()->data(0, Qt::UserRole).toString();
     if (id.isEmpty()) return;
     if (QMessageBox::question(this, tr("Delete model"), tr("Delete %1? This cannot be undone.").arg(id), QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes) {
         m_deleteButton->setEnabled(false);

@@ -13,7 +13,8 @@ enum class ModelCategory
     ImageGeneration,
     Upscaler,
     LlmChat,
-    IpAdapter
+    IpAdapter,
+    Edition
 };
 
 struct ModelInfo
@@ -24,6 +25,7 @@ struct ModelInfo
     qint64 fileSize = 0;
     QString filePath;
     QString companionFileName;
+    QString companionRole;
 };
 
 Q_DECLARE_METATYPE(ModelInfo)
@@ -33,7 +35,6 @@ struct ModelInstallRequest
     QString installId;
     ModelCategory category = ModelCategory::ImageGeneration;
     QUrl url;
-    std::optional<QString> expectedSha256;
     std::optional<QUrl> companionUrl;
 };
 
@@ -63,6 +64,7 @@ public:
 
     static QList<ModelCategory> categories();
     static QString categoryName(ModelCategory category);
+    static QString companionRole(ModelCategory category);
     static std::optional<ModelCategory> categoryFromName(const QString &name);
     QList<ModelInfo> models(ModelCategory category) const;
     std::optional<ModelInfo> model(ModelCategory category, const QString &id) const;
@@ -81,10 +83,10 @@ private:
 
     QString rootPath() const;
     QString directoryPath(ModelCategory category) const;
-    QString companionMetadataPath() const;
-    QString companionPath(const QString &primaryFileName, const QString &companionFileName) const;
-    QHash<QString, QString> companionMetadata() const;
-    bool writeCompanionMetadata(const QHash<QString, QString> &metadata) const;
+    QString companionMetadataPath(ModelCategory category) const;
+    QString companionPath(ModelCategory category, const QString &primaryFileName, const QString &companionFileName) const;
+    QHash<QString, QString> companionMetadata(ModelCategory category) const;
+    bool writeCompanionMetadata(ModelCategory category, const QHash<QString, QString> &metadata) const;
     bool ensureDirectory(ModelCategory category, QString *errorMessage) const;
     bool acceptsUrl(const QUrl &url) const;
     bool acceptsRedirectUrl(const QUrl &url) const;
@@ -95,8 +97,6 @@ private:
     void startCompanionInstall();
     void finishNetworkRequest();
     void writeAvailableData();
-    void startVerification();
-    void verifyNextChunk();
     void completeInstall();
     void failActiveInstall(const QString &errorMessage);
     void emitProgress(ModelInstallState state, qint64 bytesDownloaded = 0, std::optional<qint64> totalBytes = {});
