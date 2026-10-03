@@ -3,7 +3,6 @@
 #include "ModelOptionsWidget.h"
 #include <KiraUi/IconProvider.h>
 #include <KiraUi/PrimaryButton.h>
-#include <KiraUi/TitleBar.h>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QFormLayout>
@@ -30,7 +29,6 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
 {
     setWindowTitle(tr("Add model"));
     setWindowIcon(QIcon(QStringLiteral(":/manager/icons/manager-32.png")));
-    titleBar()->setIcon(windowIcon());
     setModal(true);
     resize(620, 610);
     setMinimumSize(520, 480);

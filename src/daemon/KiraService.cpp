@@ -7,6 +7,10 @@
 #include "SdCliRunner.h"
 
 #include <QDebug>
+#include <QDir>
+#include <cmath>
+#include <limits>
+#include <kira/service/ModelOptions.h>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -22,11 +26,39 @@ namespace
 {
 constexpr int MaximumQueuedJobs = 8;
 
-bool validPositiveInteger(const QJsonObject &object, const QString &name, int minimum, int maximum)
+bool validNumber(const QJsonObject &object, const QString &name, double minimum, double maximum,
+                 bool integer, bool required = true)
 {
-    const int value = object.value(name).toInt(-1);
-    return value >= minimum && value <= maximum;
+    if (!object.contains(name)) return !required;
+    const auto value = object.value(name);
+    const double number = value.toDouble();
+    return value.isDouble() && std::isfinite(number) && number >= minimum && number <= maximum
+        && (!integer || std::floor(number) == number);
 }
+
+bool validGenerationOptions(const QJsonObject &options)
+{
+    const auto optionalString = [&options](const QString &key) {
+        return !options.contains(key) || options.value(key).isString();
+    };
+    const auto validChoice = [&options](const QString &key, const QStringList &choices) {
+        return !options.contains(key) || (options.value(key).isString() && choices.contains(options.value(key).toString()));
+    };
+    return options.value("prompt").isString() && !options.value("prompt").toString().trimmed().isEmpty()
+        && optionalString("negativePrompt")
+        && validNumber(options, "width", 64, 4096, true)
+        && validNumber(options, "height", 64, 4096, true)
+        && validNumber(options, "steps", 1, 200, true)
+        && validNumber(options, "cfgScale", 0, 100, false, false)
+        && validNumber(options, "seed", -1, std::numeric_limits<int>::max(), true, false)
+        && validNumber(options, "baseImageStrength", 0, 1, false, false)
+        && (!options.contains("clipSkip") || (validNumber(options, "clipSkip", -1, 12, true)
+                                             && options.value("clipSkip").toInt() != 0))
+        && validChoice("sampler", KiraService::Protocol::modelSamplers())
+        && validChoice("scheduler", KiraService::Protocol::modelSchedulers())
+        && (!options.contains("hasInput") || options.value("hasInput").isBool());
+}
+
 }
 
 struct KiraServiceDaemon::Submission
@@ -35,6 +67,7 @@ struct KiraServiceDaemon::Submission
     Operation operation = Operation::Generate;
     QJsonObject options;
     QString modelPath;
+    QString vaePath;
     QPointer<QWebSocket> client;
 };
 
@@ -44,6 +77,7 @@ struct KiraServiceDaemon::Job
     Operation operation = Operation::Generate;
     QJsonObject options;
     QString modelPath;
+    QString vaePath;
     QPointer<QWebSocket> client;
     std::unique_ptr<QTemporaryDir> directory = std::make_unique<QTemporaryDir>();
     QString inputPath;
@@ -233,16 +267,18 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         return;
     }
     if (m_queue.size() >= MaximumQueuedJobs) { sendError(socket, QStringLiteral("queue-full"), tr("The service queue is full"), jobId); return; }
-    if (generate && (options.value(QStringLiteral("prompt")).toString().trimmed().isEmpty()
-        || !validPositiveInteger(options, QStringLiteral("width"), 64, 4096)
-        || !validPositiveInteger(options, QStringLiteral("height"), 64, 4096)
-        || !validPositiveInteger(options, QStringLiteral("steps"), 1, 200))) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid generation options"), jobId); return; }
+    if (generate && !validGenerationOptions(options)) {
+        sendError(socket, QStringLiteral("invalid-request"), tr("Invalid generation options"), jobId);
+        return;
+    }
     const bool needsInput = upscale || options.value(QStringLiteral("hasInput")).toBool();
     auto submission = std::make_shared<Submission>();
     submission->id = jobId;
     submission->operation = generate ? Operation::Generate : Operation::Upscale;
     submission->options = options;
     submission->modelPath = model->filePath;
+    if (generate && model->companionRole == QStringLiteral("vae") && !model->companionFileName.isEmpty())
+        submission->vaePath = QDir(QFileInfo(model->filePath).absolutePath()).filePath(model->companionFileName);
     submission->client = socket;
     if (needsInput) {
         m_pendingUploads.insert(socket, submission);
@@ -254,6 +290,7 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     job->operation = submission->operation;
     job->options = options;
     job->modelPath = model->filePath;
+    job->vaePath = submission->vaePath;
     job->client = socket;
     enqueue(job);
 }
@@ -389,6 +426,7 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
     job->operation = submission->operation;
     job->options = submission->options;
     job->modelPath = submission->modelPath;
+    job->vaePath = submission->vaePath;
     job->client = socket;
     if (!job->directory->isValid()) { sendError(socket, QStringLiteral("storage-error"), tr("Could not create job storage"), job->id); return; }
     job->inputPath = job->directory->filePath(QStringLiteral("input.png"));
@@ -419,9 +457,10 @@ void KiraServiceDaemon::startNextJob()
         request.prompt = o.value(QStringLiteral("prompt")).toString(); request.negativePrompt = o.value(QStringLiteral("negativePrompt")).toString();
         request.sampler = o.value(QStringLiteral("sampler")).toString(); request.scheduler = o.value(QStringLiteral("scheduler")).toString();
         request.width = o.value(QStringLiteral("width")).toInt(); request.height = o.value(QStringLiteral("height")).toInt(); request.steps = o.value(QStringLiteral("steps")).toInt();
-        request.cfgScale = o.value(QStringLiteral("cfgScale")).toDouble(); request.clipSkip = o.value(QStringLiteral("clipSkip")).toInt(-1); request.seed = o.value(QStringLiteral("seed")).toInt();
+        request.cfgScale = o.value(QStringLiteral("cfgScale")).toDouble(7.0); request.clipSkip = o.value(QStringLiteral("clipSkip")).toInt(-1); request.seed = o.value(QStringLiteral("seed")).toInt(-1);
         request.baseImageStrength = o.value(QStringLiteral("baseImageStrength")).toDouble(0.55); request.outputPath = m_activeJob->outputPath;
         request.modelPath = m_activeJob->modelPath;
+        request.vaePath = m_activeJob->vaePath;
         if (o.value(QStringLiteral("hasInput")).toBool()) request.baseImagePath = m_activeJob->inputPath;
         if (!m_sdRunner || !m_sdRunner->runGeneration(request)) { sendError(m_activeJob->client, QStringLiteral("start-failed"), tr("Could not start generation"), m_activeJob->id); m_activeJob.reset(); startNextJob(); }
     } else if (m_activeJob->operation == Operation::Upscale) {

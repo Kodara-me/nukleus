@@ -5,7 +5,6 @@
 #include <KiraUi/IconProvider.h>
 #include <KiraUi/Panel.h>
 #include <KiraUi/PrimaryButton.h>
-#include <KiraUi/TitleBar.h>
 #include <KiraUi/TreeView.h>
 #include <QApplication>
 #include <QCloseEvent>
@@ -37,7 +36,6 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     setWindowIcon(QApplication::windowIcon().isNull()
                       ? QIcon(QStringLiteral(":/manager/icons/manager-32.png"))
                       : QApplication::windowIcon());
-    titleBar()->setIcon(windowIcon());
     setMinimumSize(1000, 550);
     resize(1300, 680);
     QSettings settings;

@@ -10,7 +10,7 @@
 - CMake also installs SDK headers and static libraries and generates the `KiraServiceSdk` package. The SDK supports image operations.
 - Use `$XDG_DATA_HOME/kira-service/models/` with `upscale/`, `llm/`, and `edition/` subdirectories. The `edition` category manages image-editing model files; editing jobs remain outside its current scope. Never overwrite installed model files. Keep the legacy-root migration safe and non-merging.
 - Linux systemd deployment keeps the `kira-service` account, `/etc/kira-service`, `/var/lib/kira-service`, `/run/kira-service`, and fixed port `9384`.
-- Optional companions use category-local persistent metadata: mmproj for LLM-chat, VAE for Image-generation/Edition, and LoRA for IP-Adapter. Install and delete them with their primary model; expose only category-relative companion filenames and roles. Do not perform SHA-256 download checks. Catalog attachments do not change `sd-cli` invocation.
+- Optional companions use category-local persistent metadata: mmproj for LLM-chat, VAE for Image-generation/Edition, and LoRA for IP-Adapter. Install and delete them with their primary model; expose only category-relative companion filenames and roles. Do not perform SHA-256 download checks. Image-generation VAE companions are resolved internally and passed with --vae; mmproj and LoRA remain catalog attachments. Validate generation values/types before queuing, omit automatic sampler/scheduler flags, and preserve numeric precision. Never auto-apply recommendedOptions to jobs.
 - Build and run CTest after each slice. Keep README and CONTRIBUTING accurate.
 
 ## Manager UI and recommended options
@@ -18,6 +18,7 @@
 - Link only the manager/UI tests to KiraUi::Widgets 0.2. Default to the sibling
   checkout, allow KIRA_UI_SOURCE_DIR, and fall back to an installed package.
   Keep daemon and SDK independent of the visual framework.
+- Use native OS title bars and window/dialog buttons; keep the Kira content theme.
 - Apply KiraUi::Theme only in GUI mode. Use the shared MainWindow/Dialog, panels,
   tree and controls. Preserve the local CLI and fixed loopback connection.
 - Use a landscape model tree/details splitter, default 1300×680 and minimum

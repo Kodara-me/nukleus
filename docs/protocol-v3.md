@@ -10,7 +10,7 @@ The version-3 authentication message is required for every client. Loopback peer
 
 The service replies with `authenticated` and `capabilities`. `models.list` returns the `image-generation`, `edition`, `upscaler`, `llm-chat`, and `ip-adapter` categories. Each model contains `id`, `name`, `fileName`, and `bytes`; a model with a companion also includes the category-relative `companionFileName` and `companionRole` (`lora`, `mmproj`, or `vae`).
 
-Model administrators send `models.install` with a client-generated `installId`, explicit category, and HTTPS model-file URL. Optional `companionUrl` is a LoRA for `ip-adapter`, mmproj for `llm-chat`, or VAE for `image-generation` and `edition`; it is rejected for `upscaler`. mmproj requires a `.gguf` filename; VAE and LoRA accept `.safetensors`, `.ckpt`, or `.gguf`. SHA-256 is no longer checked or accepted by the SDK/manager; legacy protocol `sha256` fields are ignored. The service stages both downloads and commits the primary, companion, and relationship metadata together, so a failed or canceled pair leaves no usable catalog entry. A restart preserves the relationship; deletion removes both files. Listings and install completion expose the companion filename and role, never absolute paths. This does not change job operations or `sd-cli` invocation. The service emits `models.install.accepted`, `models.install.progress`, `models.install.completed`, or an `error` containing that `installId`.
+Model administrators send `models.install` with a client-generated `installId`, explicit category, and HTTPS model-file URL. Optional `companionUrl` is a LoRA for `ip-adapter`, mmproj for `llm-chat`, or VAE for `image-generation` and `edition`; it is rejected for `upscaler`. mmproj requires a `.gguf` filename; VAE and LoRA accept `.safetensors`, `.ckpt`, or `.gguf`. SHA-256 is no longer checked or accepted by the SDK/manager; legacy protocol `sha256` fields are ignored. The service stages both downloads and commits the primary, companion, and relationship metadata together, so a failed or canceled pair leaves no usable catalog entry. A restart preserves the relationship; deletion removes both files. Listings and install completion expose the companion filename and role, never absolute paths. Image-generation VAE companions are resolved internally and passed to sd-cli with --vae; other companion roles do not alter image invocation. The service emits `models.install.accepted`, `models.install.progress`, `models.install.completed`, or an `error` containing that `installId`.
 
 For example:
 
@@ -86,3 +86,27 @@ strings. Modified entries become objects containing optional
 `companionFileName` and `recommendedOptions`. Untouched entries are preserved;
 QSaveFile writes are atomic. Invalid/unreadable JSON must never be silently
 replaced during install, configure, or delete.
+
+## Image-generation option validation
+
+`submit` / `image.generate` validates options before accepting a job or requesting
+an input upload. Invalid types or ranges return `invalid-request` correlated to
+`jobId`. Model recommendations are never applied implicitly.
+
+| Field | Accepted values |
+|---|---|
+| prompt | Required non-empty string (after trimming) |
+| negativePrompt | Optional string; defaults to empty |
+| width, height | Required integers 64–4096; rectangular sizes are allowed |
+| steps | Required integer 1–200 |
+| cfgScale | Optional finite number 0–100; defaults to 7 |
+| sampler, scheduler | Optional strings from the recommended-options lists; absent or empty means Automatic |
+| clipSkip | Optional integer -1 or 1–12; defaults to -1 (Automatic) |
+| seed | Optional integer -1–2147483647; defaults to -1 |
+| hasInput | Optional boolean; defaults to false |
+| baseImageStrength | Optional finite number 0–1; defaults to 0.55 |
+
+Automatic sampler/scheduler flags are omitted from the backend command. Positive
+Clip Skip values are forwarded; -1 omits the flag. CFG and image strength retain
+numeric precision. The selected model's installed VAE is used for direct and
+uploaded-input generation; clients neither submit nor receive its filesystem path.

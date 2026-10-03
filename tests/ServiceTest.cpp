@@ -5,6 +5,7 @@
 #include <kira/service/ModelOptions.h>
 
 #include <QDir>
+#include <QScopeGuard>
 #include <QFile>
 #include <QFileInfo>
 #include <QHostAddress>
@@ -59,6 +60,7 @@ class ServiceTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void generatesWithValidatedOptionsAndVae();
     void validatesRecommendedOptions();
     void persistsOptionsAndLegacyMetadata();
     void reservesSingleInstallAndCancels();
@@ -95,6 +97,221 @@ QHostAddress availableLanAddress()
     }
     return {};
 }
+}
+
+void ServiceTest::generatesWithValidatedOptionsAndVae()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli fixture requires a POSIX shell.");
+#endif
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QByteArray oldPath = qgetenv("PATH");
+    const auto restore = qScopeGuard(
+        [oldPath]
+        {
+            qputenv("PATH", oldPath);
+            qunsetenv("KIRA_TEST_ARGS");
+            qunsetenv("KIRA_TEST_IMAGE");
+        });
+    qputenv("PATH", directory.path().toUtf8() + ':' + oldPath);
+    const QString capture = directory.filePath("args.txt");
+    qputenv("KIRA_TEST_ARGS", capture.toUtf8());
+    const QByteArray image = QByteArray::fromBase64(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1kAAAAASUVORK5CYII=");
+    QFile imageFile(directory.filePath("fixture.png"));
+    QVERIFY(imageFile.open(QIODevice::WriteOnly));
+    imageFile.write(image);
+    imageFile.close();
+    qputenv("KIRA_TEST_IMAGE", imageFile.fileName().toUtf8());
+    QFile executable(directory.filePath("sd-cli"));
+    QVERIFY(executable.open(QIODevice::WriteOnly));
+    executable.write("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$KIRA_TEST_ARGS\"\nprevious=\"\"\nfor argument in "
+                     "\"$@\"; do\n if [ \"$previous\" = --output ]; then cp \"$KIRA_TEST_IMAGE\" "
+                     "\"$argument\"; fi\n previous=\"$argument\"\ndone\nexit 0\n");
+    executable.close();
+    QVERIFY(executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    const QString root = directory.filePath("models");
+    const QString companion = "companions/model.gguf/vae with space.safetensors";
+    QVERIFY(QDir().mkpath(QDir(root).filePath("companions/model.gguf")));
+    for (const QString &name : {QString("model.gguf"), QString("plain.gguf"), companion})
+    {
+        QFile file(QDir(root).filePath(name));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("fixture");
+    }
+    QFile metadata(QDir(root).filePath("metadata.json"));
+    QVERIFY(metadata.open(QIODevice::WriteOnly));
+    metadata.write(QJsonDocument(QJsonObject{{"model.gguf",
+                                              QJsonObject{{"companionFileName", companion},
+                                                          {"recommendedOptions",
+                                                           QJsonObject{{"steps", 99}, {"cfgScale", 9.5}}}}}})
+                       .toJson());
+    metadata.close();
+    KiraServiceConfiguration configuration;
+    configuration.port = 0;
+    configuration.modelRootPath = root;
+    KiraServiceDaemon service(configuration);
+    QString error;
+    QVERIFY2(service.start(&error), qPrintable(error));
+    QWebSocket socket;
+    QList<QJsonObject> messages;
+    QSignalSpy images(&socket, &QWebSocket::binaryMessageReceived);
+    connect(&socket, &QWebSocket::textMessageReceived, this,
+            [&](const QString &text) { messages.append(QJsonDocument::fromJson(text.toUtf8()).object()); });
+    socket.open(QUrl(QString("ws://127.0.0.1:%1").arg(service.serverPort())));
+    QTRY_COMPARE(socket.state(), QAbstractSocket::ConnectedState);
+    socket.sendTextMessage("{\"type\":\"authenticate\",\"version\":3}");
+    QTRY_VERIFY(messages.size() >= 2);
+    messages.clear();
+    const auto send = [&](const QString &id, const QJsonObject &options)
+    {
+        socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "submit"},
+                                                                           {"operation", "image.generate"},
+                                                                           {"jobId", id},
+                                                                           {"options", options}})
+                                                     .toJson(QJsonDocument::Compact)));
+    };
+    const auto terminal = [&](const QString &id)
+    {
+        for (const auto &message : messages)
+            if (message.value("jobId").toString() == id &&
+                (message.value("type") == "error" || message.value("type") == "result"))
+                return true;
+        return false;
+    };
+    const QJsonObject valid{{"modelId", "image-generation:model.gguf"},
+                            {"prompt", "test"},
+                            {"negativePrompt", ""},
+                            {"width", 896},
+                            {"height", 1152},
+                            {"steps", 37},
+                            {"cfgScale", 5.75},
+                            {"seed", -1},
+                            {"sampler", ""},
+                            {"scheduler", ""},
+                            {"clipSkip", -1},
+                            {"hasInput", false},
+                            {"baseImageStrength", 0.55}};
+    const QList<QPair<QString, QJsonValue>> invalid = {{"prompt", 42},
+                                                       {"prompt", " "},
+                                                       {"negativePrompt", false},
+                                                       {"width", 64.5},
+                                                       {"width", "1024"},
+                                                       {"height", 0},
+                                                       {"height", 4097},
+                                                       {"steps", 0},
+                                                       {"steps", 201},
+                                                       {"steps", 28.5},
+                                                       {"cfgScale", -0.1},
+                                                       {"cfgScale", 100.1},
+                                                       {"cfgScale", "7"},
+                                                       {"cfgScale", QJsonValue(QJsonValue::Null)},
+                                                       {"seed", -2},
+                                                       {"seed", 2147483648.0},
+                                                       {"seed", 1.5},
+                                                       {"seed", true},
+                                                       {"clipSkip", 0},
+                                                       {"clipSkip", 13},
+                                                       {"clipSkip", -2},
+                                                       {"clipSkip", 1.5},
+                                                       {"clipSkip", "2"},
+                                                       {"sampler", "unknown"},
+                                                       {"sampler", true},
+                                                       {"scheduler", "unknown"},
+                                                       {"scheduler", QJsonValue(QJsonValue::Null)},
+                                                       {"hasInput", "true"},
+                                                       {"baseImageStrength", -0.1},
+                                                       {"baseImageStrength", 1.1},
+                                                       {"baseImageStrength", "0.5"}};
+    int index = 0;
+    for (const auto &field : invalid)
+    {
+        QJsonObject options = valid;
+        options.insert(field.first, field.second);
+        const QString id = QString("invalid-%1").arg(index++);
+        messages.clear();
+        send(id, options);
+        QTRY_VERIFY(terminal(id));
+        QCOMPARE(messages.last().value("code").toString(), QString("invalid-request"));
+        QVERIFY(!QFileInfo::exists(capture));
+    }
+    const auto arguments = [&]
+    {
+        QFile file(capture);
+        if (!file.open(QIODevice::ReadOnly))
+            return QStringList{};
+        return QString::fromUtf8(file.readAll()).split('\n');
+    };
+    messages.clear();
+    send("automatic", valid);
+    QTRY_VERIFY(terminal("automatic"));
+    QTRY_COMPARE(images.count(), 1);
+    QCOMPARE(images.last().first().toByteArray(), image);
+    auto args = arguments();
+    QVERIFY(!args.contains("--sampling-method"));
+    QVERIFY(!args.contains("--scheduler"));
+    QVERIFY(!args.contains("--clip-skip"));
+    QCOMPARE(args.value(args.indexOf("--cfg-scale") + 1), QString("5.75"));
+    QCOMPARE(args.value(args.indexOf("--steps") + 1), QString("37"));
+    QCOMPARE(args.value(args.indexOf("--vae") + 1), QDir(root).filePath(companion));
+    QJsonObject explicitOptions = valid;
+    explicitOptions.insert("sampler", "dpm++2m");
+    explicitOptions.insert("scheduler", "karras");
+    explicitOptions.insert("clipSkip", 12);
+    explicitOptions.insert("cfgScale", 7.125);
+    explicitOptions.insert("seed", 2147483647);
+    explicitOptions.insert("hasInput", true);
+    explicitOptions.insert("baseImageStrength", 0.5678);
+    messages.clear();
+    send("explicit", explicitOptions);
+    QTRY_VERIFY(!messages.isEmpty() && messages.last().value("type") == "upload-required");
+    socket.sendBinaryMessage(QByteArray("fixture input"));
+    QTRY_VERIFY(terminal("explicit"));
+    QTRY_COMPARE(images.count(), 2);
+    args = arguments();
+    QCOMPARE(args.value(args.indexOf("--sampling-method") + 1), QString("dpm++2m"));
+    QCOMPARE(args.value(args.indexOf("--scheduler") + 1), QString("karras"));
+    QCOMPARE(args.value(args.indexOf("--clip-skip") + 1), QString("12"));
+    QCOMPARE(args.value(args.indexOf("--cfg-scale") + 1), QString("7.125"));
+    QCOMPARE(args.value(args.indexOf("--strength") + 1).toDouble(), 0.5678);
+    QCOMPARE(args.value(args.indexOf("--vae") + 1), QDir(root).filePath(companion));
+    QVERIFY(args.contains("--init-img"));
+    QJsonObject minimal{{"modelId", "image-generation:plain.gguf"},
+                        {"prompt", "test"},
+                        {"width", 64},
+                        {"height", 4096},
+                        {"steps", 200}};
+    messages.clear();
+    send("minimal", minimal);
+    QTRY_VERIFY(terminal("minimal"));
+    QTRY_COMPARE(images.count(), 3);
+    args = arguments();
+    QVERIFY(!args.contains("--vae"));
+    QVERIFY(!args.contains("--sampling-method"));
+    QCOMPARE(args.value(args.indexOf("--cfg-scale") + 1), QString("7"));
+    QCOMPARE(args.value(args.indexOf("--seed") + 1), QString("-1"));
+    for (const auto &message : messages)
+        QVERIFY(!QJsonDocument(message).toJson().contains(root.toUtf8()));
+    int completed = 3;
+    for (double cfg : {0.0, 100.0})
+    {
+        auto boundary = valid;
+        boundary.insert("cfgScale", cfg);
+        boundary.insert("clipSkip", 1);
+        boundary.insert("seed", 0);
+        boundary.insert("baseImageStrength", cfg == 0 ? 0.0 : 1.0);
+        boundary.insert("sampler", "euler");
+        boundary.insert("scheduler", "discrete");
+        const QString id = QString("boundary-%1").arg(cfg);
+        messages.clear();
+        send(id, boundary);
+        QTRY_VERIFY(terminal(id));
+        ++completed;
+        QTRY_COMPARE(images.count(), completed);
+        args = arguments();
+        QCOMPARE(args.value(args.indexOf("--cfg-scale") + 1).toDouble(), cfg);
+    }
 }
 
 void ServiceTest::validatesRecommendedOptions()

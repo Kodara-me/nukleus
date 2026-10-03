@@ -67,3 +67,14 @@ Validate both 1300 × 680 and 1000 × 550 and review the add-model modal. Qt-onl
 manager UI code follows the framework's cross-platform behavior; the existing
 service deployment, CLI and model-file commit operations retain their platform
 requirements. Check available platforms and report any untested ones.
+
+Manager windows and dialogs use native platform title bars and buttons while
+keeping the Kira content theme. Window movement/resizing is handled by the OS;
+verify actual decorations on each target desktop in addition to offscreen tests.
+
+Generation option validation and backend arguments are covered by a disposable
+POSIX fake sd-cli fixture: no installed model or GPU is used. Tests cover automatic
+and explicit sampler/scheduler, CFG precision, malformed/out-of-range options,
+optional defaults, VAE arguments for direct and uploaded-input jobs, and result
+bytes. Rebuild and rerun the Linux installer to update a systemd-installed daemon;
+a workspace build alone does not update the running service.

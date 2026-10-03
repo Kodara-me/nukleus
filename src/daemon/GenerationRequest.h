@@ -18,4 +18,5 @@ struct GenerationRequest
     double baseImageStrength = 0.55;
     QString outputPath;
     QString modelPath;
+    QString vaePath;
 };
