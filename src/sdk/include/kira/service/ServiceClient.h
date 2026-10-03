@@ -28,7 +28,9 @@ public:
     QList<ModelInfo> models(ModelCategory category = ModelCategory::Unknown) const;
     QList<ModelInstall> installs() const;
     void requestModels();
-    QString installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl = {});
+    QString installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl = {}, const QJsonObject &recommendedOptions = {});
+    bool configureModel(const QString &id, const QJsonObject &options);
+    bool cancelInstall(const QString &installId);
     bool deleteModel(const QString &id);
     QString submitGeneration(const ImageGenerationRequest &request);
     QString submitUpscale(const ImageUpscaleRequest &request);
@@ -37,6 +39,7 @@ signals:
     void capabilitiesChanged(const KiraService::ServiceCapabilities &capabilities);
     void modelsChanged();
     void installsChanged();
+    void modelConfigured(const QString &id, const QJsonObject &options);
     void modelDeleted(const QString &id);
     void modelOperationFailed(const QString &id, const QString &message);
     void jobStateChanged(const QString &jobId, KiraService::JobState state, int queuePosition);

@@ -2,6 +2,7 @@
 #include "ModelCatalog.h"
 #include "ServicePaths.h"
 #include <kira/service/ServiceProtocol.h>
+#include <kira/service/ModelOptions.h>
 
 #include <QDir>
 #include <QFile>
@@ -30,6 +31,7 @@ public:
             QTcpSocket *socket = m_server.nextPendingConnection();
             connect(socket, &QTcpSocket::readyRead, this, [this, socket] {
                 const QByteArray request = socket->readAll();
+                if (request.contains("slow.gguf")) return;
                 if (request.contains("missing.safetensors")) {
                     socket->write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                     socket->disconnectFromHost(); return;
@@ -57,6 +59,12 @@ class ServiceTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void validatesRecommendedOptions();
+    void persistsOptionsAndLegacyMetadata();
+    void reservesSingleInstallAndCancels();
+    void cancelsDuringCompanionDownload();
+    void rollsBackMetadataFailure();
+    void configuresModelsOverProtocol();
     void preservesProtocolV3();
     void rejectsLanWithoutToken();
     void startsOnLoopbackAndLanAddress();
@@ -87,6 +95,119 @@ QHostAddress availableLanAddress()
     }
     return {};
 }
+}
+
+void ServiceTest::validatesRecommendedOptions()
+{
+    using namespace KiraService::Protocol;
+    for (auto category : {"image-generation", "edition", "llm-chat", "upscaler", "ip-adapter"}) {
+        auto options = defaultModelOptions(category); QVERIFY(validateModelOptions(category, options));
+        options.insert("unrelated", true); QVERIFY(!validateModelOptions(category, options));
+    }
+    auto image = defaultModelOptions("image-generation"); image.insert("steps", "28"); QVERIFY(!validateModelOptions("image-generation", image));
+    image.insert("steps", 28.5); QVERIFY(!validateModelOptions("image-generation", image));
+    image.insert("steps", 200); image.insert("width", 2048); image.insert("height", 2048); QVERIFY(validateModelOptions("image-generation", image));
+    image.insert("clipSkip", 0); QVERIFY(!validateModelOptions("image-generation", image));
+    image.insert("clipSkip", 12); image.insert("sampler", "unknown"); QVERIFY(!validateModelOptions("image-generation", image));
+    auto llm = defaultModelOptions("llm-chat"); llm.insert("maxTokens", 4097); QVERIFY(!validateModelOptions("llm-chat", llm));
+    llm.insert("maxTokens", 4096); llm.insert("topP", 0); QVERIFY(!validateModelOptions("llm-chat", llm));
+    QVERIFY(!validateModelOptions("upscaler", {{"tileSize", 129}}));
+    QVERIFY(!validateModelOptions("ip-adapter", {{"strength", 2.1}}));
+}
+
+void ServiceTest::persistsOptionsAndLegacyMetadata()
+{
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QVERIFY(QDir().mkpath(directory.filePath("companions/legacy.gguf")));
+    for (const QString &name : {QString("legacy.gguf"), QString("companions/legacy.gguf/vae.gguf"), QString("untouched.gguf")}) {
+        QFile file(directory.filePath(name)); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("model");
+    }
+    QFile file(directory.filePath("metadata.json")); QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write("{\"legacy.gguf\":\"companions/legacy.gguf/vae.gguf\",\"untouched.gguf\":\"companions/untouched.gguf/vae.gguf\"}"); file.close();
+    ModelCatalog catalog(directory.path(), true); const QString id = "image-generation:legacy.gguf";
+    QVERIFY(catalog.modelById(id)); QVERIFY(catalog.modelById(id)->recommendedOptions.isEmpty());
+    const auto options = KiraService::Protocol::defaultModelOptions("image-generation"); QString error;
+    QVERIFY2(catalog.configure(id, options, &error), qPrintable(error));
+    ModelCatalog restored(directory.path(), true); QCOMPARE(restored.modelById(id)->recommendedOptions, options);
+    QCOMPARE(restored.modelById(id)->companionFileName, QString("companions/legacy.gguf/vae.gguf"));
+    QVERIFY(file.open(QIODevice::ReadOnly)); auto metadata = QJsonDocument::fromJson(file.readAll()).object(); file.close();
+    QVERIFY(metadata.value("untouched.gguf").isString());
+    auto bad = options; bad.insert("steps", -1); QVERIFY(!catalog.configure(id, bad, &error)); QCOMPARE(catalog.modelById(id)->recommendedOptions, options);
+    QVERIFY(restored.remove(id, &error)); QVERIFY(file.open(QIODevice::ReadOnly)); metadata = QJsonDocument::fromJson(file.readAll()).object(); file.close(); QVERIFY(!metadata.contains("legacy.gguf"));
+    QFile legacy(directory.filePath("legacy.gguf")); QVERIFY(legacy.open(QIODevice::WriteOnly)); legacy.write("model"); legacy.close();
+    QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate)); file.write("broken json"); file.close();
+    QVERIFY(!catalog.configure(id, options, &error)); QVERIFY(!catalog.remove(id, &error));
+    QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), QByteArray("broken json")); QVERIFY(QFileInfo::exists(legacy.fileName()));
+}
+
+void ServiceTest::reservesSingleInstallAndCancels()
+{
+    TestHttpServer server("model"); QVERIFY(server.start()); QTemporaryDir directory; ModelCatalog catalog(directory.path(), true);
+    QSignalSpy canceled(&catalog, &ModelCatalog::installCanceled); QSignalSpy completed(&catalog, &ModelCatalog::installFinished); QString error;
+    QVERIFY(catalog.install({"first", ModelCategory::Upscaler, server.url(), {}}, &error)); QVERIFY(catalog.isInstalling());
+    QVERIFY(!catalog.install({"second", ModelCategory::Upscaler, server.url("other.gguf"), {}}, &error));
+    catalog.cancel("first"); QCOMPARE(canceled.count(), 1); QVERIFY(!catalog.isInstalling());
+    QVERIFY(catalog.install({"third", ModelCategory::Upscaler, server.url(), {}, KiraService::Protocol::defaultModelOptions("upscaler")}, &error));
+    QTRY_COMPARE(completed.count(), 1); QCOMPARE(catalog.models(ModelCategory::Upscaler).first().recommendedOptions, KiraService::Protocol::defaultModelOptions("upscaler"));
+    QVERIFY(!QFileInfo::exists(directory.filePath("upscale/model.gguf.part")));
+}
+
+void ServiceTest::cancelsDuringCompanionDownload()
+{
+    TestHttpServer server("model"); QVERIFY(server.start()); QTemporaryDir directory; ModelCatalog catalog(directory.path(), true);
+    QSignalSpy canceled(&catalog, &ModelCatalog::installCanceled); QSignalSpy completed(&catalog, &ModelCatalog::installFinished); QSignalSpy progress(&catalog, &ModelCatalog::installProgress); QString error;
+    QVERIFY(catalog.install({"pair", ModelCategory::Edition, server.url(), server.url("slow.gguf"), KiraService::Protocol::defaultModelOptions("edition")}, &error));
+    const auto companionStarted = [&progress] {
+        for (const auto &event : progress) if (event.first().value<ModelInstallProgress>().fileRole == "companion") return true;
+        return false;
+    };
+    QTRY_VERIFY(companionStarted());
+    catalog.cancel("pair"); QCOMPARE(canceled.count(), 1); QCOMPARE(completed.count(), 0); QVERIFY(!catalog.isInstalling());
+    QVERIFY(!QFileInfo::exists(directory.filePath("edition/model.gguf.part"))); QVERIFY(!QFileInfo::exists(directory.filePath("edition/companions/model.gguf/slow.gguf.part"))); QVERIFY(catalog.models(ModelCategory::Edition).isEmpty());
+}
+
+void ServiceTest::rollsBackMetadataFailure()
+{
+    TestHttpServer server("model"); QVERIFY(server.start()); QTemporaryDir directory; ModelCatalog catalog(directory.path(), true);
+    QSignalSpy failed(&catalog, &ModelCatalog::installFailed); QSignalSpy completed(&catalog, &ModelCatalog::installFinished); QString error;
+    QVERIFY(catalog.install({"broken", ModelCategory::Edition, server.url(), server.url("vae.gguf"), KiraService::Protocol::defaultModelOptions("edition")}, &error));
+    QVERIFY(QDir().mkpath(directory.filePath("edition/metadata.json")));
+    QTRY_COMPARE(failed.count(), 1); QCOMPARE(completed.count(), 0); QVERIFY(catalog.models(ModelCategory::Edition).isEmpty());
+    QVERIFY(!QFileInfo::exists(directory.filePath("edition/model.gguf"))); QVERIFY(!QFileInfo::exists(directory.filePath("edition/companions/model.gguf/vae.gguf")));
+}
+
+void ServiceTest::configuresModelsOverProtocol()
+{
+    QTemporaryDir directory; QFile model(directory.filePath("test.gguf")); QVERIFY(model.open(QIODevice::WriteOnly)); model.write("model"); model.close();
+    KiraServiceConfiguration configuration; configuration.port = 0; configuration.modelRootPath = directory.path(); KiraServiceDaemon service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
+    QWebSocket client; QSignalSpy received(&client, &QWebSocket::textMessageReceived); client.open(QUrl(QString("ws://127.0.0.1:%1").arg(service.serverPort()))); QTRY_COMPARE(client.state(), QAbstractSocket::ConnectedState);
+    const auto send = [&client](const QJsonObject &object) { client.sendTextMessage(QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact))); };
+    send({{"type", "authenticate"}, {"version", 3}}); QTRY_VERIFY(received.count() >= 2); received.clear();
+    const auto options = KiraService::Protocol::defaultModelOptions("image-generation");
+    send({{"type", "models.configure"}, {"id", "image-generation:test.gguf"}, {"recommendedOptions", options}}); QTRY_COMPARE(received.count(), 1);
+    auto response = QJsonDocument::fromJson(received.takeFirst().first().toString().toUtf8()).object(); QCOMPARE(response.value("type").toString(), QString("models.configure.completed")); QCOMPARE(response.value("model").toObject().value("recommendedOptions").toObject(), options); QVERIFY(!response.value("model").toObject().contains("filePath"));
+    send({{"type", "models.list"}}); QTRY_COMPARE(received.count(), 1); response = QJsonDocument::fromJson(received.takeFirst().first().toString().toUtf8()).object();
+    QCOMPARE(response.value("categories").toArray().first().toObject().value("models").toArray().first().toObject().value("recommendedOptions").toObject(), options);
+    send({{"type", "models.configure"}, {"id", "image-generation:test.gguf"}, {"recommendedOptions", true}}); QTRY_COMPARE(received.count(), 1); response = QJsonDocument::fromJson(received.takeFirst().first().toString().toUtf8()).object(); QCOMPARE(response.value("type").toString(), QString("error"));
+    QTcpServer stalledDownload; QVERIFY(stalledDownload.listen(QHostAddress::LocalHost));
+    const QString url = QString("https://127.0.0.1:%1/one.gguf").arg(stalledDownload.serverPort());
+    QWebSocket stranger; QSignalSpy strangerMessages(&stranger, &QWebSocket::textMessageReceived);
+    stranger.open(QUrl(QString("ws://127.0.0.1:%1").arg(service.serverPort()))); QTRY_COMPARE(stranger.state(), QAbstractSocket::ConnectedState);
+    stranger.sendTextMessage("{\"type\":\"authenticate\",\"version\":3}"); QTRY_VERIFY(strangerMessages.count() >= 2); strangerMessages.clear();
+    send({{"type", "models.install"}, {"installId", "one"}, {"category", "upscaler"}, {"url", url}});
+    const auto contains = [](const QSignalSpy &spy, const QString &key, const QString &value) {
+        for (const auto &message : spy) if (QJsonDocument::fromJson(message.first().toString().toUtf8()).object().value(key).toString() == value) return true;
+        return false;
+    };
+    QTRY_VERIFY(contains(received, "type", "models.install.accepted"));
+    stranger.sendTextMessage("{\"type\":\"models.install.cancel\",\"installId\":\"one\"}"); QTRY_VERIFY(contains(strangerMessages, "code", "invalid-model-cancel"));
+    send({{"type", "models.install"}, {"installId", "two"}, {"category", "upscaler"}, {"url", url}}); QTRY_VERIFY(contains(received, "code", "model-install-busy"));
+    send({{"type", "models.install.cancel"}, {"installId", "one"}}); QTRY_VERIFY(contains(received, "type", "models.install.canceled"));
+    send({{"type", "models.install"}, {"installId", "three"}, {"category", "upscaler"}, {"url", url}});
+    QTRY_VERIFY(contains(received, "installId", "three")); client.close(); QTRY_COMPARE(client.state(), QAbstractSocket::UnconnectedState);
+    stranger.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "models.install"}, {"installId", "four"}, {"category", "upscaler"}, {"url", url}}).toJson(QJsonDocument::Compact)));
+    QTRY_VERIFY(contains(strangerMessages, "type", "models.install.accepted")); stranger.close();
+
 }
 
 void ServiceTest::preservesProtocolV3()

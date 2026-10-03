@@ -61,9 +61,8 @@ KiraServiceDaemon::KiraServiceDaemon(KiraServiceConfiguration configuration, QOb
         const QPointer<QWebSocket> client = m_installClients.value(progress.installId);
         QJsonObject event{{QStringLiteral("type"), QStringLiteral("models.install.progress")},
                           {QStringLiteral("installId"), progress.installId},
-                          {QStringLiteral("state"), progress.state == ModelInstallState::Queued ? QStringLiteral("queued")
-                                                       : (progress.state == ModelInstallState::Downloading ? QStringLiteral("downloading") : QStringLiteral("verifying"))},
-                          {QStringLiteral("bytesDownloaded"), progress.bytesDownloaded}};
+                          {QStringLiteral("state"), progress.state == ModelInstallState::Downloading ? QStringLiteral("downloading") : QStringLiteral("verifying")},
+                          {QStringLiteral("bytesDownloaded"), progress.bytesDownloaded}, {"fileRole", progress.fileRole}};
         if (progress.totalBytes.has_value()) event.insert(QStringLiteral("totalBytes"), *progress.totalBytes);
         send(client, event);
     });
@@ -71,12 +70,17 @@ KiraServiceDaemon::KiraServiceDaemon(KiraServiceConfiguration configuration, QOb
         const QPointer<QWebSocket> client = m_installClients.take(installId);
         QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
                                 {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
+        if (!model.recommendedOptions.isEmpty()) modelObject.insert("recommendedOptions", model.recommendedOptions);
         if (!model.companionFileName.isEmpty()) {
             modelObject.insert(QStringLiteral("companionFileName"), model.companionFileName);
             modelObject.insert(QStringLiteral("companionRole"), model.companionRole);
         }
         send(client, {{QStringLiteral("type"), QStringLiteral("models.install.completed")},
                       {QStringLiteral("installId"), installId}, {QStringLiteral("model"), modelObject}});
+    });
+    connect(m_models.get(), &ModelCatalog::installCanceled, this, [this](const QString &id) {
+        const auto client = m_installClients.take(id);
+        send(client, {{"type", "models.install.canceled"}, {"installId", id}});
     });
     connect(m_models.get(), &ModelCatalog::installFailed, this, [this](const QString &installId, const QString &errorMessage) {
         const QPointer<QWebSocket> client = m_installClients.take(installId);
@@ -199,6 +203,8 @@ void KiraServiceDaemon::processTextMessage(QWebSocket *socket, const QString &me
     else if (type == QStringLiteral("capabilities")) sendCapabilities(socket);
     else if (type == QStringLiteral("models.list")) listModels(socket);
     else if (type == QStringLiteral("models.install")) installModel(socket, object);
+    else if (type == QStringLiteral("models.configure")) configureModel(socket, object);
+    else if (type == QStringLiteral("models.install.cancel")) cancelInstall(socket, object);
     else if (type == QStringLiteral("models.delete")) deleteModel(socket, object);
     else sendError(socket, QStringLiteral("unsupported-message"), tr("Unsupported message"));
 }
@@ -260,10 +266,11 @@ void KiraServiceDaemon::listModels(QWebSocket *socket) const
         for (const ModelInfo &model : m_models->models(category)) {
             QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
                                     {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
+            if (!model.recommendedOptions.isEmpty()) modelObject.insert("recommendedOptions", model.recommendedOptions);
             if (!model.companionFileName.isEmpty()) {
-            modelObject.insert(QStringLiteral("companionFileName"), model.companionFileName);
-            modelObject.insert(QStringLiteral("companionRole"), model.companionRole);
-        }
+                modelObject.insert(QStringLiteral("companionFileName"), model.companionFileName);
+                modelObject.insert(QStringLiteral("companionRole"), model.companionRole);
+            }
             models.append(modelObject);
         }
         categories.append(QJsonObject{{QStringLiteral("category"), ModelCatalog::categoryName(category)}, {QStringLiteral("models"), models}});
@@ -287,7 +294,18 @@ void KiraServiceDaemon::installModel(QWebSocket *socket, const QJsonObject &mess
     }
     std::optional<QUrl> companionUrl;
     if (message.contains(QStringLiteral("companionUrl"))) companionUrl = QUrl(message.value(QStringLiteral("companionUrl")).toString());
-    ModelInstallRequest request{installId, *category, QUrl(message.value(QStringLiteral("url")).toString()), companionUrl};
+    ModelInstallRequest request{installId, *category, QUrl(message.value(QStringLiteral("url")).toString()), companionUrl, {}};
+    if (m_models->isInstalling()) {
+        send(socket, {{"type", "error"}, {"code", "model-install-busy"}, {"message", tr("Another model installation is in progress")}, {"installId", installId}});
+        return;
+    }
+    if (message.contains("recommendedOptions")) {
+        if (!message.value("recommendedOptions").isObject()) {
+            send(socket, {{"type", "error"}, {"code", "invalid-model-install"}, {"message", tr("Recommended options must be an object")}, {"installId", installId}});
+            return;
+        }
+        request.recommendedOptions = message.value("recommendedOptions").toObject();
+    }
     m_installClients.insert(installId, socket);
     QString error;
     if (!m_models->install(request, &error)) {
@@ -297,6 +315,33 @@ void KiraServiceDaemon::installModel(QWebSocket *socket, const QJsonObject &mess
         return;
     }
     send(socket, {{QStringLiteral("type"), QStringLiteral("models.install.accepted")}, {QStringLiteral("installId"), installId}});
+}
+
+void KiraServiceDaemon::configureModel(QWebSocket *socket, const QJsonObject &message)
+{
+    const QString id = message.value("id").toString();
+    QString error;
+    if (!message.value("recommendedOptions").isObject() || !m_models->configure(id, message.value("recommendedOptions").toObject(), &error)) {
+        send(socket, {{"type", "error"}, {"code", "invalid-model-configure"}, {"id", id}, {"message", error.isEmpty() ? tr("Recommended options must be an object") : error}});
+        return;
+    }
+    const auto model = *m_models->modelById(id);
+    QJsonObject value{{"id", model.id}, {"name", model.name}, {"fileName", model.fileName}, {"bytes", model.fileSize}, {"recommendedOptions", model.recommendedOptions}};
+    if (!model.companionFileName.isEmpty()) {
+        value.insert("companionFileName", model.companionFileName);
+        value.insert("companionRole", model.companionRole);
+    }
+    send(socket, {{"type", "models.configure.completed"}, {"id", id}, {"model", value}});
+}
+
+void KiraServiceDaemon::cancelInstall(QWebSocket *socket, const QJsonObject &message)
+{
+    const QString id = message.value("installId").toString();
+    if (id.isEmpty() || m_installClients.value(id) != socket) {
+        send(socket, {{"type", "error"}, {"code", "invalid-model-cancel"}, {"installId", id}, {"message", tr("This installation is not owned by this connection")}});
+        return;
+    }
+    m_models->cancel(id);
 }
 
 void KiraServiceDaemon::deleteModel(QWebSocket *socket, const QJsonObject &message)

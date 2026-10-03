@@ -1,6 +1,6 @@
 # Contributing to Kira Service
 
-Kira Service is a C++20 Qt 6 project. Build dependencies are CMake, Ninja, a C++20 compiler, and Qt 6.2+ Network, WebSockets, and Widgets development packages. `sd-cli` is required on a machine that performs image work.
+Kira Service is a C++20 Qt 6 project. Build dependencies are CMake, Ninja, a C++20 compiler, and Qt 6.2+ Network, WebSockets, and Widgets, SVG, and LinguistTools development packages, plus Kira UI Framework 0.2. `sd-cli` is required on a machine that performs image work.
 
 ```sh
 cmake -S . -B build -G Ninja
@@ -29,3 +29,41 @@ protocol v3 compatible. Model management includes the `ip-adapter` category
 and optional paired companion metadata (IP-Adapter LoRA, LLM mmproj, or Image-generation/Edition VAE).
 The SDK install method accepts an optional companion URL instead of a SHA-256
 checksum. Download checksums are no longer supported; runtime invocation is unchanged.
+
+## Shared manager UI
+
+CMake defaults `KIRA_UI_SOURCE_DIR` to `../kira-ui-framework`. Override it with
+`-DKIRA_UI_SOURCE_DIR=/path/to/kira-ui-framework`. Without a source checkout,
+provide the installed `KiraUi` package through `CMAKE_PREFIX_PATH`. Only the
+manager and its UI tests link `KiraUi::Widgets`; embedded SDK consumers do not
+acquire GUI dependencies. Theme and window icons are initialized only in GUI
+mode. Original icon artwork and prebuilt PNG sizes are committed under
+`assets/icons/`; no image conversion tools are required to build or run.
+
+Manager options use one category-aware form in the details panel and download
+modal. Shared defaults and strict wire validation live in the Protocol target's
+`ModelOptions` API. Install clients may supply optional `recommendedOptions`;
+`configureModel()` replaces a model's complete recommendation object, and
+`cancelInstall()` cancels an owned active installation. These APIs do not alter
+image job arguments or enable new execution categories.
+
+Category-local `metadata.json` accepts legacy companion strings and new objects
+containing `companionFileName` and/or `recommendedOptions`. Writes preserve
+untouched entries and use QSaveFile. Invalid/unreadable JSON blocks mutation
+instead of overwriting metadata. Do not edit users' installed files for tests.
+
+The tests create disposable model stores and local HTTP/WebSocket servers.
+Run them with local networking permitted. The unavailable-manager CLI check is
+skipped if a real service already responds on port 9384. UI tests isolate
+QSettings and use the offscreen platform. For visual review:
+
+```sh
+mkdir -p /tmp/kira-manager-review
+QT_QPA_PLATFORM=offscreen KIRA_MANAGER_SCREENSHOT_DIR=/tmp/kira-manager-review ./build/tests/kira-service-manager-ui-test
+QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR=2 KIRA_MANAGER_SCREENSHOT_DIR=/tmp/kira-manager-review ./build/tests/kira-service-manager-ui-test
+```
+
+Validate both 1300 × 680 and 1000 × 550 and review the add-model modal. Qt-only
+manager UI code follows the framework's cross-platform behavior; the existing
+service deployment, CLI and model-file commit operations retain their platform
+requirements. Check available platforms and report any untested ones.

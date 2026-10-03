@@ -3,6 +3,8 @@
 #include "ManagerServiceClient.h"
 
 #include <QApplication>
+#include <KiraUi/Theme.h>
+#include <QIcon>
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QEventLoop>
@@ -169,6 +171,7 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
                 if (install.installId != installId) continue;
                 if (install.state == ManagedInstallState::Downloading && install.totalBytes.has_value()) QTextStream(stdout) << "Downloading " << install.bytesDownloaded << " / " << *install.totalBytes << " bytes\r" << Qt::flush;
                 if (install.state == ManagedInstallState::Completed) { QTextStream(stdout) << "\nInstalled " << install.url.fileName() << '\n'; finish(0); }
+                if (install.state == ManagedInstallState::Canceled) finish(1, QStringLiteral("Model installation canceled."));
                 if (install.state == ManagedInstallState::Failed) finish(1, install.message);
             }
         });
@@ -215,6 +218,10 @@ int main(int argc, char *argv[])
             QTextStream(stderr) << "--gui cannot be combined with a CLI command.\n";
             return 2;
         }
+        KiraUi::Theme::apply(*static_cast<QApplication *>(application.get()));
+        QIcon icon;
+        for (const int size : {16, 32, 48, 64, 128, 256, 512, 1024}) icon.addFile(QStringLiteral(":/manager/icons/manager-%1.png").arg(size));
+        QApplication::setWindowIcon(icon);
         auto *window = new ManageModelsWindow;
         window->show();
         return application->exec();

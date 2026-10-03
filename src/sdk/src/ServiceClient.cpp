@@ -130,7 +130,7 @@ void ServiceClient::requestModels()
     if (m_authenticated) m_socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list\"}"));
 }
 
-QString ServiceClient::installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl)
+QString ServiceClient::installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl, const QJsonObject &recommendedOptions)
 {
     const QString categoryValue = categoryName(category);
     if (!m_authenticated || categoryValue.isEmpty() || !url.isValid() || url.isEmpty()) return {};
@@ -146,9 +146,25 @@ QString ServiceClient::installModel(ModelCategory category, const QUrl &url, con
                         {QStringLiteral("category"), categoryValue},
                         {QStringLiteral("url"), url.toString()}};
     if (!companionUrl.isEmpty()) message.insert(QStringLiteral("companionUrl"), companionUrl.toString());
+    if (!recommendedOptions.isEmpty()) message.insert("recommendedOptions", recommendedOptions);
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     emit installsChanged();
     return installId;
+}
+
+bool ServiceClient::configureModel(const QString &id, const QJsonObject &options)
+{
+    if (!m_authenticated || id.isEmpty()) return false;
+    const QJsonObject message{{"type", "models.configure"}, {"id", id}, {"recommendedOptions", options}};
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
+    return true;
+}
+bool ServiceClient::cancelInstall(const QString &installId)
+{
+    if (!m_authenticated || installId.isEmpty()) return false;
+    const QJsonObject message{{"type", "models.install.cancel"}, {"installId", installId}};
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
+    return true;
 }
 
 bool ServiceClient::deleteModel(const QString &id)
@@ -238,7 +254,7 @@ void ServiceClient::handleTextMessage(const QString &message)
                                  model.value(QStringLiteral("bytes")).toVariant().toLongLong(),
                                  category,
                                  model.value(QStringLiteral("companionFileName")).toString(),
-                                 model.value(QStringLiteral("companionRole")).toString()});
+                                 model.value(QStringLiteral("companionRole")).toString(), model.value("recommendedOptions").toObject()});
             }
         }
         m_modelListAvailable = true;
@@ -273,6 +289,15 @@ void ServiceClient::handleTextMessage(const QString &message)
         requestModels();
         return;
     }
+    if (type == "models.install.canceled") {
+        if (auto *install = findInstall(object.value("installId").toString())) { install->state = ModelInstallState::Canceled; emit installsChanged(); }
+        return;
+    }
+    if (type == "models.configure.completed") {
+        emit modelConfigured(object.value("id").toString(), object.value("model").toObject().value("recommendedOptions").toObject());
+        requestModels();
+        return;
+    }
     if (type == QStringLiteral("models.delete.completed")) {
         emit modelDeleted(object.value(QStringLiteral("id")).toString());
         requestModels();
@@ -283,6 +308,7 @@ void ServiceClient::handleTextMessage(const QString &message)
         const QString code = object.value(QStringLiteral("code")).toString();
         const QString detail = object.value(QStringLiteral("message")).toString();
         if (ModelInstall *install = findInstall(object.value(QStringLiteral("installId")).toString())) {
+            if (install->state == ModelInstallState::Completed || install->state == ModelInstallState::Canceled) return;
             install->state = ModelInstallState::Failed;
             install->message = detail;
             emit installsChanged();
@@ -353,7 +379,7 @@ void ServiceClient::failActiveInstalls(const QString &message)
 {
     bool changed = false;
     for (ModelInstall &install : m_installs) {
-        if (install.state == ModelInstallState::Completed || install.state == ModelInstallState::Failed) continue;
+        if (install.state == ModelInstallState::Completed || install.state == ModelInstallState::Failed || install.state == ModelInstallState::Canceled) continue;
         install.state = ModelInstallState::Failed;
         install.message = message;
         changed = true;

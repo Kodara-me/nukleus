@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QList>
+#include <QJsonObject>
 #include <QObject>
 #include <QTimer>
 #include <QUrl>
@@ -17,9 +18,10 @@ struct ManagedModelInfo
     qint64 fileSize = 0;
     QString companionFileName;
     QString companionRole;
+    QJsonObject recommendedOptions;
 };
 
-enum class ManagedInstallState { Requesting, Accepted, Queued, Downloading, Verifying, Completed, Failed };
+enum class ManagedInstallState { Requesting, Accepted, Queued, Downloading, Verifying, Completed, Failed, Canceled };
 
 struct ManagedInstall
 {
@@ -32,6 +34,8 @@ struct ManagedInstall
     qint64 bytesDownloaded = 0;
     std::optional<qint64> totalBytes;
     QString message;
+    QString modelId;
+    QString fileRole;
 };
 
 class ManagerServiceClient final : public QObject
@@ -39,7 +43,7 @@ class ManagerServiceClient final : public QObject
     Q_OBJECT
 
 public:
-    explicit ManagerServiceClient(QObject *parent = nullptr);
+    explicit ManagerServiceClient(QObject *parent = nullptr, quint16 localPort = 9384);
 
     void connectToService();
     void setAutomaticReconnect(bool enabled);
@@ -48,13 +52,16 @@ public:
     QList<ManagedModelInfo> models(const QString &category) const;
     QList<ManagedInstall> installs() const;
     void requestModels();
-    QString installModel(const QString &category, const QUrl &url, const QUrl &companionUrl = {});
+    QString installModel(const QString &category, const QUrl &url, const QUrl &companionUrl = {}, const QJsonObject &recommendedOptions = {});
+    bool configureModel(const QString &id, const QJsonObject &options);
+    bool cancelInstall(const QString &installId);
     bool deleteModel(const QString &id);
 
 signals:
     void serviceStateChanged(const QString &state, const QString &message);
     void modelsChanged();
     void installsChanged();
+    void modelConfigured(const QString &id, const QJsonObject &options);
     void modelDeleted(const QString &id);
     void modelOperationFailed(const QString &id, const QString &message);
 
@@ -64,6 +71,7 @@ private:
     ManagedInstall *findInstall(const QString &installId);
     void failActiveInstalls(const QString &message);
 
+    const quint16 m_localPort;
     QWebSocket *m_socket;
     QTimer *m_retryTimer;
     bool m_automaticReconnect = true;

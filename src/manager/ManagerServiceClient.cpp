@@ -9,13 +9,9 @@
 
 #include <algorithm>
 
-namespace
-{
-const QUrl LocalEndpoint(QStringLiteral("ws://127.0.0.1:9384"));
-}
-
-ManagerServiceClient::ManagerServiceClient(QObject *parent)
+ManagerServiceClient::ManagerServiceClient(QObject *parent, quint16 localPort)
     : QObject(parent)
+    , m_localPort(localPort)
     , m_socket(new QWebSocket(QStringLiteral("Kira Service Manager"), QWebSocketProtocol::VersionLatest, this))
     , m_retryTimer(new QTimer(this))
 {
@@ -43,7 +39,7 @@ void ManagerServiceClient::connectToService()
     m_authenticated = false;
     if (m_socket->state() != QAbstractSocket::UnconnectedState) m_socket->abort();
     emit serviceStateChanged(QStringLiteral("connecting"), tr("Connecting to the local Kira Service…"));
-    m_socket->open(LocalEndpoint);
+    m_socket->open(QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(m_localPort)));
 }
 
 void ManagerServiceClient::setAutomaticReconnect(bool enabled) { m_automaticReconnect = enabled; }
@@ -61,19 +57,35 @@ QList<ManagedModelInfo> ManagerServiceClient::models(const QString &category) co
 QList<ManagedInstall> ManagerServiceClient::installs() const { return m_installs; }
 void ManagerServiceClient::requestModels() { if (m_authenticated) m_socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list\"}")); }
 
-QString ManagerServiceClient::installModel(const QString &category, const QUrl &url, const QUrl &companionUrl)
+QString ManagerServiceClient::installModel(const QString &category, const QUrl &url, const QUrl &companionUrl, const QJsonObject &recommendedOptions)
 {
     if (!m_authenticated) return {};
     const QString installId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    m_installs.append({installId, category, url, companionUrl, {}, ManagedInstallState::Requesting, 0, {}, {}});
+    m_installs.append({installId, category, url, companionUrl, {}, ManagedInstallState::Requesting, 0, {}, {}, {}, {}});
     QJsonObject message{{QStringLiteral("type"), QStringLiteral("models.install")}, {QStringLiteral("installId"), installId},
                         {QStringLiteral("category"), category}, {QStringLiteral("url"), url.toString()}};
     if (companionUrl.isValid() && !companionUrl.isEmpty()) {
         message.insert(QStringLiteral("companionUrl"), companionUrl.toString());
     }
+    if (!recommendedOptions.isEmpty()) message.insert("recommendedOptions", recommendedOptions);
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     emit installsChanged();
     return installId;
+}
+
+bool ManagerServiceClient::configureModel(const QString &id, const QJsonObject &options)
+{
+    if (!m_authenticated || id.isEmpty()) return false;
+    const QJsonObject message{{"type", "models.configure"}, {"id", id}, {"recommendedOptions", options}};
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
+    return true;
+}
+bool ManagerServiceClient::cancelInstall(const QString &installId)
+{
+    if (!m_authenticated || installId.isEmpty()) return false;
+    const QJsonObject message{{"type", "models.install.cancel"}, {"installId", installId}};
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
+    return true;
 }
 
 bool ManagerServiceClient::deleteModel(const QString &id)
@@ -111,26 +123,43 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
                 modelsForCategory->append({model.value(QStringLiteral("id")).toString(), model.value(QStringLiteral("name")).toString(),
                     model.value(QStringLiteral("fileName")).toString(), model.value(QStringLiteral("bytes")).toVariant().toLongLong(),
                     model.value(QStringLiteral("companionFileName")).toString(),
-                                 model.value(QStringLiteral("companionRole")).toString()});
+                                 model.value(QStringLiteral("companionRole")).toString(), model.value("recommendedOptions").toObject()});
             }
         }
         m_modelListAvailable = true; emit modelsChanged(); return;
     }
     if (type == QStringLiteral("models.install.accepted")) { if (auto *install = findInstall(object.value(QStringLiteral("installId")).toString())) { install->state = ManagedInstallState::Accepted; emit installsChanged(); } return; }
     if (type == QStringLiteral("models.install.progress")) { if (auto *install = findInstall(object.value(QStringLiteral("installId")).toString())) {
+        install->fileRole = object.value("fileRole").toString();
         const QString state = object.value(QStringLiteral("state")).toString();
         install->state = state == QStringLiteral("queued") ? ManagedInstallState::Queued : state == QStringLiteral("verifying") ? ManagedInstallState::Verifying : ManagedInstallState::Downloading;
         install->bytesDownloaded = object.value(QStringLiteral("bytesDownloaded")).toVariant().toLongLong();
         install->totalBytes = object.contains(QStringLiteral("totalBytes")) ? std::optional<qint64>(object.value(QStringLiteral("totalBytes")).toVariant().toLongLong()) : std::nullopt;
         emit installsChanged(); } return; }
-    if (type == QStringLiteral("models.install.completed")) { if (auto *install = findInstall(object.value(QStringLiteral("installId")).toString())) { install->companionFileName = object.value(QStringLiteral("model")).toObject().value(QStringLiteral("companionFileName")).toString(); install->state = ManagedInstallState::Completed; install->message = tr("Installed"); emit installsChanged(); } requestModels(); return; }
+    if (type == QStringLiteral("models.install.completed")) { if (auto *install = findInstall(object.value(QStringLiteral("installId")).toString())) { install->modelId = object.value("model").toObject().value("id").toString(); install->companionFileName = object.value(QStringLiteral("model")).toObject().value(QStringLiteral("companionFileName")).toString(); install->state = ManagedInstallState::Completed; install->message = tr("Installed"); emit installsChanged(); } requestModels(); return; }
+    if (type == "models.install.canceled") {
+        if (auto *install = findInstall(object.value("installId").toString())) { install->state = ManagedInstallState::Canceled; emit installsChanged(); }
+        return;
+    }
+    if (type == "models.configure.completed") {
+        emit modelConfigured(object.value("id").toString(), object.value("model").toObject().value("recommendedOptions").toObject());
+        requestModels();
+        return;
+    }
     if (type == QStringLiteral("models.delete.completed")) { emit modelDeleted(object.value(QStringLiteral("id")).toString()); requestModels(); return; }
     if (type == QStringLiteral("error")) {
         const QString installId = object.value(QStringLiteral("installId")).toString();
-        if (auto *install = findInstall(installId)) { install->state = ManagedInstallState::Failed; install->message = object.value(QStringLiteral("message")).toString(); emit installsChanged(); return; }
+        if (auto *install = findInstall(installId)) {
+            if (install->state == ManagedInstallState::Completed || install->state == ManagedInstallState::Canceled) return;
+            install->state = ManagedInstallState::Failed; install->message = object.value(QStringLiteral("message")).toString(); emit installsChanged(); return; }
         const QString id = object.value(QStringLiteral("id")).toString();
         if (!id.isEmpty()) { emit modelOperationFailed(id, object.value(QStringLiteral("message")).toString()); return; }
         if (!m_authenticated) { emit serviceStateChanged(QStringLiteral("authentication-failed"), object.value(QStringLiteral("message")).toString()); m_socket->close(); }
+        else {
+            const QString detail = object.value(QStringLiteral("message")).toString();
+            failActiveInstalls(detail);
+            emit serviceStateChanged(QStringLiteral("operation-error"), detail);
+        }
     }
 }
 
@@ -143,6 +172,6 @@ ManagedInstall *ManagerServiceClient::findInstall(const QString &installId)
 void ManagerServiceClient::failActiveInstalls(const QString &message)
 {
     bool changed = false;
-    for (ManagedInstall &install : m_installs) if (install.state != ManagedInstallState::Completed && install.state != ManagedInstallState::Failed) { install.state = ManagedInstallState::Failed; install.message = message; changed = true; }
+    for (ManagedInstall &install : m_installs) if (install.state != ManagedInstallState::Completed && install.state != ManagedInstallState::Failed && install.state != ManagedInstallState::Canceled) { install.state = ManagedInstallState::Failed; install.message = message; changed = true; }
     if (changed) emit installsChanged();
 }

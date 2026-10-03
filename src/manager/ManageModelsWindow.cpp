@@ -1,173 +1,337 @@
 #include "ManageModelsWindow.h"
-
+#include "AddModelDialog.h"
 #include "ManagerServiceClient.h"
-#include <kira/service/ServiceProtocol.h>
-
-#include <QComboBox>
-#include <QFormLayout>
-#include <QGroupBox>
-#include <QHeaderView>
-#include <QLabel>
-#include <QLineEdit>
+#include "ModelOptionsWidget.h"
+#include <KiraUi/IconProvider.h>
+#include <KiraUi/Panel.h>
+#include <KiraUi/PrimaryButton.h>
+#include <KiraUi/TitleBar.h>
+#include <KiraUi/TreeView.h>
+#include <QApplication>
+#include <QCloseEvent>
 #include <QFileInfo>
+#include <QHBoxLayout>
+#include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
-#include <QTreeWidget>
-#include <QUrl>
+#include <QScrollArea>
+#include <QSettings>
+#include <QSignalBlocker>
+#include <QSplitter>
+#include <QStandardItemModel>
 #include <QVBoxLayout>
-#include <QWidget>
-
-#include <algorithm>
 
 namespace
 {
-QString sizeText(qint64 bytes)
+const QList<QPair<QString, QString>> categories{{"edition", "Edition"},
+                                                {"llm-chat", "LLM"},
+                                                {"image-generation", "Image generation"},
+                                                {"upscaler", "Upscaler"},
+                                                {"ip-adapter", "IP-Adapter"}};
+QString sizeText(qint64 bytes) { return QObject::tr("%1 MiB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1); }
+} // namespace
+ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *client)
+    : KiraUi::MainWindow(parent), m_client(client ? client : new ManagerServiceClient(this))
 {
-    if (bytes < 1024) return QObject::tr("%1 bytes").arg(bytes);
-    if (bytes < 1024 * 1024) return QObject::tr("%1 KiB").arg(bytes / 1024.0, 0, 'f', 1);
-    return QObject::tr("%1 MiB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1);
+    setWindowTitle(tr("Kira Service Manager"));
+    setWindowIcon(QApplication::windowIcon().isNull()
+                      ? QIcon(QStringLiteral(":/manager/icons/manager-32.png"))
+                      : QApplication::windowIcon());
+    titleBar()->setIcon(windowIcon());
+    setMinimumSize(1000, 550);
+    resize(1300, 680);
+    QSettings settings;
+    restoreGeometry(settings.value("MainWindow/Geometry").toByteArray());
+    auto *body = new QWidget(this);
+    setContentWidget(body);
+    auto *layout = new QVBoxLayout(body);
+    m_status = new QLabel(tr("Connecting to the local Kira Service…"), body);
+    m_status->setWordWrap(true);
+    layout->addWidget(m_status);
+    m_splitter = new QSplitter(Qt::Horizontal, body);
+    m_splitter->setChildrenCollapsible(false);
+    layout->addWidget(m_splitter, 1);
+    auto *library = new KiraUi::Panel(m_splitter);
+    auto *left = new QVBoxLayout(library);
+    left->addWidget(new QLabel(tr("Installed models"), library));
+    m_tree = new KiraUi::TreeView(library);
+    m_tree->setObjectName("installedModelsTree");
+    m_tree->setHeaderHidden(true);
+    m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_treeModel = new QStandardItemModel(m_tree);
+    m_tree->setModel(m_treeModel);
+    left->addWidget(m_tree, 1);
+    auto *actions = new QHBoxLayout;
+    m_add = new KiraUi::PrimaryButton(tr("Add model"), library);
+    m_add->setObjectName("addModel");
+    m_add->setIcon(KiraUi::IconProvider::icon(KiraUi::Icon::Plus));
+    m_delete = new QPushButton(tr("Delete"), library);
+    m_delete->setObjectName("deleteModel");
+    actions->addWidget(m_add);
+    actions->addWidget(m_delete);
+    left->addLayout(actions);
+    auto *configuration = new KiraUi::Panel(m_splitter);
+    auto *right = new QVBoxLayout(configuration);
+    right->addWidget(new QLabel(tr("Model configuration"), configuration));
+    auto *scroll = new QScrollArea(configuration);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    auto *content = new QWidget(scroll);
+    auto *contentLayout = new QVBoxLayout(content);
+    m_details = new QLabel(tr("Select a model to view its recommended options."), content);
+    m_details->setWordWrap(true);
+    m_details->setTextFormat(Qt::PlainText);
+    contentLayout->addWidget(m_details);
+    m_options = new ModelOptionsWidget(content);
+    m_options->hide();
+    contentLayout->addWidget(m_options);
+    auto *hint =
+        new QLabel(tr("Recommended values for this model. Applications can override them."), content);
+    hint->setWordWrap(true);
+    contentLayout->addWidget(hint);
+    contentLayout->addStretch();
+    scroll->setWidget(content);
+    right->addWidget(scroll, 1);
+    m_save = new KiraUi::PrimaryButton(tr("Save recommended options"), configuration);
+    m_save->setObjectName("saveOptions");
+    m_save->setIcon(KiraUi::IconProvider::icon(KiraUi::Icon::Save));
+    right->addWidget(m_save);
+    m_splitter->setSizes({390, 850});
+    m_splitter->restoreState(settings.value("MainWindow/ModelsSplitter").toByteArray());
+    connect(m_tree->selectionModel(), &QItemSelectionModel::currentChanged, this,
+            &ManageModelsWindow::selectionChanged);
+    connect(m_options, &ModelOptionsWidget::optionsChanged, this,
+            [this]
+            {
+                m_dirty = m_options->options() != m_originalOptions;
+                updateActions();
+            });
+    connect(m_add, &QPushButton::clicked, this, &ManageModelsWindow::addModel);
+    connect(m_delete, &QPushButton::clicked, this, &ManageModelsWindow::deleteSelectedModel);
+    connect(m_save, &QPushButton::clicked, this, &ManageModelsWindow::saveOptions);
+    connect(m_client, &ManagerServiceClient::modelsChanged, this, &ManageModelsWindow::populateModels);
+    connect(m_client, &ManagerServiceClient::serviceStateChanged, this,
+            [this](const QString &state, const QString &message)
+            {
+                m_status->setText(message);
+                if ((!m_client->isAuthenticated() || state == "operation-error") && m_saving)
+                {
+                    m_saving = false;
+                    m_afterSave = {};
+                }
+                updateActions();
+            });
+    connect(m_client, &ManagerServiceClient::modelOperationFailed, this,
+            [this](const QString &id, const QString &message)
+            {
+                m_status->setText(message);
+                if (id == m_selectedId)
+                {
+                    m_saving = false;
+                    m_afterSave = {};
+                    updateActions();
+                }
+            });
+    connect(m_client, &ManagerServiceClient::modelConfigured, this,
+            [this](const QString &id, const QJsonObject &options)
+            {
+                if (id != m_selectedId)
+                    return;
+                m_originalOptions = options;
+                m_dirty = false;
+                m_saving = false;
+                m_status->setText(tr("Recommended options saved."));
+                updateActions();
+                auto continuation = std::move(m_afterSave);
+                m_afterSave = {};
+                if (continuation)
+                    continuation();
+            });
+    connect(m_client, &ManagerServiceClient::modelDeleted, this,
+            [this] { m_status->setText(tr("Model deleted.")); });
+    populateModels();
+    updateActions();
+    m_client->connectToService();
 }
-
-QString installStateText(const ManagedInstall &install)
-{
-    switch (install.state) {
-    case ManagedInstallState::Requesting: return QObject::tr("Requesting");
-    case ManagedInstallState::Accepted: return QObject::tr("Accepted");
-    case ManagedInstallState::Queued: return QObject::tr("Queued");
-    case ManagedInstallState::Downloading: return QObject::tr("Downloading");
-    case ManagedInstallState::Verifying: return QObject::tr("Verifying");
-    case ManagedInstallState::Completed: return QObject::tr("Installed");
-    case ManagedInstallState::Failed: return install.message.isEmpty() ? QObject::tr("Failed") : install.message;
-    }
-    return QObject::tr("Failed");
-}
-
-bool validModelUrl(const QUrl &url)
-{
-    return url.isValid() && url.scheme() == QStringLiteral("https") && !url.host().isEmpty()
-           && url.userInfo().isEmpty() && !url.hasFragment() && !url.fileName().isEmpty();
-}
-}
-
-ManageModelsWindow::ManageModelsWindow(QWidget *parent)
-    : QMainWindow(parent)
-    , m_client(new ManagerServiceClient(this))
-{
-    setWindowTitle(tr("Kira Service Manager")); resize(760, 700);
-    auto *central = new QWidget(this); setCentralWidget(central); auto *layout = new QVBoxLayout(central);
-    auto *connection = new QGroupBox(tr("Local Kira Service"), central); auto *connectionLayout = new QVBoxLayout(connection);
-    m_status = new QLabel(tr("Connecting to the local Kira Service…"), connection); m_status->setWordWrap(true); connectionLayout->addWidget(m_status); layout->addWidget(connection);
-    auto *description = new QLabel(tr("Install HTTPS model file URLs from Hugging Face or another host. Files remain on this service host."), central); description->setWordWrap(true); layout->addWidget(description);
-    auto *modelsGroup = new QGroupBox(tr("Installed models"), central);
-    auto *modelsLayout = new QVBoxLayout(modelsGroup);
-    m_models = new QTreeWidget(modelsGroup);
-    m_models->setObjectName(QStringLiteral("installedModelsTree"));
-    m_models->setHeaderLabels({tr("Models"), tr("File"), tr("Size")});
-    m_models->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_models->setUniformRowHeights(true);
-    m_models->header()->setSectionResizeMode(0, QHeaderView::Stretch);
-    m_models->header()->setSectionResizeMode(1, QHeaderView::Interactive);
-    m_models->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    m_models->header()->setStretchLastSection(false);
-    modelsLayout->addWidget(m_models);
-    layout->addWidget(modelsGroup, 1);
-    m_deleteButton = new QPushButton(tr("Delete selected model"), modelsGroup);
-    m_deleteButton->setEnabled(false);
-    modelsLayout->addWidget(m_deleteButton);
-    auto *installGroup = new QGroupBox(tr("Install model"), central); auto *installLayout = new QFormLayout(installGroup);
-    m_category = new QComboBox(installGroup); m_category->addItem(tr("Image-generation"), QStringLiteral("image-generation")); m_category->addItem(tr("Edition"), QStringLiteral("edition")); m_category->addItem(tr("Upscaler"), QStringLiteral("upscaler")); m_category->addItem(tr("LLM-chat"), QStringLiteral("llm-chat")); m_category->addItem(tr("IP-Adapter"), QStringLiteral("ip-adapter"));
-    m_url = new QLineEdit(installGroup); m_url->setPlaceholderText(QStringLiteral("https://example.com/models/model.gguf"));
-    m_companionLabel = new QLabel(tr("Companion LoRA URL"), installGroup);
-    m_companionUrl = new QLineEdit(installGroup); m_companionUrl->setObjectName(QStringLiteral("companionUrl")); m_companionUrl->setPlaceholderText(tr("Optional companion file URL"));
-    m_installButton = new QPushButton(tr("Install"), installGroup);
-    installLayout->addRow(tr("Category"), m_category); installLayout->addRow(tr("File URL"), m_url); installLayout->addRow(m_companionLabel, m_companionUrl); installLayout->addRow(m_installButton); layout->addWidget(installGroup);
-    m_installs = new QTreeWidget(central); m_installs->setHeaderLabels({tr("Model"), tr("Status"), tr("Progress")}); m_installs->header()->setSectionResizeMode(QHeaderView::ResizeToContents); m_installs->header()->setStretchLastSection(true); layout->addWidget(m_installs, 1);
-    connect(m_installButton, &QPushButton::clicked, this, &ManageModelsWindow::startInstall); connect(m_deleteButton, &QPushButton::clicked, this, &ManageModelsWindow::deleteSelectedModel);
-    connect(m_category, &QComboBox::currentIndexChanged, this, [this] {
-        const QString category = m_category->currentData().toString();
-        const bool supportsCompanion = category != QStringLiteral("upscaler");
-        m_companionLabel->setText(category == QStringLiteral("llm-chat") ? tr("Optional mmproj URL")
-            : category == QStringLiteral("ip-adapter") ? tr("Optional companion LoRA URL") : tr("Optional VAE URL"));
-        m_companionUrl->clear();
-        m_companionLabel->setVisible(supportsCompanion);
-        m_companionUrl->setVisible(supportsCompanion);
-        m_companionUrl->setEnabled(supportsCompanion);
-        updateInstallButton();
-    }); connect(m_url, &QLineEdit::textChanged, this, &ManageModelsWindow::updateInstallButton); connect(m_companionUrl, &QLineEdit::textChanged, this, &ManageModelsWindow::updateInstallButton);
-    connect(m_client, &ManagerServiceClient::modelsChanged, this, &ManageModelsWindow::populateModels); connect(m_client, &ManagerServiceClient::installsChanged, this, [this] { populateInstalls(); updateInstallButton(); });
-    connect(m_client, &ManagerServiceClient::serviceStateChanged, this, [this](const QString &, const QString &message) { m_status->setText(message); updateInstallButton(); updateDeleteButton(); });
-    connect(m_client, &ManagerServiceClient::modelDeleted, this, [this](const QString &) { m_status->setText(tr("Model deleted.")); });
-    connect(m_client, &ManagerServiceClient::modelOperationFailed, this, [this](const QString &, const QString &message) { m_status->setText(message); updateDeleteButton(); });
-    connect(m_models, &QTreeWidget::itemSelectionChanged, this, &ManageModelsWindow::updateDeleteButton);
-    m_companionLabel->setText(tr("Optional VAE URL")); populateModels(); populateInstalls(); updateInstallButton(); updateDeleteButton(); m_client->connectToService();
-}
-
 void ManageModelsWindow::populateModels()
 {
-    m_models->clear();
-    auto *root = new QTreeWidgetItem(m_models, {tr("Models")});
-    root->setFlags(root->flags() & ~Qt::ItemIsSelectable);
-    const QList<QPair<QString, QString>> categories = {
-        {QStringLiteral("edition"), tr("Edition")},
-        {QStringLiteral("llm-chat"), tr("LLM")},
-        {QStringLiteral("image-generation"), tr("Image generation")},
-        {QStringLiteral("upscaler"), tr("Upscaler")},
-        {QStringLiteral("ip-adapter"), tr("IP-Adapter")}
-    };
-    for (const auto &category : categories) {
-        auto *categoryItem = new QTreeWidgetItem(root, {category.second});
-        categoryItem->setFlags(categoryItem->flags() & ~Qt::ItemIsSelectable);
-        for (const ManagedModelInfo &model : m_client->models(category.first)) {
-            auto *modelItem = new QTreeWidgetItem(categoryItem, {model.name, model.fileName, sizeText(model.fileSize)});
-            modelItem->setData(0, Qt::UserRole, model.id);
-            modelItem->setToolTip(1, model.fileName);
-            if (!model.companionFileName.isEmpty()) {
-                const QString role = model.companionRole.isEmpty() ? tr("Companion") : model.companionRole;
-                auto *companion = new QTreeWidgetItem(modelItem, {role, QFileInfo(model.companionFileName).fileName()});
-                companion->setToolTip(1, model.companionFileName);
+    QSignalBlocker blocker(m_tree->selectionModel());
+    m_treeModel->clear();
+    auto *root = new QStandardItem(tr("Models"));
+    root->setEditable(false);
+    m_treeModel->appendRow(root);
+    for (const auto &category : categories)
+    {
+        auto *branch = new QStandardItem(tr(qPrintable(category.second)));
+        branch->setEditable(false);
+        branch->setIcon(KiraUi::IconProvider::icon(KiraUi::Icon::Folder));
+        branch->setData(category.first, Qt::UserRole + 2);
+        root->appendRow(branch);
+        for (const auto &model : m_client->models(category.first))
+        {
+            auto *item = new QStandardItem(model.name);
+            item->setEditable(false);
+            item->setIcon(KiraUi::IconProvider::icon(KiraUi::Icon::File));
+            item->setData(model.id, Qt::UserRole + 1);
+            item->setData(category.first, Qt::UserRole + 2);
+            item->setToolTip(model.fileName);
+            branch->appendRow(item);
+            if (!model.companionFileName.isEmpty())
+            {
+                auto *companion = new QStandardItem(model.companionRole + ": " +
+                                                    QFileInfo(model.companionFileName).fileName());
+                companion->setEditable(false);
+                companion->setData(model.id, Qt::UserRole + 1);
+                companion->setData(category.first, Qt::UserRole + 2);
+                item->appendRow(companion);
             }
         }
     }
-    m_models->expandAll();
-    updateDeleteButton();
+    m_tree->expandAll();
+    selectModel(m_selectedId);
+    const bool exists =
+        !m_selectedId.isEmpty() && m_tree->currentIndex().data(Qt::UserRole + 1).toString() == m_selectedId;
+    if (!exists && m_client->modelListAvailable())
+        showSelection({});
+    else if (!m_dirty && !m_saving)
+        showSelection(m_selectedId);
+    updateActions();
 }
-
-void ManageModelsWindow::populateInstalls()
+void ManageModelsWindow::selectModel(const QString &id)
 {
-    m_installs->clear(); for (const ManagedInstall &install : m_client->installs()) { auto *item = new QTreeWidgetItem(m_installs); const QString companionFile = install.companionFileName.isEmpty() ? install.companionUrl.fileName() : install.companionFileName; const QString companion = companionFile.isEmpty() ? QString() : tr(" — companion: %1").arg(companionFile); item->setText(0, install.url.fileName() + companion); item->setText(1, installStateText(install)); if (install.state == ManagedInstallState::Downloading) item->setText(2, install.totalBytes.has_value() ? tr("%1 / %2").arg(sizeText(install.bytesDownloaded), sizeText(*install.totalBytes)) : sizeText(install.bytesDownloaded)); }
+    const auto found = m_treeModel->match(m_treeModel->index(0, 0), Qt::UserRole + 1, id, 1,
+                                          Qt::MatchExactly | Qt::MatchRecursive);
+    QSignalBlocker blocker(m_tree->selectionModel());
+    m_tree->setCurrentIndex(id.isEmpty() || found.isEmpty() ? QModelIndex() : found.first());
 }
-
-void ManageModelsWindow::updateInstallButton()
+void ManageModelsWindow::showSelection(const QString &id)
 {
-    const QUrl url(m_url->text().trimmed());
-    const QUrl companionUrl(m_companionUrl->text().trimmed());
-    const QString category = m_category->currentData().toString();
-    const bool companionValid = category == QStringLiteral("upscaler") || m_companionUrl->text().trimmed().isEmpty() || validModelUrl(companionUrl);
-    const QList<ManagedInstall> installs = m_client->installs();
-    const bool duplicate = std::any_of(installs.cbegin(), installs.cend(), [&category, &url](const ManagedInstall &install) { return install.category == category && install.url == url && install.state != ManagedInstallState::Completed && install.state != ManagedInstallState::Failed; });
-    m_installButton->setEnabled(m_client->isAuthenticated() && validModelUrl(url) && companionValid && !duplicate);
+    m_selectedId = id;
+    m_dirty = false;
+    m_originalOptions = {};
+    m_options->hide();
+    m_details->setText(tr("Select a model to view its recommended options."));
+    for (const auto &category : categories)
+        for (const auto &model : m_client->models(category.first))
+        {
+            if (model.id != id)
+                continue;
+            m_originalOptions = model.recommendedOptions;
+            m_options->setOptions(category.first, model.recommendedOptions);
+            m_options->show();
+            m_details->setText(
+                tr("%1\n%2 · %3\n%4")
+                    .arg(model.name, model.fileName, sizeText(model.fileSize),
+                         model.recommendedOptions.isEmpty()
+                             ? tr("No saved recommendations. Save to attach the proposed values.")
+                             : tr("Recommended options")));
+        }
+    updateActions();
 }
-
-void ManageModelsWindow::startInstall()
+void ManageModelsWindow::selectionChanged()
 {
-    const QString category = m_category->currentData().toString();
-    if (!m_client->installModel(category, QUrl(m_url->text().trimmed()), category != QStringLiteral("upscaler") ? QUrl(m_companionUrl->text().trimmed()) : QUrl()).isEmpty()) { m_url->clear(); m_companionUrl->clear(); }
+    const QString id = m_tree->currentIndex().data(Qt::UserRole + 1).toString();
+    if (id == m_selectedId)
+        return;
+    const QPersistentModelIndex requested = m_tree->currentIndex();
+    const QString old = m_selectedId;
+    selectModel(old);
+    const auto change = [this, id, requested]
+    {
+        QSignalBlocker blocker(m_tree->selectionModel());
+        m_tree->setCurrentIndex(requested);
+        showSelection(id);
+    };
+    if (guardChanges(change))
+        change();
 }
-
-void ManageModelsWindow::updateDeleteButton()
+bool ManageModelsWindow::guardChanges(std::function<void()> continuation)
 {
-    const auto selected = m_models->selectedItems();
-    const bool hasSelection = !selected.isEmpty() && !selected.first()->data(0, Qt::UserRole).toString().isEmpty();
-    m_deleteButton->setEnabled(m_client->isAuthenticated() && hasSelection);
+    if (m_saving)
+        return false;
+    if (!m_dirty)
+        return true;
+    const auto answer = QMessageBox::question(
+        this, tr("Unsaved recommendations"), tr("Save changes to this model before continuing?"),
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    if (answer == QMessageBox::Discard)
+    {
+        showSelection(m_selectedId);
+        return true;
+    }
+    if (answer == QMessageBox::Save && m_client->isAuthenticated() && m_options->isValid())
+    {
+        m_afterSave = std::move(continuation);
+        saveOptions();
+    }
+    return false;
 }
-
+void ManageModelsWindow::updateActions()
+{
+    m_tree->setEnabled(!m_saving);
+    m_options->setEnabled(m_client->isAuthenticated() && !m_saving);
+    m_add->setEnabled(m_client->isAuthenticated() && !m_saving);
+    m_delete->setEnabled(m_client->modelListAvailable() && m_client->isAuthenticated() && !m_saving &&
+                         !m_selectedId.isEmpty());
+    m_save->setEnabled(m_client->modelListAvailable() && m_client->isAuthenticated() && !m_saving &&
+                       !m_selectedId.isEmpty() && m_options->isValid() &&
+                       (m_dirty || m_originalOptions.isEmpty()));
+}
+void ManageModelsWindow::saveOptions()
+{
+    if (!m_options->isValid())
+        return;
+    if (m_client->configureModel(m_selectedId, m_options->options()))
+    {
+        m_saving = true;
+        m_status->setText(tr("Saving recommended options…"));
+        updateActions();
+    }
+    else
+        m_afterSave = {};
+}
+void ManageModelsWindow::addModel()
+{
+    const auto open = [this]
+    {
+        AddModelDialog dialog(m_client, m_tree->currentIndex().data(Qt::UserRole + 2).toString(), this);
+        connect(&dialog, &AddModelDialog::modelInstalled, this,
+                [this](const QString &id)
+                {
+                    m_dirty = false;
+                    m_selectedId = id;
+                });
+        dialog.exec();
+    };
+    if (guardChanges(open))
+        open();
+}
 void ManageModelsWindow::deleteSelectedModel()
 {
-    const auto selected = m_models->selectedItems();
-    const QString id = selected.isEmpty() ? QString() : selected.first()->data(0, Qt::UserRole).toString();
-    if (id.isEmpty()) return;
-    if (QMessageBox::question(this, tr("Delete model"), tr("Delete %1? This cannot be undone.").arg(id), QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes) {
-        m_deleteButton->setEnabled(false);
-        m_client->deleteModel(id);
+    const auto remove = [this]
+    {
+        if (QMessageBox::question(this, tr("Delete model"),
+                                  tr("Delete this model and its companion? This cannot be undone."),
+                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes)
+            m_client->deleteModel(m_selectedId);
+    };
+    if (guardChanges(remove))
+        remove();
+}
+void ManageModelsWindow::closeEvent(QCloseEvent *event)
+{
+    if (!m_allowClose && !guardChanges(
+                             [this]
+                             {
+                                 m_allowClose = true;
+                                 close();
+                             }))
+    {
+        event->ignore();
+        return;
     }
+    QSettings settings;
+    settings.setValue("MainWindow/Geometry", saveGeometry());
+    settings.setValue("MainWindow/ModelsSplitter", m_splitter->saveState());
+    KiraUi::MainWindow::closeEvent(event);
 }

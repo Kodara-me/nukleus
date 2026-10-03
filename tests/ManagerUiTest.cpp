@@ -1,64 +1,326 @@
+#include "../src/manager/AddModelDialog.h"
 #include "../src/manager/ManageModelsWindow.h"
-
+#include "../src/manager/ManagerServiceClient.h"
+#include "../src/manager/ModelOptionsWidget.h"
+#include <KiraUi/Theme.h>
+#include <KiraUi/TreeView.h>
+#include <QApplication>
 #include <QComboBox>
-#include <QLabel>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QLineEdit>
-#include <QTreeWidget>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QSettings>
+#include <QSpinBox>
+#include <QTemporaryDir>
+#include <QWebSocket>
+#include <QWebSocketServer>
 #include <QtTest>
+#include <kira/service/ModelOptions.h>
 
 class ManagerUiTest final : public QObject
 {
     Q_OBJECT
-private slots:
-    void groupsInstalledModelsInTree()
+    QTemporaryDir m_settings;
+    QWebSocketServer m_server{"manager-ui-test", QWebSocketServer::NonSecureMode};
+    QWebSocket *m_peer = nullptr;
+    QList<QJsonObject> m_messages;
+    QJsonObject m_saved;
+    void send(const QJsonObject &object)
     {
-        ManageModelsWindow window;
-        auto *tree = window.findChild<QTreeWidget *>(QStringLiteral("installedModelsTree"));
-        QVERIFY(tree);
-        QCOMPARE(tree->topLevelItemCount(), 1);
-        auto *root = tree->topLevelItem(0);
-        QCOMPARE(root->text(0), QStringLiteral("Models"));
-        QVERIFY(!(root->flags() & Qt::ItemIsSelectable));
-        QCOMPARE(root->childCount(), 5);
-        const QStringList names = {QStringLiteral("Edition"), QStringLiteral("LLM"),
-            QStringLiteral("Image generation"), QStringLiteral("Upscaler"), QStringLiteral("IP-Adapter")};
-        for (int index = 0; index < names.size(); ++index) {
-            QCOMPARE(root->child(index)->text(0), names[index]);
-            QVERIFY(!(root->child(index)->flags() & Qt::ItemIsSelectable));
-            QVERIFY(root->child(index)->isExpanded());
-        }
+        m_peer->sendTextMessage(QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact)));
     }
-
-    void showsCategoryCompanionFields()
+    void listModels()
     {
-        ManageModelsWindow window;
-        window.show();
-        auto *category = window.findChild<QComboBox *>();
-        auto *companion = window.findChild<QLineEdit *>(QStringLiteral("companionUrl"));
-        QVERIFY(category);
-        QVERIFY(companion);
-        const auto hasLabel = [&window](const QString &text) {
-            for (const auto *label : window.findChildren<QLabel *>()) {
-                if (label->text() == text && !label->isHidden()) return true;
-            }
-            return false;
-        };
-        QVERIFY(hasLabel(QStringLiteral("Optional VAE URL")));
-        QVERIFY(!hasLabel(QStringLiteral("SHA-256")));
-        for (const QString &name : {QStringLiteral("edition"), QStringLiteral("llm-chat"), QStringLiteral("ip-adapter")}) {
-            companion->setText(QStringLiteral("https://example.test/old.gguf"));
-            category->setCurrentIndex(category->findData(name));
-            QVERIFY(companion->text().isEmpty());
-            QVERIFY(!companion->isHidden());
-            QVERIFY(companion->isEnabled());
-            QVERIFY(hasLabel(name == QStringLiteral("llm-chat") ? QStringLiteral("Optional mmproj URL")
-                : name == QStringLiteral("ip-adapter") ? QStringLiteral("Optional companion LoRA URL") : QStringLiteral("Optional VAE URL")));
+        send({{"type", "models.list.result"},
+              {"categories",
+               QJsonArray{QJsonObject{
+                   {"category", "image-generation"},
+                   {"models", QJsonArray{QJsonObject{{"id", "image-generation:test.gguf"},
+                                                     {"name", "Test model"},
+                                                     {"fileName", "test.gguf"},
+                                                     {"bytes", 10},
+                                                     {"companionFileName", "companions/test.gguf/vae.gguf"},
+                                                     {"companionRole", "vae"},
+                                                     {"recommendedOptions", m_saved}}}}}}}});
+    }
+  private slots:
+    void initTestCase()
+    {
+        QCoreApplication::setOrganizationName("KiraManagerTests");
+        QCoreApplication::setApplicationName("ManagerUiTests");
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settings.path());
+        KiraUi::Theme::apply(*qApp);
+        QVERIFY(m_server.listen(QHostAddress::LocalHost));
+        connect(&m_server, &QWebSocketServer::newConnection, this,
+                [this]
+                {
+                    m_peer = m_server.nextPendingConnection();
+                    connect(m_peer, &QWebSocket::disconnected, m_peer, &QObject::deleteLater);
+                    connect(m_peer, &QWebSocket::textMessageReceived, this,
+                            [this](const QString &text)
+                            {
+                                const auto object = QJsonDocument::fromJson(text.toUtf8()).object();
+                                m_messages.append(object);
+                                if (object.value("type") == "authenticate")
+                                    send({{"type", "authenticated"}});
+                                else if (object.value("type") == "models.list")
+                                    listModels();
+                                else if (object.value("type") == "models.install")
+                                    send({{"type", "models.install.accepted"},
+                                          {"installId", object.value("installId")}});
+                                else if (object.value("type") == "models.install.cancel")
+                                    send({{"type", "models.install.canceled"},
+                                          {"installId", object.value("installId")}});
+                            });
+                });
+    }
+    void init()
+    {
+        m_messages.clear();
+        m_saved = KiraService::Protocol::defaultModelOptions("image-generation");
+        QSettings().clear();
+    }
+    void fieldsFollowCategory()
+    {
+        ModelOptionsWidget widget;
+        for (const auto &category : {"image-generation", "edition", "llm-chat", "upscaler", "ip-adapter"})
+        {
+            widget.setOptions(category);
+            QCOMPARE(widget.options(), KiraService::Protocol::defaultModelOptions(category));
+            QVERIFY(widget.isValid());
         }
-        category->setCurrentIndex(category->findData(QStringLiteral("upscaler")));
-        QVERIFY(companion->isHidden());
-        QVERIFY(!companion->isEnabled());
+        widget.setOptions("llm-chat");
+        QVERIFY(!widget.findChild<QComboBox *>("resolution"));
+        widget.findChild<QSpinBox *>("maxTokens")->setValue(5000);
+        QVERIFY(!widget.isValid());
+        widget.setOptions("image-generation");
+        auto *resolution = widget.findChild<QComboBox *>("resolution");
+        QCOMPARE(resolution->count(), 8);
+        resolution->setCurrentIndex(0);
+        QCOMPARE(widget.options().value("width").toInt(), 256);
+        resolution->setCurrentIndex(7);
+        QCOMPARE(widget.options().value("height").toInt(), 2048);
+    }
+    void landscapeTreeAndSavedConfiguration()
+    {
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        ManageModelsWindow window(nullptr, &client);
+        window.show();
+        QTRY_VERIFY(client.modelListAvailable());
+        QCOMPARE(window.minimumSize(), QSize(1000, 550));
+        QCOMPARE(window.size(), QSize(1300, 680));
+        auto *tree = window.findChild<KiraUi::TreeView *>("installedModelsTree");
+        QVERIFY(tree);
+        QCOMPARE(tree->model()->rowCount(), 1);
+        auto root = tree->model()->index(0, 0);
+        QCOMPARE(tree->model()->rowCount(root), 5);
+        auto branch = tree->model()->index(2, 0, root);
+        auto model = tree->model()->index(0, 0, branch);
+        tree->setCurrentIndex(model);
+        auto *form = window.findChild<ModelOptionsWidget *>();
+        QVERIFY(form->isVisible());
+        tree->setCurrentIndex(tree->model()->index(0, 0, model));
+        QVERIFY(form->isVisible());
+        auto *steps = form->findChild<QSpinBox *>("steps");
+        steps->setValue(42);
+        auto *save = window.findChild<QPushButton *>("saveOptions");
+        QVERIFY(save->isEnabled());
+        save->click();
+        QVERIFY(!save->isEnabled());
+        QTRY_VERIFY(!m_messages.isEmpty() && m_messages.last().value("type") == "models.configure");
+        QCOMPARE(m_messages.last().value("recommendedOptions").toObject().value("steps").toInt(), 42);
+        send({{"type", "error"}, {"id", "image-generation:test.gguf"}, {"message", "Write failed"}});
+        QTRY_VERIFY(save->isEnabled());
+        QCOMPARE(steps->value(), 42);
+        save->click();
+        QTRY_VERIFY(!save->isEnabled());
+        m_saved = form->options();
+        send({{"type", "models.configure.completed"},
+              {"id", "image-generation:test.gguf"},
+              {"model", QJsonObject{{"recommendedOptions", m_saved}}}});
+        QTRY_VERIFY(form->isEnabled());
+        QVERIFY(!save->isEnabled());
+        client.requestModels();
+        QTRY_VERIFY(tree->currentIndex().data(Qt::UserRole + 1).toString() == "image-generation:test.gguf");
+        if (qEnvironmentVariableIsSet("KIRA_MANAGER_SCREENSHOT_DIR"))
+        {
+            const QString dir = qEnvironmentVariable("KIRA_MANAGER_SCREENSHOT_DIR");
+            QVERIFY(window.grab().save(dir + "/manager-1300.png"));
+            window.resize(1000, 550);
+            QTest::qWait(20);
+            QVERIFY(window.grab().save(dir + "/manager-1000.png"));
+        }
+        window.close();
+        QCOMPARE(QSettings().value("MainWindow/Geometry").toByteArray(), window.saveGeometry());
+    }
+    void warnsBeforeDiscardingEdits()
+    {
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        ManageModelsWindow window(nullptr, &client);
+        window.show();
+        QTRY_VERIFY(client.modelListAvailable());
+        auto *tree = window.findChild<KiraUi::TreeView *>();
+        auto root = tree->model()->index(0, 0);
+        auto category = tree->model()->index(2, 0, root);
+        tree->setCurrentIndex(tree->model()->index(0, 0, category));
+        window.findChild<QSpinBox *>("steps")->setValue(33);
+        QTimer::singleShot(0,
+                           []
+                           {
+                               auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+                               QVERIFY(box);
+                               box->button(QMessageBox::Cancel)->click();
+                           });
+        tree->setCurrentIndex(category);
+        QCOMPARE(tree->currentIndex().data(Qt::UserRole + 1).toString(),
+                 QString("image-generation:test.gguf"));
+        QTimer::singleShot(0,
+                           []
+                           {
+                               auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+                               QVERIFY(box);
+                               box->button(QMessageBox::Discard)->click();
+                           });
+        window.close();
+        QVERIFY(!window.isVisible());
+    }
+    void handlesOlderServiceConfigureRejection()
+    {
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        ManageModelsWindow window(nullptr, &client);
+        window.show();
+        QTRY_VERIFY(client.modelListAvailable());
+        auto *tree = window.findChild<KiraUi::TreeView *>();
+        auto root = tree->model()->index(0, 0);
+        auto category = tree->model()->index(2, 0, root);
+        tree->setCurrentIndex(tree->model()->index(0, 0, category));
+        window.findChild<QSpinBox *>("steps")->setValue(35);
+        auto *save = window.findChild<QPushButton *>("saveOptions");
+        save->click();
+        send({{"type", "error"}, {"code", "unsupported-message"}, {"message", "Unsupported message"}});
+        QTRY_VERIFY(save->isEnabled());
+        QTimer::singleShot(0,
+                           []
+                           {
+                               auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+                               QVERIFY(box);
+                               box->button(QMessageBox::Discard)->click();
+                           });
+        window.close();
+    }
+    void savesBeforeChangingSelection()
+    {
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        ManageModelsWindow window(nullptr, &client);
+        window.show();
+        QTRY_VERIFY(client.modelListAvailable());
+        auto *tree = window.findChild<KiraUi::TreeView *>();
+        auto root = tree->model()->index(0, 0);
+        auto category = tree->model()->index(2, 0, root);
+        tree->setCurrentIndex(tree->model()->index(0, 0, category));
+        auto *form = window.findChild<ModelOptionsWidget *>();
+        form->findChild<QSpinBox *>("steps")->setValue(34);
+        QTimer::singleShot(0,
+                           []
+                           {
+                               auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+                               QVERIFY(box);
+                               box->button(QMessageBox::Save)->click();
+                           });
+        tree->setCurrentIndex(category);
+        QTRY_VERIFY(!m_messages.isEmpty() && m_messages.last().value("type") == "models.configure");
+        QVERIFY(!tree->isEnabled());
+        QVERIFY(form->isVisible());
+        m_saved = form->options();
+        send({{"type", "models.configure.completed"},
+              {"id", "image-generation:test.gguf"},
+              {"model", QJsonObject{{"recommendedOptions", m_saved}}}});
+        QTRY_VERIFY(tree->isEnabled());
+        QVERIFY(!form->isVisible());
+        window.close();
+    }
+    void keepsEditsOnDisconnection()
+    {
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        ManageModelsWindow window(nullptr, &client);
+        window.show();
+        QTRY_VERIFY(client.modelListAvailable());
+        auto *tree = window.findChild<KiraUi::TreeView *>();
+        auto root = tree->model()->index(0, 0);
+        auto category = tree->model()->index(2, 0, root);
+        tree->setCurrentIndex(tree->model()->index(0, 0, category));
+        auto *form = window.findChild<ModelOptionsWidget *>();
+        form->findChild<QSpinBox *>("steps")->setValue(45);
+        window.findChild<QPushButton *>("saveOptions")->click();
+        m_peer->close();
+        QTRY_VERIFY(!client.isAuthenticated());
+        QCOMPARE(form->options().value("steps").toInt(), 45);
+        QTimer::singleShot(0,
+                           []
+                           {
+                               auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+                               QVERIFY(box);
+                               box->button(QMessageBox::Discard)->click();
+                           });
+        window.close();
+        QVERIFY(!window.isVisible());
+    }
+    void downloadModalRetriesCancelsAndClosesOnSuccess()
+    {
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        client.connectToService();
+        QTRY_VERIFY(client.modelListAvailable());
+        AddModelDialog dialog(&client);
+        dialog.show();
+        auto *category = dialog.findChild<QComboBox *>("modelCategory");
+        auto *companion = dialog.findChild<QLineEdit *>("companionUrl");
+        category->setCurrentIndex(category->findData("upscaler"));
+        QVERIFY(!companion->isVisible());
+        category->setCurrentIndex(category->findData("llm-chat"));
+        QVERIFY(companion->isVisible());
+        dialog.findChild<QLineEdit *>("modelUrl")->setText("https://example.test/model.gguf");
+        auto *start = dialog.findChild<QPushButton *>("startDownload");
+        QVERIFY(start->isEnabled());
+        start->click();
+        QTRY_VERIFY(client.installs().last().state == ManagedInstallState::Accepted);
+        const QString first = client.installs().last().installId;
+        send({{"type", "error"}, {"installId", first}, {"message", "Network failed"}});
+        QTRY_VERIFY(start->isEnabled());
+        QVERIFY(dialog.isVisible());
+        start->click();
+        QTRY_VERIFY(client.installs().last().state == ManagedInstallState::Accepted);
+        dialog.close();
+        QVERIFY(dialog.isVisible());
+        QTRY_VERIFY(!dialog.isVisible());
+        QCOMPARE(client.installs().last().state, ManagedInstallState::Canceled);
+        AddModelDialog completed(&client);
+        completed.show();
+        completed.findChild<QLineEdit *>("modelUrl")->setText("https://example.test/new.gguf");
+        completed.findChild<QPushButton *>("startDownload")->click();
+        QTRY_VERIFY(client.installs().last().state == ManagedInstallState::Accepted);
+        send({{"type", "models.install.completed"},
+              {"installId", client.installs().last().installId},
+              {"model", QJsonObject{{"id", "image-generation:new.gguf"}}}});
+        QTRY_VERIFY(!completed.isVisible());
+        QCOMPARE(completed.result(), int(QDialog::Accepted));
+        if (qEnvironmentVariableIsSet("KIRA_MANAGER_SCREENSHOT_DIR"))
+        {
+            AddModelDialog preview(&client);
+            preview.show();
+            QTest::qWait(20);
+            QVERIFY(
+                preview.grab().save(qEnvironmentVariable("KIRA_MANAGER_SCREENSHOT_DIR") + "/add-model.png"));
+        }
     }
 };
-
 QTEST_MAIN(ManagerUiTest)
 #include "ManagerUiTest.moc"

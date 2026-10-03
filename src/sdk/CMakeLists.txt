@@ -8,6 +8,8 @@ find_package(Qt6 6.2 REQUIRED COMPONENTS Core Network WebSockets)
 add_library(KiraServiceProtocol STATIC
     include/kira/service/GenerationProgress.h
     include/kira/service/ServiceProtocol.h
+    include/kira/service/ModelOptions.h
+    src/ModelOptions.cpp
     src/ServiceProtocol.cpp
 )
 add_library(KiraService::Protocol ALIAS KiraServiceProtocol)

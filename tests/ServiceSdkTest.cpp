@@ -1,5 +1,6 @@
 #include <kira/service/ServiceClient.h>
 #include <kira/service/ServiceProtocol.h>
+#include <kira/service/ModelOptions.h>
 
 #include <QHostAddress>
 #include <QJsonDocument>
@@ -27,7 +28,14 @@ public:
                 if (type == QStringLiteral("authenticate")) {
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"authenticated\"}"));
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\",\"image.upscale\"]}"));
-                    socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list.result\",\"categories\":[{\"category\":\"image-generation\",\"models\":[{\"id\":\"image-generation:test.safetensors\",\"name\":\"Test\",\"fileName\":\"test.safetensors\",\"bytes\":1,\"companionFileName\":\"companions/test.safetensors/vae.safetensors\",\"companionRole\":\"vae\"}]},{\"category\":\"edition\",\"models\":[{\"id\":\"edition:edit.safetensors\",\"name\":\"Edit\",\"fileName\":\"edit.safetensors\",\"bytes\":5,\"companionFileName\":\"companions/edit.safetensors/vae.gguf\",\"companionRole\":\"vae\"}]},{\"category\":\"upscaler\",\"models\":[{\"id\":\"upscaler:test.gguf\",\"name\":\"Test 2x\",\"fileName\":\"test.gguf\",\"bytes\":2}]},{\"category\":\"llm-chat\",\"models\":[{\"id\":\"llm-chat:test.gguf\",\"name\":\"Test LLM\",\"fileName\":\"llm.gguf\",\"bytes\":3,\"companionFileName\":\"companions/llm.gguf/mmproj.gguf\",\"companionRole\":\"mmproj\"}]},{\"category\":\"ip-adapter\",\"models\":[{\"id\":\"ip-adapter:test.bin\",\"name\":\"Test Adapter\",\"fileName\":\"test.bin\",\"bytes\":4,\"companionFileName\":\"companions/test.bin/test-lora.safetensors\"}]}]}"));
+                    socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list.result\",\"categories\":[{\"category\":\"image-generation\",\"models\":[{\"id\":\"image-generation:test.safetensors\",\"name\":\"Test\",\"fileName\":\"test.safetensors\",\"bytes\":1,\"companionFileName\":\"companions/test.safetensors/vae.safetensors\",\"companionRole\":\"vae\"}]},{\"category\":\"edition\",\"models\":[{\"id\":\"edition:edit.safetensors\",\"name\":\"Edit\",\"fileName\":\"edit.safetensors\",\"bytes\":5,\"companionFileName\":\"companions/edit.safetensors/vae.gguf\",\"companionRole\":\"vae\"}]},{\"category\":\"upscaler\",\"models\":[{\"id\":\"upscaler:test.gguf\",\"name\":\"Test 2x\",\"recommendedOptions\":{\"tileSize\":128},\"fileName\":\"test.gguf\",\"bytes\":2}]},{\"category\":\"llm-chat\",\"models\":[{\"id\":\"llm-chat:test.gguf\",\"name\":\"Test LLM\",\"fileName\":\"llm.gguf\",\"bytes\":3,\"companionFileName\":\"companions/llm.gguf/mmproj.gguf\",\"companionRole\":\"mmproj\"}]},{\"category\":\"ip-adapter\",\"models\":[{\"id\":\"ip-adapter:test.bin\",\"name\":\"Test Adapter\",\"fileName\":\"test.bin\",\"bytes\":4,\"companionFileName\":\"companions/test.bin/test-lora.safetensors\"}]}]}"));
+                } else if (type == "models.configure") {
+                    const QJsonObject reply{{"type", "models.configure.completed"}, {"id", message.value("id")}, {"model", QJsonObject{{"recommendedOptions", message.value("recommendedOptions")}}}};
+                    socket->sendTextMessage(QString::fromUtf8(QJsonDocument(reply).toJson(QJsonDocument::Compact)));
+                } else if (type == "models.install") {
+                    socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "models.install.accepted"}, {"installId", message.value("installId")}}).toJson(QJsonDocument::Compact)));
+                } else if (type == "models.install.cancel") {
+                    socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "models.install.canceled"}, {"installId", message.value("installId")}}).toJson(QJsonDocument::Compact)));
                 } else if (type == QStringLiteral("submit")) {
                     const QString jobId = message.value(QStringLiteral("jobId")).toString();
                     if (message.value(QStringLiteral("options")).toObject().value(QStringLiteral("hasInput")).toBool()) {
@@ -71,6 +79,7 @@ class ServiceSdkTest final : public QObject
 {
     Q_OBJECT
 private slots:
+    void configuresAndCancelsModels();
     void preservesProtocolV3();
     void authenticatesAndDiscoversModels();
     void submitsBinaryInputAndReturnsBinaryOutput();
@@ -78,6 +87,21 @@ private slots:
     void installsModelWithCompanion();
     void reportsConnectionFailure();
 };
+
+void ServiceSdkTest::configuresAndCancelsModels()
+{
+    FakeSdkService service; QVERIFY(service.start()); KiraService::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService(); QTRY_VERIFY(client.modelListAvailable());
+    QCOMPARE(client.models(KiraService::ModelCategory::Upscaler).first().recommendedOptions, QJsonObject({{"tileSize", 128}}));
+    QSignalSpy configured(&client, &KiraService::ServiceClient::modelConfigured);
+    QVERIFY(client.configureModel("upscaler:test.gguf", {{"tileSize", 256}})); QTRY_COMPARE(configured.count(), 1); QCOMPARE(configured.first().at(1).value<QJsonObject>(), QJsonObject({{"tileSize", 256}}));
+    const auto options = KiraService::Protocol::defaultModelOptions("llm-chat");
+    const auto id = client.installModel(KiraService::ModelCategory::LlmChat, QUrl("https://example.test/model.gguf"), {}, options); QVERIFY(!id.isEmpty());
+    QTRY_COMPARE(client.installs().last().state, KiraService::ModelInstallState::Accepted);
+    const auto installMessage = std::find_if(service.messages().cbegin(), service.messages().cend(), [](const QJsonObject &message) { return message.value("type") == "models.install"; });
+    QVERIFY(installMessage != service.messages().cend()); QCOMPARE(installMessage->value("recommendedOptions").toObject(), options);
+    QVERIFY(client.cancelInstall(id)); QTRY_COMPARE(client.installs().last().state, KiraService::ModelInstallState::Canceled);
+    client.disconnectFromService(); QTRY_VERIFY(!client.isAuthenticated()); QCOMPARE(client.installs().last().state, KiraService::ModelInstallState::Canceled);
+}
 
 void ServiceSdkTest::preservesProtocolV3()
 {

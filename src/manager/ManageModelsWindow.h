@@ -1,37 +1,52 @@
 #pragma once
-
-#include <QMainWindow>
-
+#include <KiraUi/MainWindow.h>
+#include <QJsonObject>
+#include <functional>
 class ManagerServiceClient;
-class QComboBox;
-class QLineEdit;
+class ModelOptionsWidget;
 class QLabel;
 class QPushButton;
-class QTreeWidget;
+class QStandardItemModel;
+class QSplitter;
+class QCloseEvent;
+namespace KiraUi
+{
+class TreeView;
+}
 
-class ManageModelsWindow final : public QMainWindow
+class ManageModelsWindow final : public KiraUi::MainWindow
 {
     Q_OBJECT
+  public:
+    explicit ManageModelsWindow(QWidget *parent = nullptr, ManagerServiceClient *client = nullptr);
 
-public:
-    explicit ManageModelsWindow(QWidget *parent = nullptr);
+  protected:
+    void closeEvent(QCloseEvent *event) override;
 
-private:
+  private:
     void populateModels();
-    void populateInstalls();
-    void updateInstallButton();
-    void updateDeleteButton();
-    void startInstall();
+    void selectModel(const QString &id);
+    void showSelection(const QString &id);
+    void selectionChanged();
+    void updateActions();
+    void addModel();
     void deleteSelectedModel();
-
+    void saveOptions();
+    bool guardChanges(std::function<void()> continuation);
     ManagerServiceClient *m_client;
-    QLabel *m_status = nullptr;
-    QTreeWidget *m_models = nullptr;
-    QComboBox *m_category = nullptr;
-    QLineEdit *m_url = nullptr;
-    QLabel *m_companionLabel = nullptr;
-    QLineEdit *m_companionUrl = nullptr;
-    QPushButton *m_installButton = nullptr;
-    QPushButton *m_deleteButton = nullptr;
-    QTreeWidget *m_installs = nullptr;
+    QLabel *m_status;
+    QLabel *m_details;
+    KiraUi::TreeView *m_tree;
+    QStandardItemModel *m_treeModel;
+    QSplitter *m_splitter;
+    ModelOptionsWidget *m_options;
+    QPushButton *m_add;
+    QPushButton *m_delete;
+    QPushButton *m_save;
+    QString m_selectedId;
+    QJsonObject m_originalOptions;
+    bool m_dirty = false;
+    bool m_saving = false;
+    bool m_allowClose = false;
+    std::function<void()> m_afterSave;
 };

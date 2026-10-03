@@ -6,7 +6,7 @@
 #include <QUrl>
 
 #include <optional>
-#include <deque>
+#include <QJsonObject>
 
 enum class ModelCategory
 {
@@ -26,6 +26,7 @@ struct ModelInfo
     QString filePath;
     QString companionFileName;
     QString companionRole;
+    QJsonObject recommendedOptions;
 };
 
 Q_DECLARE_METATYPE(ModelInfo)
@@ -36,11 +37,11 @@ struct ModelInstallRequest
     ModelCategory category = ModelCategory::ImageGeneration;
     QUrl url;
     std::optional<QUrl> companionUrl;
+    std::optional<QJsonObject> recommendedOptions = {};
 };
 
 enum class ModelInstallState
 {
-    Queued,
     Downloading,
     Verifying
 };
@@ -48,9 +49,10 @@ enum class ModelInstallState
 struct ModelInstallProgress
 {
     QString installId;
-    ModelInstallState state = ModelInstallState::Queued;
+    ModelInstallState state = ModelInstallState::Downloading;
     qint64 bytesDownloaded = 0;
     std::optional<qint64> totalBytes;
+    QString fileRole = QStringLiteral("primary");
 };
 
 class ModelCatalog final : public QObject
@@ -72,10 +74,13 @@ public:
     bool install(const ModelInstallRequest &request, QString *errorMessage = nullptr);
     bool remove(const QString &id, QString *errorMessage = nullptr);
     void cancel(const QString &installId);
+    bool isInstalling() const;
+    bool configure(const QString &id, const QJsonObject &options, QString *error = nullptr);
 
 signals:
     void installProgress(const ModelInstallProgress &progress);
     void installFinished(const QString &installId, const ModelInfo &model);
+    void installCanceled(const QString &installId);
     void installFailed(const QString &installId, const QString &errorMessage);
 
 private:
@@ -85,14 +90,14 @@ private:
     QString directoryPath(ModelCategory category) const;
     QString companionMetadataPath(ModelCategory category) const;
     QString companionPath(ModelCategory category, const QString &primaryFileName, const QString &companionFileName) const;
-    QHash<QString, QString> companionMetadata(ModelCategory category) const;
-    bool writeCompanionMetadata(ModelCategory category, const QHash<QString, QString> &metadata) const;
+    std::optional<QJsonObject> readMetadata(ModelCategory category) const;
+    bool writeMetadata(ModelCategory category, const QJsonObject &metadata) const;
     bool ensureDirectory(ModelCategory category, QString *errorMessage) const;
     bool acceptsUrl(const QUrl &url) const;
     bool acceptsRedirectUrl(const QUrl &url) const;
     bool acceptsFileName(ModelCategory category, const QString &fileName) const;
     QString fileNameForUrl(const QUrl &url) const;
-    void startNextInstall();
+    void startInstall();
     void startRequest(const QUrl &url);
     void startCompanionInstall();
     void finishNetworkRequest();
@@ -104,7 +109,6 @@ private:
     std::optional<QString> m_rootPathOverride;
     bool m_allowInsecureTestUrls = false;
     class QNetworkAccessManager *m_networkManager;
-    std::deque<std::unique_ptr<InstallJob>> m_pendingInstalls;
     std::unique_ptr<InstallJob> m_activeInstall;
 };
 

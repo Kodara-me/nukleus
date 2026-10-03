@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QJsonObject>
 #include <QMetaType>
 #include <QString>
 #include <QUrl>
@@ -28,6 +29,7 @@ struct ModelInfo
     ModelCategory category = ModelCategory::Unknown;
     QString companionFileName;
     QString companionRole;
+    QJsonObject recommendedOptions;
 };
 
 enum class ModelInstallState
@@ -38,7 +40,8 @@ enum class ModelInstallState
     Downloading,
     Verifying,
     Completed,
-    Failed
+    Failed,
+    Canceled
 };
 
 struct ModelInstall

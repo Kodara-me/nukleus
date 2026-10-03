@@ -1,0 +1,12 @@
+<RCC>
+  <qresource prefix="/manager/icons">
+    <file alias="manager-16.png">../../assets/icons/kira-service-manager-16.png</file>
+    <file alias="manager-32.png">../../assets/icons/kira-service-manager-32.png</file>
+    <file alias="manager-48.png">../../assets/icons/kira-service-manager-48.png</file>
+    <file alias="manager-64.png">../../assets/icons/kira-service-manager-64.png</file>
+    <file alias="manager-128.png">../../assets/icons/kira-service-manager-128.png</file>
+    <file alias="manager-256.png">../../assets/icons/kira-service-manager-256.png</file>
+    <file alias="manager-512.png">../../assets/icons/kira-service-manager-512.png</file>
+    <file alias="manager-1024.png">../../assets/icons/kira-service-manager-1024.png</file>
+  </qresource>
+</RCC>

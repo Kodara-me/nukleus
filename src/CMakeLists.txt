@@ -26,16 +26,22 @@ target_include_directories(kira-service PRIVATE
 target_link_libraries(kira-service PRIVATE KiraService::Protocol Qt6::Network Qt6::WebSockets)
 
 add_executable(kira-service-manager
+    manager/resources.qrc
     manager/kira-service-manager-main.cpp
+    manager/ModelOptionsWidget.h
+    manager/ModelOptionsWidget.cpp
+    manager/AddModelDialog.h
+    manager/AddModelDialog.cpp
     manager/ManageModelsWindow.cpp
     manager/ManageModelsWindow.h
     manager/ManagerServiceClient.cpp
     manager/ManagerServiceClient.h
 )
+set_target_properties(kira-service-manager PROPERTIES AUTORCC ON)
 target_include_directories(kira-service-manager PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/manager
 )
-target_link_libraries(kira-service-manager PRIVATE KiraService::Protocol Qt6::Network Qt6::WebSockets Qt6::Widgets)
+target_link_libraries(kira-service-manager PRIVATE KiraService::Protocol KiraUi::Widgets Qt6::Network Qt6::WebSockets Qt6::Widgets)
 
 install(TARGETS kira-service
     RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/kira-service

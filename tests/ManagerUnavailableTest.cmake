@@ -1,0 +1,6 @@
+execute_process(COMMAND "${MANAGER}" list RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(result EQUAL 0)
+    message("SKIP: local service is running")
+elseif(NOT error MATCHES "unavailable|connect")
+    message(FATAL_ERROR "Unexpected manager failure: ${error}")
+endif()

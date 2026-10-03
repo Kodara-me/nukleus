@@ -27,3 +27,62 @@ Model administrators may delete an installed model by its opaque ID:
 The service replies with `models.delete.completed` or an `error` containing the model `id`. Deletion is rejected while the model is referenced by active, queued, or pending-upload work. Filesystem paths are never accepted or returned.
 
 Image work uses `submit` with `image.generate` or `image.upscale`; each request must include a matching installed `modelId`. Upscale is fixed at 2×. Input and result image data are binary WebSocket messages; filesystem paths are never part of the protocol.
+
+## Recommended model options (additive v3 extension)
+
+Models may contain a `recommendedOptions` object in `models.list.result`,
+`models.install.completed`, and `models.configure.completed`. Missing options
+mean no recommendations have been saved. These are client recommendations;
+job requests continue to determine execution settings. No paths are included.
+
+`models.install` accepts the optional object. Omission preserves older clients;
+when provided, the object must contain exactly the category's complete fields:
+
+| Category | Fields and validation |
+| --- | --- |
+| image-generation / edition | `width` and `height`: identical integers 256–2048, multiples of 256; `steps`: integer 1–200; `cfgScale`: number 0–100; `sampler` and `scheduler`: allowed strings; `clipSkip`: -1 or integer 1–12 |
+| llm-chat | `temperature`: number 0–2; `topP`: number >0 and ≤1; `contextLength`: integer 256–131072; `maxTokens`: integer 1–contextLength |
+| upscaler | `tileSize`: integer 64, 128, 256, 512 or 1024 |
+| ip-adapter | `strength`: number 0–2 |
+
+Samplers: empty (Automatic), `euler`, `euler_a`, `heun`, `dpm2`, `dpm++2m`, `lcm`.
+Schedulers: empty (Automatic), `discrete`, `karras`, `exponential`, `ays`,
+`sgm_uniform`, `simple`. Clip Skip -1 means Automatic. The GUI proposes defaults
+from the shared Protocol API; the service does not infer model architecture.
+Unknown fields, missing fields, wrong types and out-of-range values are rejected.
+
+To replace recommendations on an installed model:
+
+```json
+{"type":"models.configure","id":"upscaler:model.gguf","recommendedOptions":{"tileSize":256}}
+```
+
+Success returns `models.configure.completed` with `id` and the complete `model`
+object. Errors include the model `id` and `invalid-model-configure`. The SDK and
+manager expose `configureModel()` and a `modelConfigured` signal. Only successful
+service writes count as saved. Recommendations survive service restarts and are
+removed with the model; existing companion relationships remain intact.
+
+Only one model installation is active globally, including its sequential
+companion download. Further requests fail with `model-install-busy` and the
+request's `installId`; they are not queued. Image job queuing is unaffected.
+Installation progress also includes `fileRole` (`primary` or `companion`), with
+bytes and optional total for that file. The legacy SDK/manager Queued state
+remains available for compatibility but the service no longer emits it.
+
+```json
+{"type":"models.install.cancel","installId":"client-generated-id"}
+```
+
+Only the installation's owning connection may cancel it. Successful cancellation
+cleans temporary files and returns `models.install.canceled` with `installId`;
+clients enter Canceled. Unknown or foreign IDs return `invalid-model-cancel`.
+Disconnecting the owner also cancels its installation. Completion is reported
+only after primary/companion files and metadata are committed; an installation
+metadata failure rolls back its newly installed files.
+
+On disk, category-local `metadata.json` retains legacy filename-to-companion
+strings. Modified entries become objects containing optional
+`companionFileName` and `recommendedOptions`. Untouched entries are preserved;
+QSaveFile writes are atomic. Invalid/unreadable JSON must never be silently
+replaced during install, configure, or delete.
