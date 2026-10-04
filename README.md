@@ -176,3 +176,19 @@ source history and normalizing returned output to source resolution if needed.
 Reference-image editing also supplies `--flow-shift 3 --offload-to-cpu --diffusion-fa --model-args qwen_image_zero_cond_t=true`. Fatal/error-level Vulkan `ErrorOutOfDeviceMemory`/`ErrorOutOfHostMemory` output aborts the active generation process; the daemon waits for process termination and returns the command and memory diagnostic as a job error, releasing the queue. Warnings, including pinned-memory allocation failures that fall back to CPU buffers, are not treated as failures.
 
 Image generation and reference-image editing both pass `--offload-to-cpu` to sd-cli.
+
+## Remote Linux updates
+
+From another machine, run the updater over SSH on the service host:
+
+```sh
+ssh user@service-host '/path/to/kira-service/scripts/update-kira-service.sh'
+```
+
+Run as the checkout owner with cached or passwordless sudo credentials. The script
+fetches and fast-forwards the current branch's upstream, configures and builds,
+runs CTest, then uses the existing systemd installer to preserve configuration and
+restart the service. Tracked changes, diverged branches, and build/test failures
+stop the update before installation. The restart interrupts active jobs.
+Build dependencies and Kira UI Framework must already be available; sibling
+checkouts and `sd-cli` are not updated. See `--help` for build and installer options.

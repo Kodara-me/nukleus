@@ -161,3 +161,38 @@ source history and normalizing returned output to source resolution if needed.
 Reference-image editing also supplies `--flow-shift 3 --offload-to-cpu --diffusion-fa --model-args qwen_image_zero_cond_t=true`. Fatal/error-level Vulkan `ErrorOutOfDeviceMemory`/`ErrorOutOfHostMemory` output aborts the active generation process; the daemon waits for process termination and returns the command and memory diagnostic as a job error, releasing the queue. Warnings, including pinned-memory allocation failures that fall back to CPU buffers, are not treated as failures.
 
 Image generation and reference-image editing both pass `--offload-to-cpu` to sd-cli.
+
+## Updating a remote Linux installation
+
+Use `scripts/update-kira-service.sh` on the service host as the checkout owner.
+It runs `git fetch --prune`, `git pull --ff-only`, CMake configure/build, CTest,
+and the existing systemd installer through `sudo -n`. Configure the branch's
+upstream first and commit or stash tracked changes. Untracked files are retained;
+Git refuses a pull that would overwrite them. Dependencies, including Kira UI
+Framework, must already be installed or checked out; sibling repositories and
+`sd-cli` are not updated.
+
+```sh
+ssh user@service-host '/path/to/kira-service/scripts/update-kira-service.sh'
+# Custom build directory and framework checkout:
+scripts/update-kira-service.sh --build-dir build-release \
+  --cmake-arg -DKIRA_UI_SOURCE_DIR=/path/to/kira-ui-framework
+```
+
+New build directories use Ninja and Release; existing CMake cache settings remain
+in effect. Additional configure arguments use repeated `--cmake-arg ARG` options;
+installer options follow `--`. Installation runs only after tests pass. Valid
+existing service configuration and model data are preserved by the installer,
+and installation restarts the service, interrupting active jobs. No rollback is
+performed if installation fails; inspect its error before retrying.
+
+For password-based sudo, allocate a terminal and cache credentials in the same
+SSH session before running the updater:
+
+```sh
+ssh -t user@service-host 'sudo -v && /path/to/kira-service/scripts/update-kira-service.sh'
+```
+
+Unattended runs require suitable passwordless sudo access. Do not run the entire
+updater as root. Build/test failures leave the installed service untouched, but
+the checkout may already have advanced to the fetched revision.
