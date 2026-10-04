@@ -68,6 +68,7 @@ private slots:
     void rollsBackMetadataFailure();
     void configuresModelsOverProtocol();
     void preservesProtocolV3();
+    void importsLocalModelWithoutChangingSources();
     void rejectsLanWithoutToken();
     void startsOnLoopbackAndLanAddress();
     void authenticatesLoopbackWithoutToken();
@@ -137,8 +138,10 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     const QString companion = "companions/model.gguf/vae with space.safetensors";
     const QString clipL = "companions/model.gguf/clip_l.safetensors";
     const QString clipG = "companions/model.gguf/clip_g.safetensors";
+    const QString llm = "companions/model.gguf/text encoder.gguf";
+    const QString mmproj = "companions/model.gguf/mmproj.gguf";
     QVERIFY(QDir().mkpath(QDir(root).filePath("companions/model.gguf")));
-    for (const QString &name : {QString("model.gguf"), QString("plain.gguf"), companion, clipL, clipG})
+    for (const QString &name : {QString("model.gguf"), QString("plain.gguf"), companion, clipL, clipG, llm, mmproj})
     {
         QFile file(QDir(root).filePath(name));
         QVERIFY(file.open(QIODevice::WriteOnly));
@@ -152,6 +155,18 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
                                                            QJsonObject{{"steps", 99}, {"cfgScale", 9.5}}}}}})
                        .toJson());
     metadata.close();
+    const QString editionRoot = QDir(root).filePath("edition");
+    QVERIFY(QDir().mkpath(QDir(editionRoot).filePath("companions/edit.gguf")));
+    for (const QString& name : {QString("edit.gguf"), QString("llm.gguf"), QString("vae.safetensors"), QString("mmproj.gguf")}) {
+        QFile file(QDir(editionRoot).filePath(name == "edit.gguf" ? name : "companions/edit.gguf/" + name));
+        QVERIFY(file.open(QIODevice::WriteOnly)); file.write("fixture");
+    }
+    QFile editionMetadata(QDir(editionRoot).filePath("metadata.json"));
+    QVERIFY(editionMetadata.open(QIODevice::WriteOnly));
+    editionMetadata.write(QJsonDocument(QJsonObject{{"edit.gguf", QJsonObject{
+        {"modelType", "diffusion"}, {"companionFiles", QJsonObject{
+            {"llm", "companions/edit.gguf/llm.gguf"}, {"vae", "companions/edit.gguf/vae.safetensors"}, {"mmproj", "companions/edit.gguf/mmproj.gguf"}}}}}}).toJson());
+    editionMetadata.close();
     KiraServiceConfiguration configuration;
     configuration.port = 0;
     configuration.modelRootPath = root;
@@ -247,12 +262,41 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
             return QStringList{};
         return QString::fromUtf8(file.readAll()).split('\n');
     };
+    QJsonObject editOptions = valid;
+    editOptions.insert("modelId", "edition:edit.gguf");
+    socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"type", "submit"}, {"operation", "image.edit"}, {"jobId", "edit-test"},
+        {"options", editOptions}}).toJson()));
+    const auto uploadRequested = [&] {
+        for (const auto& message : messages)
+            if (message.value("type") == "upload-required" && message.value("jobId") == "edit-test") return true;
+        return false;
+    };
+    QTRY_VERIFY(uploadRequested());
+    socket.sendBinaryMessage(image);
+    QTRY_VERIFY(terminal("edit-test"));
+    QTRY_COMPARE(images.count(), 1);
+    const auto editArgs = arguments();
+    QVERIFY(editArgs.contains("--ref-image"));
+    QCOMPARE(editArgs.count("--offload-to-cpu"), 1);
+    QVERIFY(editArgs.contains("--diffusion-fa"));
+    QCOMPARE(editArgs.value(editArgs.indexOf("--model-args") + 1), QString("qwen_image_zero_cond_t=true"));
+    QCOMPARE(editArgs.value(editArgs.indexOf("--flow-shift") + 1), QString("3"));
+    QVERIFY(!editArgs.contains("--init-img"));
+    QVERIFY(!editArgs.contains("--strength"));
+    QCOMPARE(editArgs.value(editArgs.indexOf("--diffusion-model") + 1), QDir(editionRoot).filePath("edit.gguf"));
+    QCOMPARE(editArgs.value(editArgs.indexOf("--llm") + 1), QDir(editionRoot).filePath("companions/edit.gguf/llm.gguf"));
+    QCOMPARE(editArgs.value(editArgs.indexOf("--vae") + 1), QDir(editionRoot).filePath("companions/edit.gguf/vae.safetensors"));
+    QCOMPARE(editArgs.value(editArgs.indexOf("--llm_vision") + 1), QDir(editionRoot).filePath("companions/edit.gguf/mmproj.gguf"));
+    QCOMPARE(messages.last().value("operation").toString(), QString("image.edit"));
+    images.clear();
     messages.clear();
     send("automatic", valid);
     QTRY_VERIFY(terminal("automatic"));
     QTRY_COMPARE(images.count(), 1);
     QCOMPARE(images.last().first().toByteArray(), image);
     auto args = arguments();
+    QCOMPARE(args.count("--offload-to-cpu"), 1);
     QVERIFY(!args.contains("--sampling-method"));
     QVERIFY(!args.contains("--scheduler"));
     QVERIFY(!args.contains("--clip-skip"));
@@ -265,7 +309,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QVERIFY(metadata.open(QIODevice::WriteOnly | QIODevice::Truncate));
     metadata.write(QJsonDocument(QJsonObject{{"model.gguf", QJsonObject{
         {"modelType", "diffusion"}, {"companionFiles", QJsonObject{
-            {"vae", companion}, {"clip-l", clipL}, {"clip-g", clipG}}}}}}).toJson());
+            {"vae", companion}, {"clip-l", clipL}, {"clip-g", clipG}, {"llm", llm}, {"mmproj", mmproj}}}}}}).toJson());
     metadata.close();
     messages.clear();
     send("modular", valid);
@@ -276,6 +320,8 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(args.value(args.indexOf("--diffusion-model") + 1), QDir(root).filePath("model.gguf"));
     QCOMPARE(args.value(args.indexOf("--clip_l") + 1), QDir(root).filePath(clipL));
     QCOMPARE(args.value(args.indexOf("--clip_g") + 1), QDir(root).filePath(clipG));
+    QCOMPARE(args.value(args.indexOf("--llm") + 1), QDir(root).filePath(llm));
+    QCOMPARE(args.value(args.indexOf("--llm_vision") + 1), QDir(root).filePath(mmproj));
     QCOMPARE(args.value(args.indexOf("--vae") + 1), QDir(root).filePath(companion));
     QJsonObject explicitOptions = valid;
     explicitOptions.insert("sampler", "dpm++2m");
@@ -315,7 +361,23 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(args.value(args.indexOf("--seed") + 1), QString("-1"));
     for (const auto &message : messages)
         QVERIFY(!QJsonDocument(message).toJson().contains(root.toUtf8()));
-    int completed = 4;
+    messages.clear();
+    send("defaults", {{"modelId", "image-generation:plain.gguf"}, {"prompt", "test"}});
+    QTRY_VERIFY(terminal("defaults"));
+    QTRY_COMPARE(images.count(), 5);
+    args = arguments();
+    QCOMPARE(args.value(args.indexOf("--width") + 1), QString("1024"));
+    QCOMPARE(args.value(args.indexOf("--height") + 1), QString("1024"));
+    QCOMPARE(args.value(args.indexOf("--steps") + 1), QString("28"));
+    QCOMPARE(args.value(args.indexOf("--cfg-scale") + 1), QString("7"));
+    QVERIFY(!args.contains("--vae"));
+    QVERIFY(!args.contains("--clip_l"));
+    QVERIFY(!args.contains("--llm"));
+    QVERIFY(!args.contains("--llm_vision"));
+    QVERIFY(!args.contains("--clip_g"));
+    QVERIFY(!args.contains("--sampling-method"));
+    QVERIFY(!args.contains("--scheduler"));
+    int completed = 5;
     for (double cfg : {0.0, 100.0})
     {
         auto boundary = valid;
@@ -334,6 +396,46 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
         args = arguments();
         QCOMPARE(args.value(args.indexOf("--cfg-scale") + 1).toDouble(), cfg);
     }
+    QVERIFY(executable.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    executable.write("#!/bin/sh\nprintf 'Klein fixture failure\\n' >&2\nexit 17\n");
+    executable.close();
+    messages.clear();
+    auto failingOptions = valid;
+    failingOptions.insert("prompt", "Klein's test");
+    send("failure-command", failingOptions);
+    QTRY_VERIFY(terminal("failure-command"));
+    const auto failure = std::find_if(messages.cbegin(), messages.cend(), [](const QJsonObject& message) {
+        return message.value("jobId") == "failure-command" && message.value("type") == "error";
+    });
+    QVERIFY(failure != messages.cend());
+    const QString detail = failure->value("message").toString();
+    QVERIFY(detail.contains("exit code 17"));
+    QVERIFY(detail.contains("Command:"));
+    QVERIFY(detail.contains("'--llm'"));
+    QVERIFY(detail.contains(QDir(root).filePath(llm)));
+    QVERIFY(detail.contains("'--vae'"));
+    QVERIFY(detail.contains("Klein fixture failure"));
+    QVERIFY(executable.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    executable.write("#!/bin/sh\nprintf '[WARN] Failed to allocate pinned memory: ErrorOutOfDeviceMemory\\n'\n"
+        "previous=\"\"\nfor argument in \"$@\"; do\n"
+        "if [ \"$previous\" = --output ]; then cp \"$KIRA_TEST_IMAGE\" \"$argument\"; fi\n"
+        "previous=\"$argument\"\ndone\nexit 0\n");
+    executable.close();
+    messages.clear();
+    send("pinned-memory-fallback", valid);
+    QTRY_VERIFY(terminal("pinned-memory-fallback"));
+    QCOMPARE(messages.last().value("type").toString(), QString("result"));
+    QVERIFY(executable.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    executable.write("#!/bin/sh\nprintf '[ERROR] Vulkan allocation failed: ErrorOutOfDeviceMemory\\n'\nexec sleep 60\n");
+    executable.close();
+    messages.clear();
+    send("memory-failure", valid);
+    QTRY_VERIFY_WITH_TIMEOUT(terminal("memory-failure"), 5000);
+    QCOMPARE(messages.last().value("type").toString(), QString("error"));
+    QVERIFY(messages.last().value("message").toString().contains("ErrorOutOfDeviceMemory"));
+
+    QVERIFY(detail.contains("Klein'\\''s test"));
+
 }
 
 void ServiceTest::validatesRecommendedOptions()
@@ -365,13 +467,25 @@ void ServiceTest::persistsOptionsAndLegacyMetadata()
     file.write("{\"legacy.gguf\":\"companions/legacy.gguf/vae.gguf\",\"untouched.gguf\":\"companions/untouched.gguf/vae.gguf\"}"); file.close();
     ModelCatalog catalog(directory.path(), true); const QString id = "image-generation:legacy.gguf";
     QVERIFY(catalog.modelById(id)); QVERIFY(catalog.modelById(id)->recommendedOptions.isEmpty());
+    QVERIFY(!catalog.modelById(id)->explicitContent);
     const auto options = KiraService::Protocol::defaultModelOptions("image-generation"); QString error;
-    QVERIFY2(catalog.configure(id, options, &error), qPrintable(error));
+    QVERIFY2(catalog.configure(id, options, &error, true), qPrintable(error));
+    QVERIFY(catalog.modelById(id)->explicitContent);
+    QVERIFY(catalog.configure(id, options, &error));
+    QVERIFY(catalog.modelById(id)->explicitContent);
     ModelCatalog restored(directory.path(), true); QCOMPARE(restored.modelById(id)->recommendedOptions, options);
+    QVERIFY(restored.modelById(id)->explicitContent);
+    QVERIFY(restored.configure(id, options, &error, false));
+    QVERIFY(!catalog.modelById(id)->explicitContent);
     QCOMPARE(restored.modelById(id)->companionFileName, QString("companions/legacy.gguf/vae.gguf"));
     QVERIFY(file.open(QIODevice::ReadOnly)); auto metadata = QJsonDocument::fromJson(file.readAll()).object(); file.close();
     QVERIFY(metadata.value("untouched.gguf").isString());
     auto bad = options; bad.insert("steps", -1); QVERIFY(!catalog.configure(id, bad, &error)); QCOMPARE(catalog.modelById(id)->recommendedOptions, options);
+    QVERIFY(restored.removeCompanion(id, "vae", &error));
+    QVERIFY(restored.modelById(id));
+    QVERIFY(restored.modelById(id)->companionFileName.isEmpty());
+    QCOMPARE(restored.modelById(id)->recommendedOptions, options);
+    QVERIFY(!QFileInfo::exists(directory.filePath("companions/legacy.gguf/vae.gguf")));
     QVERIFY(restored.remove(id, &error)); QVERIFY(file.open(QIODevice::ReadOnly)); metadata = QJsonDocument::fromJson(file.readAll()).object(); file.close(); QVERIFY(!metadata.contains("legacy.gguf"));
     QFile legacy(directory.filePath("legacy.gguf")); QVERIFY(legacy.open(QIODevice::WriteOnly)); legacy.write("model"); legacy.close();
     QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate)); file.write("broken json"); file.close();
@@ -423,10 +537,16 @@ void ServiceTest::configuresModelsOverProtocol()
     const auto send = [&client](const QJsonObject &object) { client.sendTextMessage(QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact))); };
     send({{"type", "authenticate"}, {"version", 3}}); QTRY_VERIFY(received.count() >= 2); received.clear();
     const auto options = KiraService::Protocol::defaultModelOptions("image-generation");
-    send({{"type", "models.configure"}, {"id", "image-generation:test.gguf"}, {"recommendedOptions", options}}); QTRY_COMPARE(received.count(), 1);
+    send({{"type", "models.configure"}, {"id", "image-generation:test.gguf"}, {"recommendedOptions", options}, {"explicitContent", true}}); QTRY_COMPARE(received.count(), 1);
     auto response = QJsonDocument::fromJson(received.takeFirst().first().toString().toUtf8()).object(); QCOMPARE(response.value("type").toString(), QString("models.configure.completed")); QCOMPARE(response.value("model").toObject().value("recommendedOptions").toObject(), options); QVERIFY(!response.value("model").toObject().contains("filePath"));
+    QVERIFY(response.value("model").toObject().value("explicitContent").toBool());
     send({{"type", "models.list"}}); QTRY_COMPARE(received.count(), 1); response = QJsonDocument::fromJson(received.takeFirst().first().toString().toUtf8()).object();
     QCOMPARE(response.value("categories").toArray().first().toObject().value("models").toArray().first().toObject().value("recommendedOptions").toObject(), options);
+    QVERIFY(response.value("categories").toArray().first().toObject().value("models").toArray().first().toObject().value("explicitContent").toBool());
+    send({{"type", "models.configure"}, {"id", "image-generation:test.gguf"}, {"recommendedOptions", options}, {"explicitContent", "true"}});
+    QTRY_COMPARE(received.count(), 1);
+    response = QJsonDocument::fromJson(received.takeFirst().first().toString().toUtf8()).object();
+    QCOMPARE(response.value("code").toString(), QString("invalid-model-configure"));
     send({{"type", "models.configure"}, {"id", "image-generation:test.gguf"}, {"recommendedOptions", true}}); QTRY_COMPARE(received.count(), 1); response = QJsonDocument::fromJson(received.takeFirst().first().toString().toUtf8()).object(); QCOMPARE(response.value("type").toString(), QString("error"));
     QTcpServer stalledDownload; QVERIFY(stalledDownload.listen(QHostAddress::LocalHost));
     const QString url = QString("https://127.0.0.1:%1/one.gguf").arg(stalledDownload.serverPort());
@@ -528,8 +648,13 @@ void ServiceTest::installsModelAtomically()
     TestHttpServer server(QByteArray("model-bytes")); QVERIFY(server.start());
     QTemporaryDir directory; QVERIFY(directory.isValid()); ModelCatalog catalog(directory.path(), true);
     QSignalSpy finished(&catalog, &ModelCatalog::installFinished); QString error;
-    QVERIFY(catalog.install({QStringLiteral("install-1"), ModelCategory::Upscaler, server.url(), {}}, &error));
+    ModelInstallRequest request{QStringLiteral("install-1"), ModelCategory::Upscaler, server.url(), {}};
+    request.explicitContent = true;
+    QVERIFY(catalog.install(request, &error));
     QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(catalog.modelById("upscaler:model.gguf")->explicitContent);
+    ModelCatalog restored(directory.path(), true);
+    QVERIFY(restored.modelById("upscaler:model.gguf")->explicitContent);
     const QString finalPath = directory.filePath(QStringLiteral("upscale/model.gguf"));
     QVERIFY(QFileInfo::exists(finalPath)); QVERIFY(!QFileInfo::exists(finalPath + QStringLiteral(".part")));
 }
@@ -545,7 +670,10 @@ void ServiceTest::managesEditionModels()
         const QString fileName = QStringLiteral("edit-model.%1").arg(extension);
         QString error;
         const int previousCount = finished.count();
-        QVERIFY(catalog.install({fileName, ModelCategory::Edition, server.url(fileName), {}}, &error));
+        ModelInstallRequest request{fileName, ModelCategory::Edition, server.url(fileName), {}};
+        request.companionUrls = {{"llm", server.url("encoder.gguf").toString()},
+            {"mmproj", server.url("mmproj.gguf").toString()}};
+        QVERIFY(catalog.install(request, &error));
         QTRY_COMPARE(finished.count(), previousCount + 1);
         const QString path = directory.filePath(QStringLiteral("edition/") + fileName);
         QVERIFY(QFileInfo::exists(path));
@@ -556,7 +684,14 @@ void ServiceTest::managesEditionModels()
         QVERIFY(catalog.models(ModelCategory::ImageGeneration).isEmpty());
         ModelCatalog restored(directory.path(), true);
         QVERIFY(restored.modelById(id).has_value());
+        QCOMPARE(restored.modelById(id)->companionFiles.size(), 2);
+        const QString encoderPath = directory.filePath("edition/" + model->companionFiles.value("llm").toString());
+        const QString mmprojPath = directory.filePath("edition/" + model->companionFiles.value("mmproj").toString());
+        QVERIFY(QFileInfo::exists(encoderPath));
+        QVERIFY(QFileInfo::exists(mmprojPath));
         QVERIFY(catalog.remove(id, &error));
+        QVERIFY(!QFileInfo::exists(encoderPath));
+        QVERIFY(!QFileInfo::exists(mmprojPath));
         QVERIFY(!QFileInfo::exists(path));
     }
 }
@@ -603,7 +738,8 @@ void ServiceTest::attachesModularCompanionsWithoutReplacingModel()
     request.modelType = "diffusion";
     request.companionUrls = {{"clip-l", server.url("clip_l.safetensors").toString()},
         {"clip-g", server.url("clip_g.safetensors").toString()},
-        {"vae", server.url("vae.safetensors").toString()}};
+        {"vae", server.url("vae.safetensors").toString()},
+        {"llm", server.url("encoder.gguf").toString()}, {"mmproj", server.url("mmproj.gguf").toString()}};
     QString error;
     QSignalSpy done(&catalog, &ModelCatalog::installFinished);
     QVERIFY2(catalog.install(request, &error), qPrintable(error));
@@ -612,7 +748,7 @@ void ServiceTest::attachesModularCompanionsWithoutReplacingModel()
     const auto model = restored.modelById(request.existingModelId);
     QVERIFY(model);
     QCOMPARE(model->modelType, QString("diffusion"));
-    QCOMPARE(model->companionFiles.size(), 3);
+    QCOMPARE(model->companionFiles.size(), 5);
     QVERIFY(primary.open(QIODevice::ReadOnly));
     QCOMPARE(primary.readAll(), QByteArray("original model"));
     primary.close();
@@ -873,3 +1009,80 @@ void ServiceTest::rejectsConflictingModelRoots()
 
 QTEST_MAIN(ServiceTest)
 #include "ServiceTest.moc"
+
+void ServiceTest::importsLocalModelWithoutChangingSources()
+{
+    QTemporaryDir source;
+    QTemporaryDir storage;
+    const QByteArray bytes("local model bytes");
+    for (const auto& name : {"local model.gguf", "encoder.gguf", "mmproj.gguf"}) {
+        QFile file(source.filePath(name));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write(bytes), qint64(bytes.size()));
+    }
+    ModelCatalog catalog(storage.path(), true);
+    ModelInstallRequest request;
+    request.installId = "local-import";
+    request.url = QUrl::fromLocalFile(source.filePath("local model.gguf"));
+    request.companionUrls = {{"llm", QUrl::fromLocalFile(source.filePath("encoder.gguf")).toString()},
+        {"mmproj", QUrl::fromLocalFile(source.filePath("mmproj.gguf")).toString()}};
+    QString error;
+    QVERIFY(!catalog.install(request, &error));
+    request.allowLocalFiles = true;
+    QSignalSpy completed(&catalog, &ModelCatalog::installFinished);
+    QVERIFY2(catalog.install(request, &error), qPrintable(error));
+    QTRY_COMPARE(completed.count(), 1);
+    const QString id = "image-generation:local model.gguf";
+    ModelCatalog restored(storage.path(), true);
+    const auto model = restored.modelById(id);
+    QVERIFY(model);
+    QCOMPARE(model->companionFiles.size(), 2);
+    QFile installed(model->filePath);
+    QVERIFY(installed.open(QIODevice::ReadOnly));
+    QCOMPARE(installed.readAll(), bytes);
+    installed.close();
+    QVERIFY(!catalog.removeCompanion(id, "unknown", &error));
+    QVERIFY(catalog.removeCompanion(id, "llm", &error));
+    QVERIFY(QFileInfo::exists(model->filePath));
+    QVERIFY(!QFileInfo::exists(storage.filePath(model->companionFiles.value("llm").toString())));
+    QCOMPARE(catalog.modelById(id)->companionFiles.size(), 1);
+    QCOMPARE(catalog.modelById(id)->companionFiles.value("mmproj"), model->companionFiles.value("mmproj"));
+    ModelInstallRequest replacement;
+    replacement.installId = "replacement";
+    replacement.existingModelId = id;
+    replacement.allowLocalFiles = true;
+    replacement.companionUrls = {{"llm", QUrl::fromLocalFile(source.filePath("encoder.gguf")).toString()}};
+    QVERIFY2(catalog.install(replacement, &error), qPrintable(error));
+    QTRY_COMPARE(completed.count(), 2);
+    QCOMPARE(catalog.modelById(id)->companionFiles.size(), 2);
+    QVERIFY(QFileInfo::exists(storage.filePath(model->companionFiles.value("llm").toString())));
+    request.installId = "duplicate-import";
+    QVERIFY(!catalog.install(request, &error));
+    KiraServiceConfiguration configuration;
+    configuration.port = 0;
+    configuration.modelRootPath = storage.path();
+    KiraServiceDaemon service(configuration);
+    QVERIFY2(service.start(&error), qPrintable(error));
+    QWebSocket socket;
+    QSignalSpy messages(&socket, &QWebSocket::textMessageReceived);
+    socket.open(QUrl(QString("ws://127.0.0.1:%1").arg(service.serverPort())));
+    QTRY_COMPARE(socket.state(), QAbstractSocket::ConnectedState);
+    socket.sendTextMessage("{\"type\":\"authenticate\",\"version\":3}");
+    QTRY_VERIFY(messages.count() >= 2);
+    messages.clear();
+    socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"type", "models.companion.delete"}, {"id", id}, {"role", "mmproj"}}).toJson()));
+    QTRY_COMPARE(messages.count(), 1);
+    const auto response = QJsonDocument::fromJson(messages.first().first().toString().toUtf8()).object();
+    QCOMPARE(response.value("type").toString(), QString("models.companion.delete.completed"));
+    QCOMPARE(response.value("id").toString(), id);
+    QCOMPARE(response.value("role").toString(), QString("mmproj"));
+    QVERIFY(!catalog.modelById(id)->companionFiles.contains("mmproj"));
+    QVERIFY(catalog.modelById(id)->companionFiles.contains("llm"));
+    QVERIFY(catalog.remove(id, &error));
+    for (const auto& name : {"local model.gguf", "encoder.gguf", "mmproj.gguf"}) {
+        QFile file(source.filePath(name));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), bytes);
+    }
+}

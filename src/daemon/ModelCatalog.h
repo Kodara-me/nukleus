@@ -29,6 +29,7 @@ struct ModelInfo
     QJsonObject recommendedOptions;
     QJsonObject companionFiles;
     QString modelType = QStringLiteral("checkpoint");
+    bool explicitContent = false;
 };
 
 Q_DECLARE_METATYPE(ModelInfo)
@@ -43,6 +44,8 @@ struct ModelInstallRequest
     QJsonObject companionUrls;
     QString existingModelId;
     QString modelType = QStringLiteral("checkpoint");
+    std::optional<bool> explicitContent;
+    bool allowLocalFiles = false;
 };
 
 enum class ModelInstallState
@@ -78,9 +81,10 @@ public:
     std::optional<ModelInfo> modelById(const QString &id) const;
     bool install(const ModelInstallRequest &request, QString *errorMessage = nullptr);
     bool remove(const QString &id, QString *errorMessage = nullptr);
+    bool removeCompanion(const QString& id, const QString& role, QString* error = nullptr);
     void cancel(const QString &installId);
     bool isInstalling() const;
-    bool configure(const QString &id, const QJsonObject &options, QString *error = nullptr);
+    bool configure(const QString &id, const QJsonObject &options, QString *error = nullptr, std::optional<bool> explicitContent = {});
 
 signals:
     void installProgress(const ModelInstallProgress &progress);

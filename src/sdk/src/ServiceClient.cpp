@@ -31,6 +31,7 @@ QString categoryName(KiraService::ModelCategory category)
 
 QString operationName(KiraService::ImageOperation operation)
 {
+    if (operation == KiraService::ImageOperation::Edit) return QStringLiteral("image.edit");
     return operation == KiraService::ImageOperation::Generate ? QStringLiteral("image.generate") : QStringLiteral("image.upscale");
 }
 }
@@ -102,12 +103,14 @@ ServiceCapabilities ServiceClient::capabilities() const { return m_capabilities;
 
 bool ServiceClient::supports(ImageOperation operation) const
 {
+    if (operation == ImageOperation::Edit) return m_capabilities.imageEdit;
     return operation == ImageOperation::Generate ? m_capabilities.imageGeneration : m_capabilities.imageUpscale;
 }
 
 bool ServiceClient::canSubmit(ImageOperation operation, const QString &modelId) const
 {
-    const ModelCategory category = operation == ImageOperation::Generate ? ModelCategory::ImageGeneration : ModelCategory::Upscaler;
+    const ModelCategory category = operation == ImageOperation::Edit ? ModelCategory::Edition
+        : operation == ImageOperation::Generate ? ModelCategory::ImageGeneration : ModelCategory::Upscaler;
     return m_authenticated && supports(operation) && containsModel(modelId, category);
 }
 
@@ -131,7 +134,7 @@ void ServiceClient::requestModels()
 }
 
 QString ServiceClient::installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl, const QJsonObject &recommendedOptions, const QJsonObject &companionUrls,
-    const QString &modelType, const QString &existingModelId)
+    const QString &modelType, const QString &existingModelId, std::optional<bool> explicitContent)
 {
     const QString categoryValue = categoryName(category);
     if (!m_authenticated || categoryValue.isEmpty() || (existingModelId.isEmpty() && (!url.isValid() || url.isEmpty()))) return {};
@@ -151,15 +154,17 @@ QString ServiceClient::installModel(ModelCategory category, const QUrl &url, con
     if (!companionUrls.isEmpty()) message.insert("companionUrls", companionUrls);
     if (modelType != "checkpoint" || !existingModelId.isEmpty()) message.insert("modelType", modelType);
     if (!existingModelId.isEmpty()) message.insert("id", existingModelId);
+    if (explicitContent) message.insert("explicitContent", *explicitContent);
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     emit installsChanged();
     return installId;
 }
 
-bool ServiceClient::configureModel(const QString &id, const QJsonObject &options)
+bool ServiceClient::configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent)
 {
     if (!m_authenticated || id.isEmpty()) return false;
-    const QJsonObject message{{"type", "models.configure"}, {"id", id}, {"recommendedOptions", options}};
+    QJsonObject message{{"type", "models.configure"}, {"id", id}, {"recommendedOptions", options}};
+    if (explicitContent) message.insert("explicitContent", *explicitContent);
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     return true;
 }
@@ -195,6 +200,16 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
                               {QStringLiteral("baseImageStrength"), request.baseImageStrength},
                               {QStringLiteral("modelId"), request.modelId}};
     return submit(ImageOperation::Generate, options, request.baseImageData);
+}
+
+QString ServiceClient::submitEdit(const ImageGenerationRequest &request)
+{
+    if (request.baseImageData.isEmpty() || request.prompt.trimmed().isEmpty()) return {};
+    return submit(ImageOperation::Edit,
+        {{"modelId", request.modelId}, {"hasInput", true}, {"prompt", request.prompt},
+         {"width", request.width}, {"height", request.height}, {"steps", request.steps},
+         {"cfgScale", request.cfgScale}, {"sampler", request.sampler},
+         {"scheduler", request.scheduler}, {"clipSkip", request.clipSkip}}, request.baseImageData);
 }
 
 QString ServiceClient::submitUpscale(const ImageUpscaleRequest &request)
@@ -240,7 +255,7 @@ void ServiceClient::handleTextMessage(const QString &message)
     }
     if (type == QStringLiteral("capabilities")) {
         const QJsonArray operations = object.value(QStringLiteral("operations")).toArray();
-        updateCapabilities({operations.contains(QStringLiteral("image.generate")), operations.contains(QStringLiteral("image.upscale"))});
+        updateCapabilities({operations.contains(QStringLiteral("image.generate")), operations.contains(QStringLiteral("image.upscale")), operations.contains(QStringLiteral("image.edit"))});
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
         return;
@@ -259,7 +274,7 @@ void ServiceClient::handleTextMessage(const QString &message)
                                  category,
                                  model.value(QStringLiteral("companionFileName")).toString(),
                                  model.value(QStringLiteral("companionRole")).toString(), model.value("recommendedOptions").toObject(),
-                    model.value("companionFiles").toObject(), model.value("modelType").toString("checkpoint")});
+                    model.value("companionFiles").toObject(), model.value("modelType").toString("checkpoint"), model.value("explicitContent").toBool(false)});
             }
         }
         m_modelListAvailable = true;
@@ -302,6 +317,10 @@ void ServiceClient::handleTextMessage(const QString &message)
         emit modelConfigured(object.value("id").toString(), object.value("model").toObject().value("recommendedOptions").toObject());
         requestModels();
         return;
+    }
+    if (type == "models.companion.delete.completed") {
+        emit companionDeleted(object.value("id").toString(), object.value("role").toString());
+        requestModels(); return;
     }
     if (type == QStringLiteral("models.delete.completed")) {
         emit modelDeleted(object.value(QStringLiteral("id")).toString());
@@ -361,7 +380,7 @@ void ServiceClient::handleBinaryMessage(const QByteArray &data)
 
 void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
 {
-    if (m_capabilities.imageGeneration == capabilities.imageGeneration && m_capabilities.imageUpscale == capabilities.imageUpscale) return;
+    if (m_capabilities.imageGeneration == capabilities.imageGeneration && m_capabilities.imageUpscale == capabilities.imageUpscale && m_capabilities.imageEdit == capabilities.imageEdit) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
 }
@@ -415,4 +434,12 @@ bool ServiceClient::containsModel(const QString &modelId, ModelCategory category
     }
     return false;
 }
+}
+
+bool KiraService::ServiceClient::deleteCompanion(const QString& id, const QString& role)
+{
+    if (!m_authenticated || id.isEmpty() || role.isEmpty()) return false;
+    const QJsonObject message{{"type", "models.companion.delete"}, {"id", id}, {"role", role}};
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
+    return true;
 }

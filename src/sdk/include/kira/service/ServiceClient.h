@@ -29,10 +29,12 @@ public:
     QList<ModelInstall> installs() const;
     void requestModels();
     QString installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl = {}, const QJsonObject &recommendedOptions = {}, const QJsonObject &companionUrls = {},
-        const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {});
-    bool configureModel(const QString &id, const QJsonObject &options);
+        const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {}, std::optional<bool> explicitContent = {});
+    bool configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent = {});
     bool cancelInstall(const QString &installId);
     bool deleteModel(const QString &id);
+    bool deleteCompanion(const QString& id, const QString& role);
+    QString submitEdit(const ImageGenerationRequest &request);
     QString submitGeneration(const ImageGenerationRequest &request);
     QString submitUpscale(const ImageUpscaleRequest &request);
 signals:
@@ -42,6 +44,7 @@ signals:
     void installsChanged();
     void modelConfigured(const QString &id, const QJsonObject &options);
     void modelDeleted(const QString &id);
+    void companionDeleted(const QString& id, const QString& role);
     void modelOperationFailed(const QString &id, const QString &message);
     void jobStateChanged(const QString &jobId, KiraService::JobState state, int queuePosition);
     void jobOutput(const QString &jobId, const QString &stream, const QString &text);

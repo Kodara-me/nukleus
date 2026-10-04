@@ -47,6 +47,7 @@ class ManageModelsWindow final : public KiraUi::MainWindow
     QPushButton *m_save;
     QString m_selectedId;
     QJsonObject m_originalOptions;
+    bool m_originalExplicitContent = false;
     bool m_dirty = false;
     bool m_saving = false;
     bool m_allowClose = false;

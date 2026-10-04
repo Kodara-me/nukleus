@@ -10,7 +10,7 @@ The version-3 authentication message is required for every client. Loopback peer
 
 The service replies with `authenticated` and `capabilities`. `models.list` returns the `image-generation`, `edition`, `upscaler`, `llm-chat`, and `ip-adapter` categories. Each model contains `id`, `name`, `fileName`, and `bytes`; a model with a companion also includes the category-relative `companionFileName` and `companionRole` (`lora`, `mmproj`, or `vae`).
 
-Model administrators send `models.install` with a client-generated `installId`, explicit category, and HTTPS model-file URL. Optional `companionUrl` is a LoRA for `ip-adapter`, mmproj for `llm-chat`, or VAE for `image-generation` and `edition`; it is rejected for `upscaler`. mmproj requires a `.gguf` filename; VAE and LoRA accept `.safetensors`, `.ckpt`, or `.gguf`. SHA-256 is no longer checked or accepted by the SDK/manager; legacy protocol `sha256` fields are ignored. The service stages both downloads and commits the primary, companion, and relationship metadata together, so a failed or canceled pair leaves no usable catalog entry. A restart preserves the relationship; deletion removes both files. Listings and install completion expose the companion filename and role, never absolute paths. Image-generation VAE companions are resolved internally and passed to sd-cli with --vae; other companion roles do not alter image invocation. The service emits `models.install.accepted`, `models.install.progress`, `models.install.completed`, or an `error` containing that `installId`.
+Model administrators send `models.install` with a client-generated `installId`, explicit category, and HTTPS model-file URL. Optional `companionUrl` is a LoRA for `ip-adapter`, mmproj for `llm-chat`, or VAE for `image-generation` and `edition`; it is rejected for `upscaler`. mmproj requires a `.gguf` filename; VAE and LoRA accept `.safetensors`, `.ckpt`, or `.gguf`. SHA-256 is no longer checked or accepted by the SDK/manager; legacy protocol `sha256` fields are ignored. The service stages both downloads and commits the primary, companion, and relationship metadata together, so a failed or canceled pair leaves no usable catalog entry. A restart preserves the relationship; deletion removes both files. Listings and install completion expose the companion filename and role, never absolute paths. Image-generation VAE companions are resolved internally and passed to sd-cli with --vae; image LLM text encoders and mmproj use --llm and --llm_vision respectively; LLM-chat mmproj and IP-Adapter LoRA do not alter image invocation. The service emits `models.install.accepted`, `models.install.progress`, `models.install.completed`, or an `error` containing that `installId`.
 
 For example:
 
@@ -26,7 +26,7 @@ Model administrators may delete an installed model by its opaque ID:
 
 The service replies with `models.delete.completed` or an `error` containing the model `id`. Deletion is rejected while the model is referenced by active, queued, or pending-upload work. Filesystem paths are never accepted or returned.
 
-Image work uses `submit` with `image.generate` or `image.upscale`; each request must include a matching installed `modelId`. Upscale is fixed at 2×. Input and result image data are binary WebSocket messages; filesystem paths are never part of the protocol.
+Image work uses `submit` with `image.generate`, `image.upscale`, or `image.edit`; each request must include a matching installed `modelId`. Upscale is fixed at 2×. Input and result image data are binary WebSocket messages; filesystem paths are never part of the protocol.
 
 ## Recommended model options (additive v3 extension)
 
@@ -97,8 +97,8 @@ an input upload. Invalid types or ranges return `invalid-request` correlated to
 |---|---|
 | prompt | Required non-empty string (after trimming) |
 | negativePrompt | Optional string; defaults to empty |
-| width, height | Required integers 64–4096; rectangular sizes are allowed |
-| steps | Required integer 1–200 |
+| width, height | Optional integers 64–4096; each defaults to 1024; rectangular sizes are allowed |
+| steps | Optional integer 1–200; defaults to 28 |
 | cfgScale | Optional finite number 0–100; defaults to 7 |
 | sampler, scheduler | Optional strings from the recommended-options lists; absent or empty means Automatic |
 | clipSkip | Optional integer -1 or 1–12; defaults to -1 (Automatic) |
@@ -110,12 +110,15 @@ Automatic sampler/scheduler flags are omitted from the backend command. Positive
 Clip Skip values are forwarded; -1 omits the flag. CFG and image strength retain
 numeric precision. The selected model's installed VAE is used for direct and
 uploaded-input generation; clients neither submit nor receive its filesystem path.
+Without an installed VAE companion, the backend uses the checkpoint's embedded
+VAE. A diffusion-only file still requires the appropriate separate model weights;
+numeric defaults cannot replace missing VAE or text-encoder weights.
 
 ## Optional image model files (additive v3 extension)
 
 Image-generation and Edition models expose `modelType` (`checkpoint` by default,
-`diffusion` for standalone UNets) and `companionFiles`, mapping `clip-l`, `clip-g`
-and `vae` to category-relative companion filenames. Absolute paths are never
+`diffusion` for standalone UNets) and `companionFiles`, mapping `clip-l`, `clip-g`, `vae`, `llm`
+and `mmproj` to category-relative companion filenames. Absolute paths are never
 accepted or returned. The legacy single-companion fields remain compatible.
 
 `models.install` accepts optional `companionUrls` mapping these roles to HTTPS
@@ -125,7 +128,7 @@ roles without downloading its primary or changing recommendations. Omit
 existing type when attaching; new installations default to checkpoint. Duplicate roles, unsupported
 roles, invalid URLs, existing destination files, and models in use are rejected.
 Downloads use the existing install progress, owned cancellation, and completion
-messages; `fileRole` may now be `clip-l`, `clip-g` or `vae` as well as legacy
+messages; `fileRole` may now be `clip-l`, `clip-g`, `vae`, `llm` or `mmproj` as well as legacy
 `primary`/`companion`. Failures remove newly staged/published files, preserving
 pre-existing model files and metadata. A role's presence means a file is attached,
 not that arbitrary components are mutually compatible.
@@ -137,3 +140,71 @@ not that arbitrary components are mutually compatible.
 The daemon snapshots attached file paths for each image job. Only registered
 files are passed to the backend; neither folder scanning nor filename/extension
 heuristics determine model type. Unused companions remain optional.
+
+## Explicit-content classification
+
+Every model object in `models.list.result`, `models.install.completed` and
+`models.configure.completed` includes `explicitContent`, a boolean that defaults
+to `false` for models without saved classification. It is separate from
+`recommendedOptions` and applies to all five categories.
+
+`models.install` and `models.configure` accept optional `explicitContent`.
+Non-boolean values are rejected. Omission leaves existing classification unchanged
+(including companion attachments); new models default to false. Configuration
+saves classification and recommendations atomically in category-local
+`metadata.json`, preserving companion fields and untouched legacy entries.
+
+```json
+{"type":"models.configure","id":"image-generation:model.gguf","recommendedOptions":{"width":1024,"height":1024,"steps":28,"cfgScale":7,"sampler":"","scheduler":"","clipSkip":-1},"explicitContent":true}
+```
+
+The SDK exposes `ModelInfo::explicitContent` and optional final classification
+arguments on `installModel()` and `configureModel()`. The service returns the
+complete catalogue; application filtering is local and does not change execution
+or service permissions.
+
+Image-generation and Edition models accept optional `companionUrls` roles `llm`
+(text encoder) and `mmproj` (vision projector). Manager add/optional-file dialogs
+show both URLs for these categories; CLI add/attach accepts `--text-encoder` and
+`--mmproj` together with the existing VAE/CLIP options. LLM-chat `--mmproj` keeps
+its legacy meaning. mmproj must be GGUF; text encoders accept GGUF, safetensors,
+or ckpt. Files are attached to their primary model, staged and published atomically,
+preserved across restart, and deleted with the primary. Generation resolves them
+internally and passes `--llm` and `--llm_vision` only when present. Edition catalog
+support does not introduce a new editing job operation.
+
+Manager add/optional-file dialogs offer **Browse…** beside the model and companion
+sources. Selected local files are copied by the service through the same staged,
+atomic installation workflow as downloads; originals are retained and existing
+installed files are never overwritten. Installation requests may use `file://`
+URLs only from loopback clients. LAN clients remain restricted to HTTPS sources.
+The Manager streams selected files from a temporary localhost HTTP source with
+an unguessable per-file URL. The service copies these through its existing download
+pipeline, so systemd ProtectHome and PrivateTmp remain enabled. Loopback installation
+clients may supply HTTP sources on 127.0.0.1; LAN requests cannot. Model metadata stores managed relative filenames,
+never the source paths. No Hugging Face token or login is stored or required for
+local imports.
+
+Companions can be removed independently through the Manager's **Optional files…**
+dialog. Confirm **Remove** beside an attached role, then choose a new URL or
+Browse source and apply the replacement. Removal preserves the primary, other
+companions, recommendations and explicit-content classification; queued/active
+models and models receiving files cannot lose companions.
+
+Protocol v3 adds `models.companion.delete` with opaque model `id` and companion
+`role`, returning `models.companion.delete.completed` with both fields or an error.
+SDK/Manager clients expose `deleteCompanion(id, role)` and `companionDeleted`.
+Replacement uses the existing attachment install operation; it is a separate step,
+so a failed replacement leaves the removed role absent. Legacy single-companion
+metadata is supported and updated without discarding unrelated metadata.
+
+Generation failures include the attempted sd-cli command (executable and quoted
+arguments), exit code and up to 4096 trailing stderr characters in the job error
+message. This diagnostic intentionally exposes the submitting client's prompts
+and service-side model/output paths to that client only; successful results and
+model listings continue to omit service paths. Commands are displayed as POSIX
+shell-quoted text for diagnosis; execution still uses QProcess argument lists.
+
+### Reference-image editing
+
+`capabilities.operations` includes `image.edit` when the image backend is ready. Submit an installed Edition `modelId`, nonblank `prompt`, source `width`/`height`, and generation options through `submit` with operation `image.edit`. The service requires source bytes through the existing `upload-required` binary upload flow, even if `hasInput` is omitted. Validation, queue/progress, result bytes and job errors follow the generation lifecycle. Results identify `image.edit`. Optional installed LLM, VAE and mmproj companions are resolved by the daemon; clients never supply paths. SDK clients use `submitEdit(ImageGenerationRequest)` and `ServiceCapabilities::imageEdit`.

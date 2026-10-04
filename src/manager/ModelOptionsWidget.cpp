@@ -1,5 +1,6 @@
 #include "ModelOptionsWidget.h"
 #include <QComboBox>
+#include <QCheckBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QLabel>
@@ -12,13 +13,18 @@ ModelOptionsWidget::ModelOptionsWidget(QWidget *parent) : QWidget(parent), m_for
     m_form->setContentsMargins(0, 0, 0, 0);
     m_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
 }
-void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &saved)
+void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &saved, bool explicitContent)
 {
     QSignalBlocker blocker(this);
     while (m_form->rowCount())
         m_form->removeRow(0);
     m_fields.clear();
     m_category = category;
+    m_explicitContent = new QCheckBox(tr("Explicit content (NSFW)"), this);
+    m_explicitContent->setObjectName("explicitContent");
+    m_explicitContent->setChecked(explicitContent);
+    m_form->addRow(m_explicitContent);
+    connect(m_explicitContent, &QCheckBox::toggled, this, &ModelOptionsWidget::optionsChanged);
     const auto values = saved.isEmpty() ? KiraService::Protocol::defaultModelOptions(category) : saved;
     const auto add = [this](const QString &key, const QString &label, QWidget *field)
     {
@@ -118,4 +124,9 @@ QJsonObject ModelOptionsWidget::options() const
 bool ModelOptionsWidget::isValid() const
 {
     return KiraService::Protocol::validateModelOptions(m_category, options());
+}
+
+bool ModelOptionsWidget::explicitContent() const
+{
+    return m_explicitContent && m_explicitContent->isChecked();
 }

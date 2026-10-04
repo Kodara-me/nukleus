@@ -46,9 +46,9 @@ bool validGenerationOptions(const QJsonObject &options)
     };
     return options.value("prompt").isString() && !options.value("prompt").toString().trimmed().isEmpty()
         && optionalString("negativePrompt")
-        && validNumber(options, "width", 64, 4096, true)
-        && validNumber(options, "height", 64, 4096, true)
-        && validNumber(options, "steps", 1, 200, true)
+        && validNumber(options, "width", 64, 4096, true, false)
+        && validNumber(options, "height", 64, 4096, true, false)
+        && validNumber(options, "steps", 1, 200, true, false)
         && validNumber(options, "cfgScale", 0, 100, false, false)
         && validNumber(options, "seed", -1, std::numeric_limits<int>::max(), true, false)
         && validNumber(options, "baseImageStrength", 0, 1, false, false)
@@ -68,6 +68,8 @@ struct KiraServiceDaemon::Submission
     QJsonObject options;
     QString modelPath;
     QString vaePath;
+    QString llmPath;
+    QString llmVisionPath;
     QString clipLPath;
     QString clipGPath;
     bool diffusionModel = false;
@@ -81,6 +83,8 @@ struct KiraServiceDaemon::Job
     QJsonObject options;
     QString modelPath;
     QString vaePath;
+    QString llmPath;
+    QString llmVisionPath;
     QString clipLPath;
     QString clipGPath;
     bool diffusionModel = false;
@@ -110,6 +114,7 @@ KiraServiceDaemon::KiraServiceDaemon(KiraServiceConfiguration configuration, QOb
         const QPointer<QWebSocket> client = m_installClients.take(installId);
         QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
                                 {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
+        modelObject.insert("explicitContent", model.explicitContent);
         if (!model.recommendedOptions.isEmpty()) modelObject.insert("recommendedOptions", model.recommendedOptions);
         modelObject.insert("companionFiles", model.companionFiles);
         modelObject.insert("modelType", model.modelType);
@@ -247,6 +252,7 @@ void KiraServiceDaemon::processTextMessage(QWebSocket *socket, const QString &me
     else if (type == QStringLiteral("models.install")) installModel(socket, object);
     else if (type == QStringLiteral("models.configure")) configureModel(socket, object);
     else if (type == QStringLiteral("models.install.cancel")) cancelInstall(socket, object);
+    else if (type == QStringLiteral("models.companion.delete")) deleteCompanion(socket, object);
     else if (type == QStringLiteral("models.delete")) deleteModel(socket, object);
     else sendError(socket, QStringLiteral("unsupported-message"), tr("Unsupported message"));
 }
@@ -255,6 +261,7 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
 {
     const QString operationName = message.value(QStringLiteral("operation")).toString();
     const bool generate = operationName == QStringLiteral("image.generate");
+    const bool edit = operationName == QStringLiteral("image.edit");
     const bool upscale = operationName == QStringLiteral("image.upscale");
     const QJsonObject options = message.value(QStringLiteral("options")).toObject();
     const QString jobId = message.value(QStringLiteral("jobId")).toString();
@@ -262,12 +269,12 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     for (const auto &pending : m_pendingUploads) {
         duplicateId = duplicateId || pending->id == jobId;
     }
-    if ((!generate && !upscale) || jobId.isEmpty() || duplicateId) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid job request")); return; }
+    if ((!generate && !upscale && !edit) || jobId.isEmpty() || duplicateId) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid job request")); return; }
     if (!isImageReady()) {
         sendError(socket, QStringLiteral("backend-not-ready"), tr("The requested service backend is unavailable"), jobId);
         return;
     }
-    const ModelCategory category = generate ? ModelCategory::ImageGeneration : ModelCategory::Upscaler;
+    const ModelCategory category = edit ? ModelCategory::Edition : generate ? ModelCategory::ImageGeneration : ModelCategory::Upscaler;
     const std::optional<ModelInfo> model = m_models->model(category, options.value(QStringLiteral("modelId")).toString());
     if (!model.has_value()) { sendError(socket, QStringLiteral("model-unavailable"), tr("The requested model is unavailable"), jobId); return; }
     if (upscale && options.contains(QStringLiteral("scale"))) {
@@ -275,25 +282,28 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         return;
     }
     if (m_queue.size() >= MaximumQueuedJobs) { sendError(socket, QStringLiteral("queue-full"), tr("The service queue is full"), jobId); return; }
-    if (generate && !validGenerationOptions(options)) {
+    if ((generate || edit) && (!validGenerationOptions(options)
+        || (edit && options.value("prompt").toString().trimmed().isEmpty()))) {
         sendError(socket, QStringLiteral("invalid-request"), tr("Invalid generation options"), jobId);
         return;
     }
-    const bool needsInput = upscale || options.value(QStringLiteral("hasInput")).toBool();
+    const bool needsInput = edit || upscale || options.value(QStringLiteral("hasInput")).toBool();
     auto submission = std::make_shared<Submission>();
     submission->id = jobId;
-    submission->operation = generate ? Operation::Generate : Operation::Upscale;
+    submission->operation = edit ? Operation::Edit : generate ? Operation::Generate : Operation::Upscale;
     submission->options = options;
     submission->modelPath = model->filePath;
-    if (generate && model->companionRole == QStringLiteral("vae") && !model->companionFileName.isEmpty())
+    if ((generate || edit) && model->companionRole == QStringLiteral("vae") && !model->companionFileName.isEmpty())
         submission->vaePath = QDir(QFileInfo(model->filePath).absolutePath()).filePath(model->companionFileName);
     const QDir modelDirectory(QFileInfo(model->filePath).absolutePath());
     const auto filePath = [&](const QString &role) {
         const auto name = model->companionFiles.value(role).toString();
         return name.isEmpty() ? QString() : modelDirectory.filePath(name);
     };
-    if (generate) {
+    if (generate || edit) {
         if (model->companionFiles.contains("vae")) submission->vaePath = filePath("vae");
+        submission->llmPath = filePath("llm");
+        submission->llmVisionPath = filePath("mmproj");
         submission->clipLPath = filePath("clip-l");
         submission->clipGPath = filePath("clip-g");
         submission->diffusionModel = model->modelType == "diffusion";
@@ -310,6 +320,8 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     job->options = options;
     job->modelPath = model->filePath;
     job->vaePath = submission->vaePath;
+    job->llmPath = submission->llmPath;
+    job->llmVisionPath = submission->llmVisionPath;
     job->clipLPath = submission->clipLPath;
     job->clipGPath = submission->clipGPath;
     job->diffusionModel = submission->diffusionModel;
@@ -325,6 +337,7 @@ void KiraServiceDaemon::listModels(QWebSocket *socket) const
         for (const ModelInfo &model : m_models->models(category)) {
             QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
                                     {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
+            modelObject.insert("explicitContent", model.explicitContent);
             if (!model.recommendedOptions.isEmpty()) modelObject.insert("recommendedOptions", model.recommendedOptions);
             modelObject.insert("companionFiles", model.companionFiles);
             modelObject.insert("modelType", model.modelType);
@@ -358,6 +371,7 @@ void KiraServiceDaemon::installModel(QWebSocket *socket, const QJsonObject &mess
     ModelInstallRequest request;
     request.installId = installId;
     request.category = *category;
+    request.allowLocalFiles = socket->peerAddress().isLoopback();
     request.url = QUrl(message.value("url").toString());
     request.companionUrl = companionUrl;
     request.existingModelId = message.value("id").toString();
@@ -367,6 +381,13 @@ void KiraServiceDaemon::installModel(QWebSocket *socket, const QJsonObject &mess
         || (message.contains("id") && !message.value("id").isString())) {
         send(socket, {{"type", "error"}, {"code", "invalid-model-install"}, {"installId", installId},
             {"message", tr("Invalid companion URLs or model type")}}); return;
+    }
+    if (message.contains("explicitContent")) {
+        if (!message.value("explicitContent").isBool()) {
+            send(socket, {{"type", "error"}, {"code", "invalid-model-install"}, {"installId", installId},
+                {"message", tr("Explicit content must be a boolean")}}); return;
+        }
+        request.explicitContent = message.value("explicitContent").toBool();
     }
     request.companionUrls = message.value("companionUrls").toObject();
     if (!request.existingModelId.isEmpty()) {
@@ -402,12 +423,19 @@ void KiraServiceDaemon::configureModel(QWebSocket *socket, const QJsonObject &me
 {
     const QString id = message.value("id").toString();
     QString error;
-    if (!message.value("recommendedOptions").isObject() || !m_models->configure(id, message.value("recommendedOptions").toObject(), &error)) {
+    if (message.contains("explicitContent") && !message.value("explicitContent").isBool()) {
+        send(socket, {{"type", "error"}, {"code", "invalid-model-configure"}, {"id", id},
+            {"message", tr("Explicit content must be a boolean")}}); return;
+    }
+    const std::optional<bool> explicitContent = message.contains("explicitContent")
+        ? std::optional<bool>(message.value("explicitContent").toBool()) : std::nullopt;
+    if (!message.value("recommendedOptions").isObject() || !m_models->configure(id, message.value("recommendedOptions").toObject(), &error, explicitContent)) {
         send(socket, {{"type", "error"}, {"code", "invalid-model-configure"}, {"id", id}, {"message", error.isEmpty() ? tr("Recommended options must be an object") : error}});
         return;
     }
     const auto model = *m_models->modelById(id);
     QJsonObject value{{"id", model.id}, {"name", model.name}, {"fileName", model.fileName}, {"bytes", model.fileSize}, {"recommendedOptions", model.recommendedOptions}};
+    value.insert("explicitContent", model.explicitContent);
     value.insert("companionFiles", model.companionFiles);
     value.insert("modelType", model.modelType);
     if (!model.companionFileName.isEmpty()) {
@@ -473,6 +501,8 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
     job->options = submission->options;
     job->modelPath = submission->modelPath;
     job->vaePath = submission->vaePath;
+    job->llmPath = submission->llmPath;
+    job->llmVisionPath = submission->llmVisionPath;
     job->clipLPath = submission->clipLPath;
     job->clipGPath = submission->clipGPath;
     job->diffusionModel = submission->diffusionModel;
@@ -499,21 +529,26 @@ void KiraServiceDaemon::startNextJob()
     m_activeJob = m_queue.dequeue();
     if (m_activeJob->client.isNull()) { m_activeJob.reset(); startNextJob(); return; }
     send(m_activeJob->client, {{QStringLiteral("type"), QStringLiteral("running")}, {QStringLiteral("jobId"), m_activeJob->id}});
-    if (m_activeJob->operation == Operation::Generate) {
+    if (m_activeJob->operation == Operation::Generate || m_activeJob->operation == Operation::Edit) {
         m_activeJob->outputPath = m_activeJob->directory->filePath(QStringLiteral("result.png"));
         GenerationRequest request;
         const QJsonObject &o = m_activeJob->options;
         request.prompt = o.value(QStringLiteral("prompt")).toString(); request.negativePrompt = o.value(QStringLiteral("negativePrompt")).toString();
         request.sampler = o.value(QStringLiteral("sampler")).toString(); request.scheduler = o.value(QStringLiteral("scheduler")).toString();
-        request.width = o.value(QStringLiteral("width")).toInt(); request.height = o.value(QStringLiteral("height")).toInt(); request.steps = o.value(QStringLiteral("steps")).toInt();
+        request.width = o.value(QStringLiteral("width")).toInt(request.width);
+        request.height = o.value(QStringLiteral("height")).toInt(request.height);
+        request.steps = o.value(QStringLiteral("steps")).toInt(request.steps);
         request.cfgScale = o.value(QStringLiteral("cfgScale")).toDouble(7.0); request.clipSkip = o.value(QStringLiteral("clipSkip")).toInt(-1); request.seed = o.value(QStringLiteral("seed")).toInt(-1);
         request.baseImageStrength = o.value(QStringLiteral("baseImageStrength")).toDouble(0.55); request.outputPath = m_activeJob->outputPath;
         request.modelPath = m_activeJob->modelPath;
         request.vaePath = m_activeJob->vaePath;
+        request.llmPath = m_activeJob->llmPath;
+        request.llmVisionPath = m_activeJob->llmVisionPath;
         request.clipLPath = m_activeJob->clipLPath;
         request.clipGPath = m_activeJob->clipGPath;
         request.diffusionModel = m_activeJob->diffusionModel;
-        if (o.value(QStringLiteral("hasInput")).toBool()) request.baseImagePath = m_activeJob->inputPath;
+        if (m_activeJob->operation == Operation::Edit) request.referenceImagePath = m_activeJob->inputPath;
+        else if (o.value(QStringLiteral("hasInput")).toBool()) request.baseImagePath = m_activeJob->inputPath;
         if (!m_sdRunner || !m_sdRunner->runGeneration(request)) { sendError(m_activeJob->client, QStringLiteral("start-failed"), tr("Could not start generation"), m_activeJob->id); m_activeJob.reset(); startNextJob(); }
     } else if (m_activeJob->operation == Operation::Upscale) {
         m_activeJob->outputPath = m_activeJob->directory->filePath(QStringLiteral("result.png"));
@@ -527,8 +562,14 @@ void KiraServiceDaemon::handleGenerationFinished(const SdCliGenerationResult &re
 {
     if (!m_activeJob) return;
     const auto job = m_activeJob;
-    if (!result.succeeded || !QFileInfo(job->outputPath).isFile()) sendError(job->client, QStringLiteral("generation-failed"), tr("Image generation failed"), job->id);
-    else { QFile output(job->outputPath); const bool opened = output.open(QIODevice::ReadOnly); const QByteArray bytes = opened ? output.readAll() : QByteArray(); if (bytes.isEmpty()) sendError(job->client, QStringLiteral("result-read-failed"), tr("Could not read generated image"), job->id); else { send(job->client, {{QStringLiteral("type"), QStringLiteral("result")}, {QStringLiteral("jobId"), job->id}, {QStringLiteral("operation"), QStringLiteral("image.generate")}, {QStringLiteral("mimeType"), QStringLiteral("image/png")}}); job->client->sendBinaryMessage(bytes); } }
+    if (!result.succeeded || !QFileInfo(job->outputPath).isFile()) {
+        QString detail = tr("Image generation failed (exit code %1)").arg(result.exitCode);
+        detail += tr("\nCommand:\n%1").arg(m_sdRunner->commandLine(result.arguments));
+        const QString diagnostic = result.standardError.trimmed().right(4096);
+        if (!diagnostic.isEmpty()) detail += tr("\nBackend error:\n%1").arg(diagnostic);
+        sendError(job->client, QStringLiteral("generation-failed"), detail, job->id);
+    }
+    else { QFile output(job->outputPath); const bool opened = output.open(QIODevice::ReadOnly); const QByteArray bytes = opened ? output.readAll() : QByteArray(); if (bytes.isEmpty()) sendError(job->client, QStringLiteral("result-read-failed"), tr("Could not read generated image"), job->id); else { send(job->client, {{QStringLiteral("type"), QStringLiteral("result")}, {QStringLiteral("jobId"), job->id}, {QStringLiteral("operation"), job->operation == Operation::Edit ? QStringLiteral("image.edit") : QStringLiteral("image.generate")}, {QStringLiteral("mimeType"), QStringLiteral("image/png")}}); job->client->sendBinaryMessage(bytes); } }
     m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
 }
 
@@ -564,6 +605,7 @@ void KiraServiceDaemon::sendCapabilities(QWebSocket *socket) const
     if (isImageReady()) {
         operations.append(QStringLiteral("image.generate"));
         operations.append(QStringLiteral("image.upscale"));
+        operations.append(QStringLiteral("image.edit"));
     }
     send(socket, {{QStringLiteral("type"), QStringLiteral("capabilities")}, {QStringLiteral("state"), state}, {QStringLiteral("operations"), operations}});
 }
@@ -585,4 +627,21 @@ std::shared_ptr<KiraServiceDaemon::Job> KiraServiceDaemon::jobForId(const QStrin
     if (m_activeJob && m_activeJob->id == id) return m_activeJob;
     for (const auto &job : m_queue) if (job->id == id) return job;
     return {};
+}
+
+void KiraServiceDaemon::deleteCompanion(QWebSocket* socket, const QJsonObject& message)
+{
+    const QString id = message.value("id").toString();
+    const QString role = message.value("role").toString();
+    const auto model = m_models->modelById(id);
+    QString error;
+    QString code = "model-companion-delete-failed";
+    if (model && modelInUse(model->filePath)) {
+        code = "model-in-use";
+        error = tr("The model is currently used by queued or active work");
+    } else if (m_models->removeCompanion(id, role, &error)) {
+        send(socket, {{"type", "models.companion.delete.completed"}, {"id", id}, {"role", role}});
+        return;
+    }
+    send(socket, {{"type", "error"}, {"code", code}, {"id", id}, {"role", role}, {"message", error}});
 }

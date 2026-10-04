@@ -38,7 +38,7 @@ public:
     quint16 serverPort() const;
 
 private:
-    enum class Operation { Generate, Upscale };
+    enum class Operation { Generate, Upscale, Edit };
     struct Submission;
     struct Job;
 
@@ -53,6 +53,7 @@ private:
     void configureModel(QWebSocket *socket, const QJsonObject &message);
     void cancelInstall(QWebSocket *socket, const QJsonObject &message);
     void deleteModel(QWebSocket *socket, const QJsonObject &message);
+    void deleteCompanion(QWebSocket* socket, const QJsonObject& message);
     void enqueue(std::shared_ptr<Job> job);
     void startNextJob();
     void cancelJobsFor(QWebSocket *socket);

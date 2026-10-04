@@ -60,7 +60,7 @@ SdCliRunner::SdCliRunner(const QString &executablePath, QObject *parent)
                 } else if (completedRequest == RequestType::Generation) {
                     appendGenerationOutput(m_process->readAllStandardOutput(), false);
                     appendGenerationOutput(m_process->readAllStandardError(), true);
-                    emitGenerationFinished(succeeded, exitCode);
+                    emitGenerationFinished(succeeded && !m_memoryFailure, exitCode);
                 } else if (completedRequest == RequestType::Upscale) {
                     emitUpscaleFinished(succeeded, exitCode);
                 }
@@ -76,6 +76,7 @@ SdCliRunner::SdCliRunner(const QString &executablePath, QObject *parent)
             emit helpFinished(false);
         } else if (failedRequest == RequestType::Generation) {
             qInfo().noquote() << QStringLiteral("[Kira Canvas][sd-cli] Process error: %1").arg(m_process->errorString());
+            m_standardError += m_process->errorString();
             emitGenerationFinished(false, -1);
         } else if (failedRequest == RequestType::Upscale) {
             emitUpscaleFinished(false, -1);
@@ -104,12 +105,20 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
         QStringLiteral("--steps"), QString::number(request.steps),
         QStringLiteral("--cfg-scale"), QString::number(request.cfgScale, 'g', 17),
         QStringLiteral("--seed"), QString::number(request.seed),
-        QStringLiteral("--output"), request.outputPath};
+        QStringLiteral("--output"), request.outputPath,
+        QStringLiteral("--offload-to-cpu")};
     if (!request.sampler.isEmpty()) arguments.append({QStringLiteral("--sampling-method"), request.sampler});
     if (!request.scheduler.isEmpty()) arguments.append({QStringLiteral("--scheduler"), request.scheduler});
     if (!request.vaePath.isEmpty()) arguments.append({QStringLiteral("--vae"), request.vaePath});
+    if (!request.llmPath.isEmpty()) arguments.append({QStringLiteral("--llm"), request.llmPath});
+    if (!request.llmVisionPath.isEmpty()) arguments.append({QStringLiteral("--llm_vision"), request.llmVisionPath});
     if (!request.clipLPath.isEmpty()) arguments.append({QStringLiteral("--clip_l"), request.clipLPath});
     if (!request.clipGPath.isEmpty()) arguments.append({QStringLiteral("--clip_g"), request.clipGPath});
+    if (!request.referenceImagePath.isEmpty())
+        arguments.append({QStringLiteral("--ref-image"), request.referenceImagePath,
+            QStringLiteral("--flow-shift"), QStringLiteral("3"),
+            QStringLiteral("--diffusion-fa"),
+            QStringLiteral("--model-args"), QStringLiteral("qwen_image_zero_cond_t=true")});
     if (!request.baseImagePath.isEmpty()) {
         arguments.append({QStringLiteral("--init-img"), request.baseImagePath,
                           QStringLiteral("--strength"), QString::number(request.baseImageStrength, 'g', 17)});
@@ -119,6 +128,7 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
         return false;
     }
 
+    m_memoryFailure = false;
     m_standardOutput.clear();
     m_standardError.clear();
     m_pendingStandardOutput.clear();
@@ -240,6 +250,17 @@ void SdCliRunner::flushGenerationOutput(bool standardError)
 
 void SdCliRunner::processGenerationLine(const QString &line)
 {
+    const bool fatalError = line.contains(QStringLiteral("[ERROR"), Qt::CaseInsensitive)
+        || line.contains(QStringLiteral("fatal"), Qt::CaseInsensitive);
+    if (!m_memoryFailure && fatalError && (line.contains(QStringLiteral("ErrorOutOfDeviceMemory"), Qt::CaseInsensitive)
+        || line.contains(QStringLiteral("ErrorOutOfHostMemory"), Qt::CaseInsensitive))) {
+        m_memoryFailure = true;
+        m_standardError += QStringLiteral("\nBackend memory allocation failed: ") + line;
+        // Wait for QProcess::finished before releasing the queue or temporary files.
+        if (m_process->state() != QProcess::NotRunning)
+            m_process->kill();
+    }
+
     if (const std::optional<KiraService::GenerationProgress> progress = m_progressParser.processLine(line)) {
         emit generationProgressChanged(*progress);
     }
@@ -247,12 +268,6 @@ void SdCliRunner::processGenerationLine(const QString &line)
 
 void SdCliRunner::logGenerationStart(const GenerationRequest &request, const QStringList &arguments) const
 {
-    QStringList displayedArguments;
-    displayedArguments.reserve(arguments.size());
-    for (const QString &argument : arguments) {
-        displayedArguments.append(quotedCommandArgument(argument));
-    }
-
     qInfo().noquote() << QStringLiteral("[Kira Canvas][sd-cli] Starting text-to-image generation");
     qInfo().noquote() << QStringLiteral("[Kira Canvas][sd-cli] Executable: %1").arg(m_executablePath);
     qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] Resolution: %1x%2").arg(request.width).arg(request.height);
@@ -267,8 +282,8 @@ void SdCliRunner::logGenerationStart(const GenerationRequest &request, const QSt
         qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] Base image strength: %1")
                                  .arg(request.baseImageStrength, 0, 'f', 2);
     }
-    qInfo().noquote() << QStringLiteral("[Kira Canvas][sd-cli] Command:\n%1 %2")
-                             .arg(quotedCommandArgument(m_executablePath), displayedArguments.join(QLatin1Char(' ')));
+    qInfo().noquote() << QStringLiteral("[Kira Canvas][sd-cli] Command:\n%1")
+                             .arg(commandLine(arguments));
 }
 
 void SdCliRunner::logGenerationFinish(bool succeeded, int exitCode) const
@@ -281,4 +296,11 @@ void SdCliRunner::logGenerationFinish(bool succeeded, int exitCode) const
     if (!succeeded && !m_standardError.isEmpty()) {
         qInfo().noquote() << QStringLiteral("[Kira Canvas][sd-cli] Generation failed; stderr was captured above.");
     }
+}
+
+QString SdCliRunner::commandLine(const QStringList& arguments) const
+{
+    QStringList parts{quotedCommandArgument(m_executablePath)};
+    for (const auto& argument : arguments) parts.append(quotedCommandArgument(argument));
+    return parts.join(QLatin1Char(' '));
 }

@@ -24,6 +24,8 @@ class AddModelDialog final : public KiraUi::Dialog
     void closeEvent(QCloseEvent *event) override;
 
   private:
+    QString roleFor(QLineEdit* field) const;
+    QString m_pendingRemoval;
     void updateCategory();
     void updateActions();
     void startInstall();
@@ -32,6 +34,10 @@ class AddModelDialog final : public KiraUi::Dialog
     QComboBox *m_category;
     QLineEdit *m_url;
     QLineEdit *m_companion;
+    QLineEdit *m_textEncoder;
+    QLineEdit *m_mmproj;
+    QLabel *m_textEncoderLabel;
+    QLabel *m_mmprojLabel;
     QLineEdit *m_clipL;
     QLineEdit *m_clipG;
     QLabel *m_clipLLabel;

@@ -36,10 +36,10 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     setWindowIcon(QApplication::windowIcon().isNull()
                       ? QIcon(QStringLiteral(":/manager/icons/manager-32.png"))
                       : QApplication::windowIcon());
-    setMinimumSize(1000, 550);
-    resize(1300, 680);
+    setFixedSize(1100, 640);
     QSettings settings;
     restoreGeometry(settings.value("MainWindow/Geometry").toByteArray());
+    setWindowState(Qt::WindowNoState);
     auto *body = new QWidget(this);
     setContentWidget(body);
     auto *layout = new QVBoxLayout(body);
@@ -104,7 +104,8 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     connect(m_options, &ModelOptionsWidget::optionsChanged, this,
             [this]
             {
-                m_dirty = m_options->options() != m_originalOptions;
+                m_dirty = m_options->options() != m_originalOptions
+                    || m_options->explicitContent() != m_originalExplicitContent;
                 updateActions();
             });
     connect(m_add, &QPushButton::clicked, this, &ManageModelsWindow::addModel);
@@ -135,11 +136,12 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
                 }
             });
     connect(m_client, &ManagerServiceClient::modelConfigured, this,
-            [this](const QString &id, const QJsonObject &options)
+            [this](const QString &id, const QJsonObject &options, bool explicitContent)
             {
                 if (id != m_selectedId)
                     return;
                 m_originalOptions = options;
+                m_originalExplicitContent = explicitContent;
                 m_dirty = false;
                 m_saving = false;
                 m_status->setText(tr("Recommended options saved."));
@@ -219,7 +221,8 @@ void ManageModelsWindow::showSelection(const QString &id)
             if (model.id != id)
                 continue;
             m_originalOptions = model.recommendedOptions;
-            m_options->setOptions(category.first, model.recommendedOptions);
+            m_originalExplicitContent = model.explicitContent;
+            m_options->setOptions(category.first, model.recommendedOptions, model.explicitContent);
             m_options->show();
             m_details->setText(
                 tr("%1\n%2 · %3\n%4")
@@ -285,7 +288,7 @@ void ManageModelsWindow::saveOptions()
 {
     if (!m_options->isValid())
         return;
-    if (m_client->configureModel(m_selectedId, m_options->options()))
+    if (m_client->configureModel(m_selectedId, m_options->options(), m_options->explicitContent()))
     {
         m_saving = true;
         m_status->setText(tr("Saving recommended options…"));

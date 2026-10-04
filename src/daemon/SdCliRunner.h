@@ -22,6 +22,7 @@ public:
     explicit SdCliRunner(const QString &executablePath, QObject *parent = nullptr);
 
     QString executablePath() const;
+    QString commandLine(const QStringList& arguments) const;
     void runHelp();
     bool runGeneration(const GenerationRequest &request);
     bool runUpscale(const QStringList &arguments, const QString &outputPath);
@@ -58,6 +59,7 @@ private:
     RequestType m_requestType = RequestType::None;
     QStringList m_arguments;
     QString m_outputPath;
+    bool m_memoryFailure = false;
     QString m_standardOutput;
     QString m_standardError;
     QString m_pendingStandardOutput;

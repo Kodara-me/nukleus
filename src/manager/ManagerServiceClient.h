@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QList>
+#include <QTcpServer>
+#include <QHash>
 #include <QJsonObject>
 #include <QObject>
 #include <QTimer>
@@ -21,6 +23,7 @@ struct ManagedModelInfo
     QJsonObject recommendedOptions;
     QJsonObject companionFiles;
     QString modelType = QStringLiteral("checkpoint");
+    bool explicitContent = false;
 };
 
 enum class ManagedInstallState { Requesting, Accepted, Queued, Downloading, Verifying, Completed, Failed, Canceled };
@@ -55,20 +58,25 @@ public:
     QList<ManagedInstall> installs() const;
     void requestModels();
     QString installModel(const QString &category, const QUrl &url, const QUrl &companionUrl = {}, const QJsonObject &recommendedOptions = {}, const QJsonObject &companionUrls = {},
-        const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {});
-    bool configureModel(const QString &id, const QJsonObject &options);
+        const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {}, std::optional<bool> explicitContent = {});
+    bool configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent = {});
     bool cancelInstall(const QString &installId);
     bool deleteModel(const QString &id);
+    bool deleteCompanion(const QString& id, const QString& role);
 
 signals:
     void serviceStateChanged(const QString &state, const QString &message);
     void modelsChanged();
     void installsChanged();
-    void modelConfigured(const QString &id, const QJsonObject &options);
+    void modelConfigured(const QString &id, const QJsonObject &options, bool explicitContent);
     void modelDeleted(const QString &id);
+    void companionDeleted(const QString& id, const QString& role);
     void modelOperationFailed(const QString &id, const QString &message);
 
 private:
+    QTcpServer m_localSourcesServer;
+    QHash<QString, QString> m_localSources;
+    QUrl prepareSource(const QUrl& source);
     void authenticate();
     void handleTextMessage(const QString &message);
     ManagedInstall *findInstall(const QString &installId);

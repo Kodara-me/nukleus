@@ -32,6 +32,7 @@ struct ModelInfo
     QJsonObject recommendedOptions;
     QJsonObject companionFiles;
     QString modelType = QStringLiteral("checkpoint");
+    bool explicitContent = false;
 };
 
 enum class ModelInstallState
@@ -61,7 +62,8 @@ struct ModelInstall
 enum class ImageOperation
 {
     Generate,
-    Upscale
+    Upscale,
+    Edit
 };
 
 struct ImageGenerationRequest
@@ -102,6 +104,7 @@ struct ServiceCapabilities
 {
     bool imageGeneration = false;
     bool imageUpscale = false;
+    bool imageEdit = false;
 };
 
 enum class ServiceConnectionState

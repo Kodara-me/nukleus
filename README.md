@@ -40,13 +40,17 @@ generation, fixed 2× upscaling, model discovery, progress, and binary results.
 
 `kira-service` is the daemon. `kira-service-manager --gui` opens the local
 administrator UI with the shared dark Kira theme: a category/model tree on the
-left and editable recommended options on the right. Its default window is
-1300 × 680, its minimum is 1000 × 550, and saved geometry takes precedence.
+left and editable recommended options on the right. Its window content has a fixed,
+non-resizable size of 1100 × 640 logical pixels, excluding the native title bar.
+Saved geometry restores the window position; previous sizes and maximized states are ignored.
 Select a model or its companion to edit recommendations, then Save to persist
-them on the service. Unsaved edits prompt before leaving the model.
+them on the service. The shared add/edit form includes **Explicit content (NSFW)**,
+unchecked by default; the service persists the flag and returns it with model listings.
+Unsaved edits prompt before leaving the model.
 
-Add model opens a modal for HTTPS model/companion URLs and category-specific
-recommendations. Progress stays in that modal; success closes it and selects
+Add model opens a landscape modal with HTTPS model/companion URLs on the left
+and category-specific recommendations on the right, without scrolling.
+Progress stays in that modal; success closes it and selects
 the installed model. Closing during download cancels the installation and
 cleans its temporary files. Only one installation is accepted across clients;
 there is no download queue. The image execution queue is unchanged.
@@ -62,7 +66,7 @@ on an explicit Save. Canvas uses the selected model’s recommendations for uned
 
 Image models can be complete checkpoints or standalone diffusion models (for
 example, a split UNet GGUF). The add dialog includes **Model contents** plus
-optional CLIP-L, CLIP-G and VAE URLs. Select an installed image model and choose
+optional CLIP-L, CLIP-G, VAE, LLM text encoder and mmproj URLs. Select an installed image model and choose
 **Optional files…** to attach missing files without downloading its primary again.
 Leave unused URLs empty; complete checkpoints keep working without extra files.
 Already attached roles cannot be overwritten. Choose compatible components from
@@ -87,9 +91,9 @@ Use `--help` for all options. CLI and GUI manager connections are local-only and
 
 ## Models
 
-The `edition` category supports installing, listing, and deleting image-editing models in the manager GUI and CLI (`add <url> --category edition`). It accepts `.safetensors`, `.ckpt`, and `.gguf` files. Editing jobs are not implemented yet.
+The `edition` category supports installing, listing, and deleting image-editing models in the manager GUI and CLI (`add <url> --category edition`). It accepts `.safetensors`, `.ckpt`, and `.gguf` files. Editing jobs use image.edit with uploaded reference images.
 
-Service models live in `$XDG_DATA_HOME/kira-service/models/`: image-generation files in `models/`, edition models for image editing in `models/edition/`, upscalers in `models/upscale/`, LLM chat files in `models/llm/`, and IP-Adapters in `models/ip-adapter/`. Optional companion files are kept under each category's private `companions/<primary filename>/` directory and linked through persistent category-local metadata: mmproj for LLM-chat, VAE for Image-generation and Edition, and LoRA for IP-Adapter. The manager downloads and installs the primary and its optional files together; failed or canceled downloads leave no usable pair, and deleting the primary also removes its companion. Model listings expose `companionFileName` and `companionRole` (`mmproj`, `vae`, or `lora`) without exposing service paths. The manager accepts HTTPS model-file URLs and never overwrites an installed filename. SHA-256 fields and download verification are no longer supported. Primary IP-Adapter files support `.bin`, `.safetensors`, `.ckpt`, and `.gguf`; mmproj files require `.gguf`, while VAE and LoRA files accept `.safetensors`, `.ckpt`, or `.gguf`. Query-bearing URLs are accepted and Hugging Face `blob` links are normalized to `resolve` URLs. The add-model modal shows the optional companion URL field appropriate to the selected category. Image-generation CLIP-L, CLIP-G and VAE companions are passed to sd-cli; mmproj and LoRA remain catalog attachments. Legacy single-companion installations remain supported. New companionFiles metadata maps roles to category-relative filenames, and modelType defaults to checkpoint when absent.
+Service models live in `$XDG_DATA_HOME/kira-service/models/`: image-generation files in `models/`, edition models for image editing in `models/edition/`, upscalers in `models/upscale/`, LLM chat files in `models/llm/`, and IP-Adapters in `models/ip-adapter/`. Optional companion files are kept under each category's private `companions/<primary filename>/` directory and linked through persistent category-local metadata: mmproj for LLM-chat, VAE for Image-generation and Edition, and LoRA for IP-Adapter. The manager downloads and installs the primary and its optional files together; failed or canceled downloads leave no usable pair, and deleting the primary also removes its companion. Model listings expose `companionFileName` and `companionRole` (`mmproj`, `vae`, or `lora`) without exposing service paths. The manager accepts HTTPS model-file URLs and never overwrites an installed filename. SHA-256 fields and download verification are no longer supported. Primary IP-Adapter files support `.bin`, `.safetensors`, `.ckpt`, and `.gguf`; mmproj files require `.gguf`, while VAE and LoRA files accept `.safetensors`, `.ckpt`, or `.gguf`. Query-bearing URLs are accepted and Hugging Face `blob` links are normalized to `resolve` URLs. The add-model modal shows the optional companion URL field appropriate to the selected category. Image-generation CLIP-L, CLIP-G, VAE, LLM text encoder and mmproj companions are passed to sd-cli; LLM-chat mmproj and IP-Adapter LoRA remain catalog attachments. Legacy single-companion installations remain supported. New companionFiles metadata maps roles to category-relative filenames, and modelType defaults to checkpoint when absent.
 
 The Linux installer moves legacy models from `$XDG_DATA_HOME/kira-canvas/models/` during an upgrade. It aborts without changing either directory if both model roots already exist.
 
@@ -112,3 +116,63 @@ implicitly. The daemon validates option types/ranges before queueing, omits
 Automatic sampler/scheduler flags and preserves CFG precision. Installed VAE
 companions are resolved on the server and passed to both text-to-image and
 image-to-image jobs without exposing filesystem paths.
+Omitted dimensions and steps default to 1024 × 1024 and 28; CFG defaults to 7.
+No external VAE is required for a complete checkpoint with an embedded VAE.
+Standalone diffusion files require their missing encoder/VAE weights separately.
+
+Image-generation and Edition models accept optional `companionUrls` roles `llm`
+(text encoder) and `mmproj` (vision projector). Manager add/optional-file dialogs
+show both URLs for these categories; CLI add/attach accepts `--text-encoder` and
+`--mmproj` together with the existing VAE/CLIP options. LLM-chat `--mmproj` keeps
+its legacy meaning. mmproj must be GGUF; text encoders accept GGUF, safetensors,
+or ckpt. Files are attached to their primary model, staged and published atomically,
+preserved across restart, and deleted with the primary. Generation resolves them
+internally and passes `--llm` and `--llm_vision` only when present. Edition jobs use image.edit with uploaded reference-image bytes.
+
+Manager add/optional-file dialogs offer **Browse…** beside the model and companion
+sources. Selected local files are copied by the service through the same staged,
+atomic installation workflow as downloads; originals are retained and existing
+installed files are never overwritten. Installation requests may use `file://`
+URLs only from loopback clients. LAN clients remain restricted to HTTPS sources.
+The Manager streams selected files from a temporary localhost HTTP source with
+an unguessable per-file URL. The service copies these through its existing download
+pipeline, so systemd ProtectHome and PrivateTmp remain enabled. Loopback installation
+clients may supply HTTP sources on 127.0.0.1; LAN requests cannot. Model metadata stores managed relative filenames,
+never the source paths. No Hugging Face token or login is stored or required for
+local imports.
+
+Companions can be removed independently through the Manager's **Optional files…**
+dialog. Confirm **Remove** beside an attached role, then choose a new URL or
+Browse source and apply the replacement. Removal preserves the primary, other
+companions, recommendations and explicit-content classification; queued/active
+models and models receiving files cannot lose companions.
+
+Protocol v3 adds `models.companion.delete` with opaque model `id` and companion
+`role`, returning `models.companion.delete.completed` with both fields or an error.
+SDK/Manager clients expose `deleteCompanion(id, role)` and `companionDeleted`.
+Replacement uses the existing attachment install operation; it is a separate step,
+so a failed replacement leaves the removed role absent. Legacy single-companion
+metadata is supported and updated without discarding unrelated metadata.
+
+Generation failures include the attempted sd-cli command (executable and quoted
+arguments), exit code and up to 4096 trailing stderr characters in the job error
+message. This diagnostic intentionally exposes the submitting client's prompts
+and service-side model/output paths to that client only; successful results and
+model listings continue to omit service paths. Commands are displayed as POSIX
+shell-quoted text for diagnosis; execution still uses QProcess argument lists.
+
+Image editing uses the additive protocol-v3 `image.edit` operation and capability.
+The SDK exposes `submitEdit(ImageGenerationRequest)` with nonempty instructions
+and source image bytes. The daemon resolves an Edition model and its optional
+LLM, VAE and mmproj companions, queues the uploaded reference, and runs sd-cli
+with `--ref-image`, `--prompt`, requested width/height and generation parameters.
+Companions use `--llm`, `--vae` and `--llm_vision`; primary weights use
+`--diffusion-model` or `--model` according to saved modelType. Reference presets
+are auto-detected by sd-cli; no img2img `--init-img` or strength is supplied.
+See [upstream editing documentation](https://github.com/leejet/stable-diffusion.cpp/blob/master/docs/edit.md).
+Canvas selects source dimensions and saved edition recommendations, retaining
+source history and normalizing returned output to source resolution if needed.
+
+Reference-image editing also supplies `--flow-shift 3 --offload-to-cpu --diffusion-fa --model-args qwen_image_zero_cond_t=true`. Fatal/error-level Vulkan `ErrorOutOfDeviceMemory`/`ErrorOutOfHostMemory` output aborts the active generation process; the daemon waits for process termination and returns the command and memory diagnostic as a job error, releasing the queue. Warnings, including pinned-memory allocation failures that fall back to CPU buffers, are not treated as failures.
+
+Image generation and reference-image editing both pass `--offload-to-cpu` to sd-cli.

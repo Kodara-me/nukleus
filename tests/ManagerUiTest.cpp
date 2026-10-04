@@ -6,9 +6,15 @@
 #include <KiraUi/TreeView.h>
 #include <QApplication>
 #include <QComboBox>
+#include <QCheckBox>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLineEdit>
+#include <QFileDialog>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QFile>
+#include <QTimer>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSettings>
@@ -83,6 +89,48 @@ class ManagerUiTest final : public QObject
         m_saved = KiraService::Protocol::defaultModelOptions("image-generation");
         QSettings().clear();
     }
+    void browsesLocalModel()
+    {
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.connectToService();
+        QTRY_VERIFY(client.modelListAvailable());
+        QTemporaryDir source;
+        const QString path = source.filePath("downloaded.gguf");
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("local model");
+        file.close();
+        AddModelDialog dialog(&client, "image-generation");
+        dialog.show();
+        const bool disabled = QApplication::testAttribute(Qt::AA_DontUseNativeDialogs);
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        QTimer::singleShot(0, &dialog, [&]
+        {
+            auto* picker = dialog.findChild<QFileDialog*>();
+            QVERIFY(picker);
+            picker->selectFile(path);
+            QMetaObject::invokeMethod(picker, "accept", Qt::DirectConnection);
+        });
+        dialog.findChild<QPushButton*>("modelUrlBrowse")->click();
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, disabled);
+        QCOMPARE(QUrl(dialog.findChild<QLineEdit*>("modelUrl")->text()).toLocalFile(), path);
+        auto* start = dialog.findChild<QPushButton*>("startDownload");
+        QVERIFY(start->isEnabled());
+        m_messages.clear();
+        start->click();
+        QTRY_VERIFY(!m_messages.isEmpty());
+        const QUrl transferUrl(m_messages.last().value("url").toString());
+        QCOMPARE(transferUrl.host(), QString("127.0.0.1"));
+        QCOMPARE(transferUrl.fileName(), QString("downloaded.gguf"));
+        QNetworkAccessManager network;
+        auto* reply = network.get(QNetworkRequest(transferUrl));
+        QSignalSpy finished(reply, &QNetworkReply::finished);
+        QTRY_COMPARE(finished.count(), 1);
+        QCOMPARE(reply->readAll(), QByteArray("local model"));
+        reply->deleteLater();
+        dialog.close();
+        QTRY_VERIFY(!dialog.isVisible());
+    }
     void fieldsFollowCategory()
     {
         ModelOptionsWidget widget;
@@ -91,6 +139,7 @@ class ManagerUiTest final : public QObject
             widget.setOptions(category);
             QCOMPARE(widget.options(), KiraService::Protocol::defaultModelOptions(category));
             QVERIFY(widget.isValid());
+            QVERIFY(!widget.explicitContent());
         }
         widget.setOptions("llm-chat");
         QVERIFY(!widget.findChild<QComboBox *>("resolution"));
@@ -113,8 +162,25 @@ class ManagerUiTest final : public QObject
         dialog.show();
         QVERIFY(!dialog.findChild<QLineEdit*>("modelUrl")->isVisible());
         QVERIFY(!dialog.findChild<QLineEdit*>("companionUrl")->isEnabled());
+        auto* remove = dialog.findChild<QPushButton*>("companionUrlRemove");
+        QVERIFY(remove->isVisible());
+        QTimer::singleShot(0, &dialog, [] {
+            auto* question = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            QVERIFY(question);
+            question->button(QMessageBox::Yes)->click();
+        });
+        m_messages.clear();
+        remove->click();
+        QTRY_VERIFY(!m_messages.isEmpty());
+        QCOMPARE(m_messages.last().value("type").toString(), QString("models.companion.delete"));
+        QCOMPARE(m_messages.last().value("role").toString(), QString("vae"));
+        send({{"type", "models.companion.delete.completed"}, {"id", "image-generation:test.gguf"}, {"role", "vae"}});
+        QTRY_VERIFY(dialog.findChild<QLineEdit*>("companionUrl")->isEnabled());
+        QVERIFY(!remove->isVisible());
         dialog.findChild<QLineEdit*>("clipLUrl")->setText("https://example.test/clip_l.safetensors");
         dialog.findChild<QLineEdit*>("clipGUrl")->setText("https://example.test/clip_g.safetensors");
+        dialog.findChild<QLineEdit*>("textEncoderUrl")->setText("https://example.test/encoder.gguf");
+        dialog.findChild<QLineEdit*>("mmprojUrl")->setText("https://example.test/mmproj.gguf");
         dialog.findChild<QComboBox*>("modelType")->setCurrentIndex(1);
         if (qEnvironmentVariableIsSet("KIRA_MANAGER_SCREENSHOT_DIR")) {
             const QDir directory(qEnvironmentVariable("KIRA_MANAGER_SCREENSHOT_DIR"));
@@ -128,8 +194,10 @@ class ManagerUiTest final : public QObject
         QTRY_VERIFY(!m_messages.isEmpty());
         const auto request = m_messages.last();
         QCOMPARE(request.value("id").toString(), QString("image-generation:test.gguf"));
+        QCOMPARE(request.value("companionUrls").toObject().value("llm").toString(), QString("https://example.test/encoder.gguf"));
+        QCOMPARE(request.value("companionUrls").toObject().value("mmproj").toString(), QString("https://example.test/mmproj.gguf"));
         QCOMPARE(request.value("modelType").toString(), QString("diffusion"));
-        QCOMPARE(request.value("companionUrls").toObject().size(), 2);
+        QCOMPARE(request.value("companionUrls").toObject().size(), 4);
         QVERIFY(!request.contains("recommendedOptions"));
         QVERIFY(request.value("url").toString().isEmpty());
         QVERIFY(!start->isEnabled());
@@ -143,8 +211,13 @@ class ManagerUiTest final : public QObject
         ManageModelsWindow window(nullptr, &client);
         window.show();
         QTRY_VERIFY(client.modelListAvailable());
-        QCOMPARE(window.minimumSize(), QSize(1000, 550));
-        QCOMPARE(window.size(), QSize(1300, 680));
+        QCOMPARE(window.minimumSize(), QSize(1100, 640));
+        QCOMPARE(window.maximumSize(), QSize(1100, 640));
+        QCOMPARE(window.size(), QSize(1100, 640));
+        window.resize(1000, 550);
+        QCOMPARE(window.size(), QSize(1100, 640));
+        window.resize(1500, 800);
+        QCOMPARE(window.size(), QSize(1100, 640));
         auto *tree = window.findChild<KiraUi::TreeView *>("installedModelsTree");
         QVERIFY(tree);
         QCOMPARE(tree->model()->rowCount(), 1);
@@ -159,12 +232,17 @@ class ManagerUiTest final : public QObject
         QVERIFY(form->isVisible());
         auto *steps = form->findChild<QSpinBox *>("steps");
         steps->setValue(42);
+        auto* explicitContent = form->findChild<QCheckBox*>("explicitContent");
+        QVERIFY(explicitContent);
+        QVERIFY(!explicitContent->isChecked());
+        explicitContent->setChecked(true);
         auto *save = window.findChild<QPushButton *>("saveOptions");
         QVERIFY(save->isEnabled());
         save->click();
         QVERIFY(!save->isEnabled());
         QTRY_VERIFY(!m_messages.isEmpty() && m_messages.last().value("type") == "models.configure");
         QCOMPARE(m_messages.last().value("recommendedOptions").toObject().value("steps").toInt(), 42);
+        QVERIFY(m_messages.last().value("explicitContent").toBool());
         send({{"type", "error"}, {"id", "image-generation:test.gguf"}, {"message", "Write failed"}});
         QTRY_VERIFY(save->isEnabled());
         QCOMPARE(steps->value(), 42);
@@ -173,7 +251,7 @@ class ManagerUiTest final : public QObject
         m_saved = form->options();
         send({{"type", "models.configure.completed"},
               {"id", "image-generation:test.gguf"},
-              {"model", QJsonObject{{"recommendedOptions", m_saved}}}});
+              {"model", QJsonObject{{"recommendedOptions", m_saved}, {"explicitContent", true}}}});
         QTRY_VERIFY(form->isEnabled());
         QVERIFY(!save->isEnabled());
         client.requestModels();
@@ -181,10 +259,7 @@ class ManagerUiTest final : public QObject
         if (qEnvironmentVariableIsSet("KIRA_MANAGER_SCREENSHOT_DIR"))
         {
             const QString dir = qEnvironmentVariable("KIRA_MANAGER_SCREENSHOT_DIR");
-            QVERIFY(window.grab().save(dir + "/manager-1300.png"));
-            window.resize(1000, 550);
-            QTest::qWait(20);
-            QVERIFY(window.grab().save(dir + "/manager-1000.png"));
+            QVERIFY(window.grab().save(dir + "/manager-1100.png"));
         }
         window.close();
         QCOMPARE(QSettings().value("MainWindow/Geometry").toByteArray(), window.saveGeometry());

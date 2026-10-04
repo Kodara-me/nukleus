@@ -80,7 +80,8 @@ QT_QPA_PLATFORM=offscreen KIRA_MANAGER_SCREENSHOT_DIR=/tmp/kira-manager-review .
 QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR=2 KIRA_MANAGER_SCREENSHOT_DIR=/tmp/kira-manager-review ./build/tests/kira-service-manager-ui-test
 ```
 
-Validate both 1300 × 680 and 1000 × 550 and review the add-model modal. Qt-only
+Validate the fixed 1100 × 640 content size (excluding the native title bar),
+confirm the window cannot be resized, and review the add-model modal. Qt-only
 manager UI code follows the framework's cross-platform behavior; the existing
 service deployment, CLI and model-file commit operations retain their platform
 requirements. Check available platforms and report any untested ones.
@@ -92,6 +93,71 @@ verify actual decorations on each target desktop in addition to offscreen tests.
 Generation option validation and backend arguments are covered by a disposable
 POSIX fake sd-cli fixture: no installed model or GPU is used. Tests cover automatic
 and explicit sampler/scheduler, CFG precision, malformed/out-of-range options,
-optional defaults, VAE arguments for direct and uploaded-input jobs, and result
+prompt-only requests with default dimensions/steps/CFG and no companions,
+VAE arguments for direct and uploaded-input jobs, and result
 bytes. Rebuild and rerun the Linux installer to update a systemd-installed daemon;
 a workspace build alone does not update the running service.
+
+Model classification uses a top-level `explicitContent` boolean, separate from
+recommendations. SDK and Manager install/configure methods accept an optional
+final boolean; omission preserves existing classification. The shared Manager
+form edits it alongside recommendations. Validate default false, edits, restart
+persistence, list/completion responses, invalid boolean rejection, and legacy
+metadata preservation using disposable test models.
+
+Image-generation and Edition models accept optional `companionUrls` roles `llm`
+(text encoder) and `mmproj` (vision projector). Manager add/optional-file dialogs
+show both URLs for these categories; CLI add/attach accepts `--text-encoder` and
+`--mmproj` together with the existing VAE/CLIP options. LLM-chat `--mmproj` keeps
+its legacy meaning. mmproj must be GGUF; text encoders accept GGUF, safetensors,
+or ckpt. Files are attached to their primary model, staged and published atomically,
+preserved across restart, and deleted with the primary. Generation resolves them
+internally and passes `--llm` and `--llm_vision` only when present. Edition jobs use image.edit with uploaded reference-image bytes.
+
+Manager add/optional-file dialogs offer **Browse…** beside the model and companion
+sources. Selected local files are copied by the service through the same staged,
+atomic installation workflow as downloads; originals are retained and existing
+installed files are never overwritten. Installation requests may use `file://`
+URLs only from loopback clients. LAN clients remain restricted to HTTPS sources.
+The Manager streams selected files from a temporary localhost HTTP source with
+an unguessable per-file URL. The service copies these through its existing download
+pipeline, so systemd ProtectHome and PrivateTmp remain enabled. Loopback installation
+clients may supply HTTP sources on 127.0.0.1; LAN requests cannot. Model metadata stores managed relative filenames,
+never the source paths. No Hugging Face token or login is stored or required for
+local imports.
+
+Companions can be removed independently through the Manager's **Optional files…**
+dialog. Confirm **Remove** beside an attached role, then choose a new URL or
+Browse source and apply the replacement. Removal preserves the primary, other
+companions, recommendations and explicit-content classification; queued/active
+models and models receiving files cannot lose companions.
+
+Protocol v3 adds `models.companion.delete` with opaque model `id` and companion
+`role`, returning `models.companion.delete.completed` with both fields or an error.
+SDK/Manager clients expose `deleteCompanion(id, role)` and `companionDeleted`.
+Replacement uses the existing attachment install operation; it is a separate step,
+so a failed replacement leaves the removed role absent. Legacy single-companion
+metadata is supported and updated without discarding unrelated metadata.
+
+Generation failures include the attempted sd-cli command (executable and quoted
+arguments), exit code and up to 4096 trailing stderr characters in the job error
+message. This diagnostic intentionally exposes the submitting client's prompts
+and service-side model/output paths to that client only; successful results and
+model listings continue to omit service paths. Commands are displayed as POSIX
+shell-quoted text for diagnosis; execution still uses QProcess argument lists.
+
+Image editing uses the additive protocol-v3 `image.edit` operation and capability.
+The SDK exposes `submitEdit(ImageGenerationRequest)` with nonempty instructions
+and source image bytes. The daemon resolves an Edition model and its optional
+LLM, VAE and mmproj companions, queues the uploaded reference, and runs sd-cli
+with `--ref-image`, `--prompt`, requested width/height and generation parameters.
+Companions use `--llm`, `--vae` and `--llm_vision`; primary weights use
+`--diffusion-model` or `--model` according to saved modelType. Reference presets
+are auto-detected by sd-cli; no img2img `--init-img` or strength is supplied.
+See [upstream editing documentation](https://github.com/leejet/stable-diffusion.cpp/blob/master/docs/edit.md).
+Canvas selects source dimensions and saved edition recommendations, retaining
+source history and normalizing returned output to source resolution if needed.
+
+Reference-image editing also supplies `--flow-shift 3 --offload-to-cpu --diffusion-fa --model-args qwen_image_zero_cond_t=true`. Fatal/error-level Vulkan `ErrorOutOfDeviceMemory`/`ErrorOutOfHostMemory` output aborts the active generation process; the daemon waits for process termination and returns the command and memory diagnostic as a job error, releasing the queue. Warnings, including pinned-memory allocation failures that fall back to CPU buffers, are not treated as failures.
+
+Image generation and reference-image editing both pass `--offload-to-cpu` to sd-cli.

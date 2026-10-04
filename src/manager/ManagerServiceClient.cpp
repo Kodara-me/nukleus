@@ -6,6 +6,10 @@
 #include <QJsonDocument>
 #include <QUuid>
 #include <QWebSocket>
+#include <QTcpSocket>
+#include <QFile>
+#include <QFileInfo>
+#include <memory>
 
 #include <algorithm>
 
@@ -15,6 +19,43 @@ ManagerServiceClient::ManagerServiceClient(QObject *parent, quint16 localPort)
     , m_socket(new QWebSocket(QStringLiteral("Kira Service Manager"), QWebSocketProtocol::VersionLatest, this))
     , m_retryTimer(new QTimer(this))
 {
+    connect(&m_localSourcesServer, &QTcpServer::newConnection, this, [this] {
+        while (auto* socket = m_localSourcesServer.nextPendingConnection()) {
+            auto file = std::make_shared<QFile>();
+            auto header = std::make_shared<QByteArray>();
+            auto started = std::make_shared<bool>(false);
+            const auto sendChunk = [socket, file] {
+                if (!file->isOpen()) return;
+                while (socket->bytesToWrite() < 1024 * 1024 && !file->atEnd()) {
+                    const auto bytes = file->read(256 * 1024);
+                    if (bytes.isEmpty()) { socket->abort(); return; }
+                    socket->write(bytes);
+                }
+                if (file->atEnd() && socket->bytesToWrite() == 0) {
+                    file->close(); socket->disconnectFromHost();
+                }
+            };
+            connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+            connect(socket, &QTcpSocket::bytesWritten, socket, [sendChunk](qint64) { sendChunk(); });
+            connect(socket, &QTcpSocket::readyRead, socket, [this, socket, file, header, started, sendChunk] {
+                if (*started) { socket->readAll(); return; }
+                header->append(socket->readAll());
+                if (header->size() > 16384) { socket->abort(); return; }
+                if (!header->contains("\r\n\r\n")) return;
+                *started = true;
+                const auto parts = header->split(' ');
+                const QString key = parts.size() >= 2 ? QUrl::fromEncoded(parts.at(1)).path(QUrl::FullyDecoded) : QString();
+                file->setFileName(m_localSources.value(key));
+                if (parts.first() != "GET" || file->fileName().isEmpty() || !file->open(QIODevice::ReadOnly)) {
+                    socket->write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    socket->disconnectFromHost(); return;
+                }
+                socket->write("HTTP/1.1 200 OK\r\nContent-Length: " + QByteArray::number(file->size())
+                    + "\r\nConnection: close\r\n\r\n");
+                sendChunk();
+            });
+        }
+    });
     m_retryTimer->setSingleShot(true);
     m_retryTimer->setInterval(5000);
     connect(m_socket, &QWebSocket::connected, this, &ManagerServiceClient::authenticate);
@@ -58,29 +99,40 @@ QList<ManagedInstall> ManagerServiceClient::installs() const { return m_installs
 void ManagerServiceClient::requestModels() { if (m_authenticated) m_socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list\"}")); }
 
 QString ManagerServiceClient::installModel(const QString &category, const QUrl &url, const QUrl &companionUrl, const QJsonObject &recommendedOptions, const QJsonObject &companionUrls,
-    const QString &modelType, const QString &existingModelId)
+    const QString &modelType, const QString &existingModelId, std::optional<bool> explicitContent)
 {
     if (!m_authenticated) return {};
+    const QUrl preparedUrl = prepareSource(url);
+    const QUrl preparedCompanion = prepareSource(companionUrl);
+    if ((url.isLocalFile() && preparedUrl.isEmpty()) || (companionUrl.isLocalFile() && preparedCompanion.isEmpty())) return {};
+    QJsonObject preparedFiles;
+    for (auto it = companionUrls.begin(); it != companionUrls.end(); ++it) {
+        const QUrl prepared = prepareSource(QUrl(it.value().toString()));
+        if (prepared.isEmpty()) return {};
+        preparedFiles.insert(it.key(), prepared.toString());
+    }
     const QString installId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     m_installs.append({installId, category, url, companionUrl, {}, ManagedInstallState::Requesting, 0, {}, {}, {}, {}});
     QJsonObject message{{QStringLiteral("type"), QStringLiteral("models.install")}, {QStringLiteral("installId"), installId},
-                        {QStringLiteral("category"), category}, {QStringLiteral("url"), url.toString()}};
+                        {QStringLiteral("category"), category}, {QStringLiteral("url"), preparedUrl.toString()}};
     if (companionUrl.isValid() && !companionUrl.isEmpty()) {
-        message.insert(QStringLiteral("companionUrl"), companionUrl.toString());
+        message.insert(QStringLiteral("companionUrl"), preparedCompanion.toString());
     }
     if (!recommendedOptions.isEmpty()) message.insert("recommendedOptions", recommendedOptions);
-    if (!companionUrls.isEmpty()) message.insert("companionUrls", companionUrls);
+    if (!preparedFiles.isEmpty()) message.insert("companionUrls", preparedFiles);
     if (modelType != "checkpoint" || !existingModelId.isEmpty()) message.insert("modelType", modelType);
     if (!existingModelId.isEmpty()) message.insert("id", existingModelId);
+    if (explicitContent) message.insert("explicitContent", *explicitContent);
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     emit installsChanged();
     return installId;
 }
 
-bool ManagerServiceClient::configureModel(const QString &id, const QJsonObject &options)
+bool ManagerServiceClient::configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent)
 {
     if (!m_authenticated || id.isEmpty()) return false;
-    const QJsonObject message{{"type", "models.configure"}, {"id", id}, {"recommendedOptions", options}};
+    QJsonObject message{{"type", "models.configure"}, {"id", id}, {"recommendedOptions", options}};
+    if (explicitContent) message.insert("explicitContent", *explicitContent);
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     return true;
 }
@@ -128,7 +180,7 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
                     model.value(QStringLiteral("fileName")).toString(), model.value(QStringLiteral("bytes")).toVariant().toLongLong(),
                     model.value(QStringLiteral("companionFileName")).toString(),
                                  model.value(QStringLiteral("companionRole")).toString(), model.value("recommendedOptions").toObject(),
-                    model.value("companionFiles").toObject(), model.value("modelType").toString("checkpoint")});
+                    model.value("companionFiles").toObject(), model.value("modelType").toString("checkpoint"), model.value("explicitContent").toBool(false)});
             }
         }
         m_modelListAvailable = true; emit modelsChanged(); return;
@@ -147,9 +199,13 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
         return;
     }
     if (type == "models.configure.completed") {
-        emit modelConfigured(object.value("id").toString(), object.value("model").toObject().value("recommendedOptions").toObject());
+        emit modelConfigured(object.value("id").toString(), object.value("model").toObject().value("recommendedOptions").toObject(), object.value("model").toObject().value("explicitContent").toBool(false));
         requestModels();
         return;
+    }
+    if (type == "models.companion.delete.completed") {
+        emit companionDeleted(object.value("id").toString(), object.value("role").toString());
+        requestModels(); return;
     }
     if (type == QStringLiteral("models.delete.completed")) { emit modelDeleted(object.value(QStringLiteral("id")).toString()); requestModels(); return; }
     if (type == QStringLiteral("error")) {
@@ -179,4 +235,26 @@ void ManagerServiceClient::failActiveInstalls(const QString &message)
     bool changed = false;
     for (ManagedInstall &install : m_installs) if (install.state != ManagedInstallState::Completed && install.state != ManagedInstallState::Failed && install.state != ManagedInstallState::Canceled) { install.state = ManagedInstallState::Failed; install.message = message; changed = true; }
     if (changed) emit installsChanged();
+}
+
+QUrl ManagerServiceClient::prepareSource(const QUrl& source)
+{
+    if (!source.isLocalFile()) return source;
+    const QFileInfo file(source.toLocalFile());
+    if (!file.isFile() || !file.isReadable()) return {};
+    if (!m_localSourcesServer.isListening() && !m_localSourcesServer.listen(QHostAddress::LocalHost)) return {};
+    const QString key = "/" + QUuid::createUuid().toString(QUuid::WithoutBraces) + "/" + file.fileName();
+    m_localSources.insert(key, file.absoluteFilePath());
+    QUrl url;
+    url.setScheme("http"); url.setHost("127.0.0.1");
+    url.setPort(m_localSourcesServer.serverPort()); url.setPath(key);
+    return url;
+}
+
+bool ManagerServiceClient::deleteCompanion(const QString& id, const QString& role)
+{
+    if (!m_authenticated || id.isEmpty() || role.isEmpty()) return false;
+    const QJsonObject message{{"type", "models.companion.delete"}, {"id", id}, {"role", role}};
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
+    return true;
 }
