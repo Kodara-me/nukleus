@@ -19,4 +19,7 @@ struct GenerationRequest
     QString outputPath;
     QString modelPath;
     QString vaePath;
+    QString clipLPath;
+    QString clipGPath;
+    bool diffusionModel = false;
 };

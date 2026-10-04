@@ -57,7 +57,8 @@ QList<ManagedModelInfo> ManagerServiceClient::models(const QString &category) co
 QList<ManagedInstall> ManagerServiceClient::installs() const { return m_installs; }
 void ManagerServiceClient::requestModels() { if (m_authenticated) m_socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list\"}")); }
 
-QString ManagerServiceClient::installModel(const QString &category, const QUrl &url, const QUrl &companionUrl, const QJsonObject &recommendedOptions)
+QString ManagerServiceClient::installModel(const QString &category, const QUrl &url, const QUrl &companionUrl, const QJsonObject &recommendedOptions, const QJsonObject &companionUrls,
+    const QString &modelType, const QString &existingModelId)
 {
     if (!m_authenticated) return {};
     const QString installId = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -68,6 +69,9 @@ QString ManagerServiceClient::installModel(const QString &category, const QUrl &
         message.insert(QStringLiteral("companionUrl"), companionUrl.toString());
     }
     if (!recommendedOptions.isEmpty()) message.insert("recommendedOptions", recommendedOptions);
+    if (!companionUrls.isEmpty()) message.insert("companionUrls", companionUrls);
+    if (modelType != "checkpoint" || !existingModelId.isEmpty()) message.insert("modelType", modelType);
+    if (!existingModelId.isEmpty()) message.insert("id", existingModelId);
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     emit installsChanged();
     return installId;
@@ -123,7 +127,8 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
                 modelsForCategory->append({model.value(QStringLiteral("id")).toString(), model.value(QStringLiteral("name")).toString(),
                     model.value(QStringLiteral("fileName")).toString(), model.value(QStringLiteral("bytes")).toVariant().toLongLong(),
                     model.value(QStringLiteral("companionFileName")).toString(),
-                                 model.value(QStringLiteral("companionRole")).toString(), model.value("recommendedOptions").toObject()});
+                                 model.value(QStringLiteral("companionRole")).toString(), model.value("recommendedOptions").toObject(),
+                    model.value("companionFiles").toObject(), model.value("modelType").toString("checkpoint")});
             }
         }
         m_modelListAvailable = true; emit modelsChanged(); return;

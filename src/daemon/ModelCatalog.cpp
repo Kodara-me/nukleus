@@ -73,11 +73,18 @@ struct ModelCatalog::InstallJob
     ModelInstallRequest request;
     QString fileName;
     QString finalPath;
-    QString partPath;
-    QString companionFileName;
-    QString companionFinalPath;
-    QString companionPartPath;
-    bool downloadingCompanion = false;
+    struct File {
+        QString role;
+        QUrl url;
+        QString relativeName;
+        QString finalPath;
+        QString partPath;
+        bool published = false;
+    };
+    QList<File> files;
+    qsizetype fileIndex = 0;
+    QJsonObject companionFiles;
+    QString legacyCompanion;
     std::unique_ptr<QFile> partFile;
     QPointer<QNetworkReply> reply;
     qint64 bytesDownloaded = 0;
@@ -150,8 +157,23 @@ QList<ModelInfo> ModelCatalog::models(ModelCategory category) const
         const QString companionFileName = entry.isString() ? entry.toString() : entry.toObject().value("companionFileName").toString();
         if (!companionFileName.isEmpty() && companionPath(category, fileName, companionFileName).isEmpty()) continue;
         if (!companionFileName.isEmpty() && !QFileInfo(companionPath(category, fileName, companionFileName)).isFile()) continue;
+        if (entry.toObject().contains("companionFiles") && !entry.toObject().value("companionFiles").isObject()) continue;
+        auto files = entry.toObject().value("companionFiles").toObject();
+        if (!companionFileName.isEmpty()) files.insert(companionRole(category), companionFileName);
+        bool valid = true;
+        for (auto it = files.begin(); it != files.end(); ++it) {
+            const auto roles = category == ModelCategory::ImageGeneration || category == ModelCategory::Edition
+                ? QStringList{"vae", "clip-l", "clip-g"} : QStringList{companionRole(category)};
+            if (!roles.contains(it.key()) || !it.value().isString()) { valid = false; break; }
+            const auto path = companionPath(category, fileName, it.value().toString());
+            if (path.isEmpty() || !QFileInfo(path).isFile() || !QFileInfo(path).isReadable()) { valid = false; break; }
+        }
+        const auto type = entry.toObject().value("modelType").toString("checkpoint");
+        if (!valid || (type != "checkpoint" && type != "diffusion")) continue;
         models.append({categoryName(category) + QLatin1Char(':') + fileName,
-                       fileInfo.completeBaseName(), fileName, fileInfo.size(), fileInfo.absoluteFilePath(), companionFileName, companionFileName.isEmpty() ? QString() : companionRole(category), entry.toObject().value("recommendedOptions").toObject()});
+                       fileInfo.completeBaseName(), fileName, fileInfo.size(), fileInfo.absoluteFilePath(),
+                       companionFileName, companionFileName.isEmpty() ? QString() : companionRole(category),
+                       entry.toObject().value("recommendedOptions").toObject(), files, type});
     }
     std::sort(models.begin(), models.end(), [](const ModelInfo &left, const ModelInfo &right) {
         return QString::compare(left.fileName, right.fileName, Qt::CaseInsensitive) < 0;
@@ -184,6 +206,10 @@ bool ModelCatalog::remove(const QString &id, QString *errorMessage)
         if (errorMessage) *errorMessage = tr("The requested model is not installed");
         return false;
     }
+    if (m_activeInstall && m_activeInstall->finalPath == modelInfo->filePath) {
+        if (errorMessage) *errorMessage = tr("Companion files are currently being installed for this model");
+        return false;
+    }
     const ModelCategory category = *categoryFromName(id.left(id.indexOf(QLatin1Char(':'))));
     auto metadata = readMetadata(category);
     if (!metadata) { if (errorMessage) *errorMessage = tr("Could not read model metadata"); return false; }
@@ -195,74 +221,69 @@ bool ModelCatalog::remove(const QString &id, QString *errorMessage)
         if (errorMessage) *errorMessage = tr("Could not remove the model");
         return false;
     }
-    if (!modelInfo->companionFileName.isEmpty())
-        QFile::remove(companionPath(category, modelInfo->fileName, modelInfo->companionFileName));
+    for (const auto &name : modelInfo->companionFiles)
+        QFile::remove(companionPath(category, modelInfo->fileName, name.toString()));
     return true;
 }
 
 bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMessage)
 {
-    if (isInstalling()) { if (errorMessage) *errorMessage = tr("Another model installation is in progress"); return false; }
+    const auto fail = [&](const QString &message) { if (errorMessage) *errorMessage = message; return false; };
+    if (isInstalling()) return fail(tr("Another model installation is in progress"));
+    if (request.installId.isEmpty()) return fail(tr("An installation ID is required"));
+    if (request.modelType != "checkpoint" && request.modelType != "diffusion"
+        && !(request.modelType.isEmpty() && !request.existingModelId.isEmpty())) return fail(tr("Invalid model type"));
+    const bool image = request.category == ModelCategory::ImageGeneration || request.category == ModelCategory::Edition;
+    if (!image && (request.modelType != "checkpoint" || !request.companionUrls.isEmpty()))
+        return fail(tr("CLIP/VAE files and diffusion models require an image model category"));
     if (request.recommendedOptions && !KiraService::Protocol::validateModelOptions(categoryName(request.category), *request.recommendedOptions, errorMessage)) return false;
-    if (!readMetadata(request.category)) { if (errorMessage) *errorMessage = tr("Could not read model metadata"); return false; }
-    if (request.installId.isEmpty()) {
-        if (errorMessage) *errorMessage = tr("An installation ID is required");
-        return false;
-    }
-    const QUrl downloadUrl = normalizedModelUrl(request.url);
-    if (!acceptsUrl(downloadUrl)) {
-        if (errorMessage) *errorMessage = tr("Model URLs must be HTTPS URLs to supported model files");
-        return false;
-    }
-    const QString fileName = fileNameForUrl(downloadUrl);
-    if (!acceptsFileName(request.category, fileName)) {
-        if (errorMessage) *errorMessage = tr("The URL filename is not supported for this model category");
-        return false;
-    }
-    std::optional<QUrl> companionUrl;
-    QString companionFileName;
-    QString companionRelativePath;
-    if (request.companionUrl.has_value()) {
-        if (companionRole(request.category).isEmpty()) {
-            if (errorMessage) *errorMessage = tr("This model category does not support a companion file");
-            return false;
-        }
-        const QUrl normalizedCompanionUrl = normalizedModelUrl(*request.companionUrl);
-        if (!acceptsUrl(normalizedCompanionUrl)) {
-            if (errorMessage) *errorMessage = tr("The companion file URL must be an HTTPS URL to a supported model file");
-            return false;
-        }
-        companionFileName = fileNameForUrl(normalizedCompanionUrl);
-        if (!isSafeFileName(companionFileName)
-            || !(request.category == ModelCategory::LlmChat ? QStringList{QStringLiteral("gguf")}
-                : QStringList{QStringLiteral("safetensors"), QStringLiteral("ckpt"), QStringLiteral("gguf")})
-                    .contains(QFileInfo(companionFileName).suffix(), Qt::CaseInsensitive)) {
-            if (errorMessage) *errorMessage = tr("The companion filename is not supported");
-            return false;
-        }
-        companionUrl = normalizedCompanionUrl;
-        companionRelativePath = QStringLiteral("companions/%1/%2").arg(fileName, companionFileName);
-    }
-    const QString finalPath = QDir(directoryPath(request.category)).filePath(fileName);
-    const QString companionFinalPath = companionRelativePath.isEmpty() ? QString() : companionPath(request.category, fileName, companionRelativePath);
-    if (QFileInfo::exists(finalPath)) {
-        if (errorMessage) *errorMessage = tr("A model with this filename is already installed");
-        return false;
-    }
-    if (!companionFinalPath.isEmpty() && QFileInfo::exists(companionFinalPath)) {
-        if (errorMessage) *errorMessage = tr("The companion file is already installed for this model");
-        return false;
-    }
+    const auto metadata = readMetadata(request.category);
+    if (!metadata) return fail(tr("Could not read model metadata"));
     auto job = std::make_unique<InstallJob>();
     job->request = request;
-    job->request.url = downloadUrl;
-    job->request.companionUrl = companionUrl;
-    job->fileName = fileName;
-    job->finalPath = finalPath;
-    job->partPath = finalPath + QStringLiteral(".part");
-    job->companionFileName = companionRelativePath;
-    job->companionFinalPath = companionFinalPath;
-    job->companionPartPath = companionFinalPath.isEmpty() ? QString() : companionFinalPath + QStringLiteral(".part");
+    if (!request.existingModelId.isEmpty()) {
+        const auto existing = model(request.category, request.existingModelId);
+        if (!existing) return fail(tr("The requested model is not installed"));
+        job->fileName = existing->fileName;
+        job->finalPath = existing->filePath;
+        job->companionFiles = existing->companionFiles;
+        job->legacyCompanion = existing->companionFileName;
+        if (request.modelType.isEmpty()) job->request.modelType = existing->modelType;
+    } else {
+        const auto url = normalizedModelUrl(request.url);
+        if (!acceptsUrl(url)) return fail(tr("Model URLs must be HTTPS URLs to supported model files"));
+        job->fileName = fileNameForUrl(url);
+        if (!acceptsFileName(request.category, job->fileName)) return fail(tr("The URL filename is not supported for this model category"));
+        job->finalPath = QDir(directoryPath(request.category)).filePath(job->fileName);
+        if (QFileInfo::exists(job->finalPath)) return fail(tr("A model with this filename is already installed"));
+        job->files.append({"primary", url, job->fileName, job->finalPath, job->finalPath + ".part"});
+    }
+    QJsonObject urls = request.companionUrls;
+    const auto legacyRole = companionRole(request.category);
+    if (request.companionUrl) {
+        if (legacyRole.isEmpty() || urls.contains(legacyRole)) return fail(tr("Invalid or duplicate companion role"));
+        urls.insert(legacyRole, request.companionUrl->toString());
+    }
+    for (auto it = urls.begin(); it != urls.end(); ++it) {
+        const auto role = it.key();
+        if ((!image && role != legacyRole) || (image && !QStringList{"vae", "clip-l", "clip-g"}.contains(role)) || !it.value().isString())
+            return fail(tr("Invalid companion role or URL"));
+        if (job->companionFiles.contains(role)) return fail(tr("A file for this companion role is already installed"));
+        const auto url = normalizedModelUrl(QUrl(it.value().toString()));
+        if (!acceptsUrl(url)) return fail(tr("The companion file URL must be an HTTPS URL to a supported model file"));
+        const auto name = fileNameForUrl(url);
+        const auto extensions = request.category == ModelCategory::LlmChat ? QStringList{"gguf"} : QStringList{"safetensors", "ckpt", "gguf"};
+        if (!isSafeFileName(name) || !extensions.contains(QFileInfo(name).suffix(), Qt::CaseInsensitive)) return fail(tr("The companion filename is not supported"));
+        const bool legacy = request.companionUrl && role == legacyRole;
+        const auto relative = legacy ? QString("companions/%1/%2").arg(job->fileName, name)
+                                    : QString("companions/%1/%2/%3").arg(job->fileName, role, name);
+        const auto finalPath = companionPath(request.category, job->fileName, relative);
+        if (finalPath.isEmpty() || QFileInfo::exists(finalPath)) return fail(tr("The companion file is already installed for this model"));
+        job->companionFiles.insert(role, relative);
+        if (legacy) job->legacyCompanion = relative;
+        job->files.append({legacy ? QString("companion") : role, url, relative, finalPath, finalPath + ".part"});
+    }
+    if (job->files.isEmpty() && request.existingModelId.isEmpty()) return fail(tr("No model files were provided"));
     m_activeInstall = std::move(job);
     QTimer::singleShot(0, this, [this, id = request.installId] {
         if (m_activeInstall && m_activeInstall->request.installId == id) startInstall();
@@ -311,8 +332,11 @@ QString ModelCatalog::companionMetadataPath(ModelCategory category) const
 QString ModelCatalog::companionPath(ModelCategory category, const QString &primaryFileName, const QString &companionFileName) const
 {
     const QString prefix = QStringLiteral("companions/%1/").arg(primaryFileName);
-    if (!isSafeFileName(primaryFileName) || !companionFileName.startsWith(prefix)
-        || !isSafeFileName(companionFileName.mid(prefix.size()))) return {};
+    if (!isSafeFileName(primaryFileName) || !companionFileName.startsWith(prefix)) return {};
+    const auto parts = companionFileName.mid(prefix.size()).split('/');
+    if (parts.size() < 1 || parts.size() > 2) return {};
+    for (const auto &part : parts) if (!isSafeFileName(part)) return {};
+    if (parts.size() == 2 && !QStringList{"vae", "clip-l", "clip-g", "mmproj", "lora"}.contains(parts.first())) return {};
     return QDir(directoryPath(category)).filePath(companionFileName);
 }
 
@@ -390,27 +414,19 @@ void ModelCatalog::startInstall()
 {
     if (!m_activeInstall) return;
     QString error;
-    if (!ensureDirectory(m_activeInstall->request.category, &error)) {
-        failActiveInstall(error);
-        return;
+    if (!ensureDirectory(m_activeInstall->request.category, &error)) { failActiveInstall(error); return; }
+    if (m_activeInstall->fileIndex >= m_activeInstall->files.size()) { completeInstall(); return; }
+    const auto &file = m_activeInstall->files.at(m_activeInstall->fileIndex);
+    if (!QDir().mkpath(QFileInfo(file.finalPath).absolutePath()) || QFileInfo::exists(file.finalPath)) {
+        failActiveInstall(tr("Could not prepare storage without overwriting an installed file")); return;
     }
-    if (!m_activeInstall->companionFinalPath.isEmpty()
-        && !QDir().mkpath(QFileInfo(m_activeInstall->companionFinalPath).absolutePath())) {
-        failActiveInstall(tr("Could not create companion model storage"));
-        return;
-    }
-    if (QFileInfo::exists(m_activeInstall->finalPath)) {
-        failActiveInstall(tr("A model with this filename is already installed"));
-        return;
-    }
-    QFile::remove(m_activeInstall->partPath);
-    if (!m_activeInstall->companionPartPath.isEmpty()) QFile::remove(m_activeInstall->companionPartPath);
-    m_activeInstall->partFile = std::make_unique<QFile>(m_activeInstall->partPath);
-    if (!m_activeInstall->partFile->open(QIODevice::WriteOnly)) {
-        failActiveInstall(tr("Could not prepare model storage"));
-        return;
-    }
-    startRequest(m_activeInstall->request.url);
+    QFile::remove(file.partPath);
+    m_activeInstall->partFile = std::make_unique<QFile>(file.partPath);
+    if (!m_activeInstall->partFile->open(QIODevice::WriteOnly)) { failActiveInstall(tr("Could not prepare model storage")); return; }
+    m_activeInstall->redirectCount = 0;
+    m_activeInstall->bytesDownloaded = 0;
+    m_activeInstall->totalBytes.reset();
+    startRequest(file.url);
 }
 
 void ModelCatalog::startRequest(const QUrl &url)
@@ -440,20 +456,6 @@ void ModelCatalog::startRequest(const QUrl &url)
     emitProgress(ModelInstallState::Downloading);
 }
 
-void ModelCatalog::startCompanionInstall()
-{
-    if (!m_activeInstall || !m_activeInstall->request.companionUrl.has_value()) return;
-    m_activeInstall->downloadingCompanion = true;
-    m_activeInstall->bytesDownloaded = 0;
-    m_activeInstall->totalBytes.reset();
-    m_activeInstall->partFile = std::make_unique<QFile>(m_activeInstall->companionPartPath);
-    if (!m_activeInstall->partFile->open(QIODevice::WriteOnly)) {
-        failActiveInstall(tr("Could not prepare companion model storage"));
-        return;
-    }
-    startRequest(*m_activeInstall->request.companionUrl);
-}
-
 void ModelCatalog::finishNetworkRequest()
 {
     QNetworkReply *reply = m_activeInstall->reply;
@@ -473,10 +475,10 @@ void ModelCatalog::finishNetworkRequest()
     if (!m_activeInstall) return;
     const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     if (reply->error() != QNetworkReply::NoError || statusCode < 200 || statusCode >= 300) {
-        const QString fileName = m_activeInstall->downloadingCompanion
-            ? QFileInfo(m_activeInstall->companionFileName).fileName() : m_activeInstall->fileName;
-        const QString role = m_activeInstall->downloadingCompanion
-            ? companionRole(m_activeInstall->request.category) : tr("model");
+        const auto &file = m_activeInstall->files.at(m_activeInstall->fileIndex);
+        const QString fileName = QFileInfo(file.relativeName).fileName();
+        const QString role = file.role == "primary" ? tr("model")
+            : file.role == "companion" ? companionRole(m_activeInstall->request.category) : file.role;
         const QString reason = statusCode > 0
             ? tr("HTTP %1: %2").arg(statusCode).arg(reply->errorString()) : reply->errorString();
         const QString error = tr("Could not download %1 %2: %3").arg(role, fileName, reason);
@@ -487,11 +489,9 @@ void ModelCatalog::finishNetworkRequest()
     m_activeInstall->reply = nullptr;
     reply->deleteLater();
     m_activeInstall->partFile->close();
-    if (m_activeInstall->downloadingCompanion) {
-        completeInstall();
-        return;
-    }
-    completeInstall();
+    ++m_activeInstall->fileIndex;
+    if (m_activeInstall->fileIndex < m_activeInstall->files.size()) startInstall();
+    else completeInstall();
 }
 
 void ModelCatalog::writeAvailableData()
@@ -505,62 +505,32 @@ void ModelCatalog::writeAvailableData()
 void ModelCatalog::completeInstall()
 {
     if (!m_activeInstall) return;
-    const ModelCategory category = m_activeInstall->request.category;
-    if (!m_activeInstall->request.companionUrl.has_value() && !m_activeInstall->downloadingCompanion) {
-        const QByteArray partPath = QFile::encodeName(m_activeInstall->partPath);
-        const QByteArray finalPath = QFile::encodeName(m_activeInstall->finalPath);
-        if (::link(partPath.constData(), finalPath.constData()) != 0) {
-            failActiveInstall(errno == EEXIST ? tr("A model with this filename is already installed") : tr("Could not install the model"));
-            return;
-        }
-        QFile::remove(m_activeInstall->partPath);
-    } else if (!m_activeInstall->downloadingCompanion) {
-        startCompanionInstall();
-        return;
-    } else {
-        m_activeInstall->partFile->close();
-        const QByteArray companionPartPath = QFile::encodeName(m_activeInstall->companionPartPath);
-        const QByteArray companionFinalPath = QFile::encodeName(m_activeInstall->companionFinalPath);
-        if (::link(companionPartPath.constData(), companionFinalPath.constData()) != 0) {
-            failActiveInstall(errno == EEXIST ? tr("The companion file is already installed") : tr("Could not install the companion file"));
-            return;
-        }
-        const QByteArray partPath = QFile::encodeName(m_activeInstall->partPath);
-        const QByteArray finalPath = QFile::encodeName(m_activeInstall->finalPath);
-        if (::link(partPath.constData(), finalPath.constData()) != 0) {
-            QFile::remove(m_activeInstall->companionFinalPath);
-            failActiveInstall(errno == EEXIST ? tr("A model with this filename is already installed") : tr("Could not install the model"));
-            return;
-        }
-        QFile::remove(m_activeInstall->partPath);
-        if (!m_activeInstall->companionPartPath.isEmpty()) QFile::remove(m_activeInstall->companionPartPath);
-    }
+    const auto category = m_activeInstall->request.category;
     auto metadata = readMetadata(category);
-    if (!metadata) {
-        QFile::remove(m_activeInstall->finalPath);
-        if (!m_activeInstall->companionFinalPath.isEmpty()) QFile::remove(m_activeInstall->companionFinalPath);
-        failActiveInstall(tr("Could not read model metadata"));
-        return;
+    if (!metadata) { failActiveInstall(tr("Could not read model metadata")); return; }
+    if (!m_activeInstall->request.existingModelId.isEmpty() && !QFileInfo(m_activeInstall->finalPath).isFile()) {
+        failActiveInstall(tr("The requested model is no longer installed")); return;
     }
-    QJsonObject entry;
-    if (!m_activeInstall->companionFileName.isEmpty()) entry.insert("companionFileName", m_activeInstall->companionFileName);
+    for (auto &file : m_activeInstall->files) {
+        if (::link(QFile::encodeName(file.partPath).constData(), QFile::encodeName(file.finalPath).constData()) != 0) {
+            failActiveInstall(errno == EEXIST ? tr("A model file is already installed") : tr("Could not install a model file")); return;
+        }
+        file.published = true;
+    }
+    auto entry = metadata->value(m_activeInstall->fileName).toObject();
+    if (!m_activeInstall->legacyCompanion.isEmpty()) entry.insert("companionFileName", m_activeInstall->legacyCompanion);
+    entry.insert("companionFiles", m_activeInstall->companionFiles);
+    entry.insert("modelType", m_activeInstall->request.modelType);
     if (m_activeInstall->request.recommendedOptions) entry.insert("recommendedOptions", *m_activeInstall->request.recommendedOptions);
     metadata->insert(m_activeInstall->fileName, entry);
-    if (!writeMetadata(category, *metadata)) {
-        QFile::remove(m_activeInstall->finalPath);
-        if (!m_activeInstall->companionFinalPath.isEmpty()) QFile::remove(m_activeInstall->companionFinalPath);
-        failActiveInstall(tr("Could not save model metadata"));
-        return;
-    }
-    const ModelInfo model{categoryName(m_activeInstall->request.category) + QLatin1Char(':') + m_activeInstall->fileName,
-                          QFileInfo(m_activeInstall->fileName).completeBaseName(), m_activeInstall->fileName,
-                          QFileInfo(m_activeInstall->finalPath).size(), m_activeInstall->finalPath,
-                          m_activeInstall->companionFileName,
-                          m_activeInstall->companionFileName.isEmpty() ? QString() : companionRole(category),
-                          m_activeInstall->request.recommendedOptions.value_or(QJsonObject{})};
-    const QString installId = m_activeInstall->request.installId;
+    if (!writeMetadata(category, *metadata)) { failActiveInstall(tr("Could not save model metadata")); return; }
+    for (const auto &file : m_activeInstall->files) QFile::remove(file.partPath);
+    const auto id = categoryName(category) + ':' + m_activeInstall->fileName;
+    const auto installed = model(category, id);
+    const auto installId = m_activeInstall->request.installId;
     m_activeInstall.reset();
-    emit installFinished(installId, model);
+    if (installed) emit installFinished(installId, *installed);
+    else emit installFailed(installId, tr("Could not read the installed model"));
 }
 
 void ModelCatalog::failActiveInstall(const QString &errorMessage)
@@ -575,13 +545,17 @@ void ModelCatalog::failActiveInstall(const QString &errorMessage)
         reply->deleteLater();
     }
     if (m_activeInstall->partFile) m_activeInstall->partFile->close();
-    QFile::remove(m_activeInstall->partPath);
-    if (!m_activeInstall->companionPartPath.isEmpty()) QFile::remove(m_activeInstall->companionPartPath);
+    for (const auto &file : m_activeInstall->files) {
+        QFile::remove(file.partPath);
+        if (file.published) QFile::remove(file.finalPath);
+    }
     m_activeInstall.reset();
     emit installFailed(installId, errorMessage);
 }
 
 void ModelCatalog::emitProgress(ModelInstallState state, qint64 bytesDownloaded, std::optional<qint64> totalBytes)
 {
-    if (m_activeInstall) emit installProgress({m_activeInstall->request.installId, state, bytesDownloaded, totalBytes, m_activeInstall->downloadingCompanion ? QStringLiteral("companion") : QStringLiteral("primary")});
+    if (m_activeInstall && m_activeInstall->fileIndex < m_activeInstall->files.size())
+        emit installProgress({m_activeInstall->request.installId, state, bytesDownloaded, totalBytes,
+            m_activeInstall->files.at(m_activeInstall->fileIndex).role});
 }

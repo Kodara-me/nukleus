@@ -24,10 +24,10 @@ bool validUrl(const QString &text)
 }
 QString bytesText(qint64 bytes) { return QObject::tr("%1 MiB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1); }
 } // namespace
-AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &category, QWidget *parent)
-    : KiraUi::Dialog(parent), m_client(client)
+AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &category, QWidget *parent, const QString &existingModelId)
+    : KiraUi::Dialog(parent), m_client(client), m_existingModelId(existingModelId)
 {
-    setWindowTitle(tr("Add model"));
+    setWindowTitle(existingModelId.isEmpty() ? tr("Add model") : tr("Optional model files"));
     setWindowIcon(QIcon(QStringLiteral(":/manager/icons/manager-32.png")));
     setModal(true);
     resize(620, 610);
@@ -61,6 +61,20 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     form->addRow(tr("Category:"), m_category);
     form->addRow(tr("Model URL:"), m_url);
     form->addRow(m_companionLabel, m_companion);
+    m_clipL = new QLineEdit(content);
+    m_clipL->setObjectName("clipLUrl");
+    m_clipLLabel = new QLabel(tr("Optional CLIP-L URL:"), content);
+    form->addRow(m_clipLLabel, m_clipL);
+    m_clipG = new QLineEdit(content);
+    m_clipG->setObjectName("clipGUrl");
+    m_clipGLabel = new QLabel(tr("Optional CLIP-G URL:"), content);
+    form->addRow(m_clipGLabel, m_clipG);
+    m_modelType = new QComboBox(content);
+    m_modelType->setObjectName("modelType");
+    m_modelType->addItem(tr("Complete checkpoint"), "checkpoint");
+    m_modelType->addItem(tr("Standalone diffusion model (UNet)"), "diffusion");
+    m_modelTypeLabel = new QLabel(tr("Model contents:"), content);
+    form->addRow(m_modelTypeLabel, m_modelType);
     auto *heading = new QLabel(tr("Recommended options"), content);
     form->addRow(heading);
     m_options = new ModelOptionsWidget(content);
@@ -81,7 +95,7 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     auto *buttons = new QHBoxLayout;
     buttons->addStretch();
     m_cancel = new QPushButton(tr("Cancel"), body);
-    m_start = new KiraUi::PrimaryButton(tr("Start download"), body);
+    m_start = new KiraUi::PrimaryButton(existingModelId.isEmpty() ? tr("Start download") : tr("Apply optional files"), body);
     m_start->setObjectName("startDownload");
     m_start->setIcon(KiraUi::IconProvider::icon(KiraUi::Icon::Plus));
     buttons->addWidget(m_cancel);
@@ -90,12 +104,31 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     connect(m_category, &QComboBox::currentIndexChanged, this, &AddModelDialog::updateCategory);
     connect(m_url, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
     connect(m_companion, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
+    connect(m_clipL, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
+    connect(m_clipG, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
     connect(m_options, &ModelOptionsWidget::optionsChanged, this, &AddModelDialog::updateActions);
     connect(m_start, &QPushButton::clicked, this, &AddModelDialog::startInstall);
     connect(m_cancel, &QPushButton::clicked, this, &AddModelDialog::reject);
     connect(m_client, &ManagerServiceClient::installsChanged, this, &AddModelDialog::updateProgress);
     connect(m_client, &ManagerServiceClient::serviceStateChanged, this, [this] { updateActions(); });
     updateCategory();
+    if (!m_existingModelId.isEmpty()) {
+        m_url->hide();
+        form->labelForField(m_url)->hide();
+        heading->hide();
+        m_options->hide();
+        hint->hide();
+        for (const auto &model : m_client->models(category)) {
+            if (model.id != m_existingModelId) continue;
+            m_attachedFiles = model.companionFiles;
+            if (!model.companionFileName.isEmpty()) m_attachedFiles.insert(model.companionRole, model.companionFileName);
+            m_modelType->setCurrentIndex(m_modelType->findData(model.modelType));
+        }
+        const QList<QPair<QString, QLineEdit*>> fields{{"vae", m_companion}, {"clip-l", m_clipL}, {"clip-g", m_clipG}};
+        for (const auto &field : fields)
+            if (m_attachedFiles.contains(field.first)) field.second->setPlaceholderText(tr("Already attached: %1").arg(m_attachedFiles.value(field.first).toString().section('/', -1)));
+        updateActions();
+    }
 }
 void AddModelDialog::updateCategory()
 {
@@ -107,18 +140,28 @@ void AddModelDialog::updateCategory()
     m_companionLabel->setText(category == "llm-chat"     ? tr("Optional mmproj URL:")
                               : category == "ip-adapter" ? tr("Optional LoRA URL:")
                                                          : tr("Optional VAE URL:"));
+    const bool image = category == "image-generation" || category == "edition";
+    m_clipL->clear();
+    m_clipG->clear();
+    for (QWidget *widget : QList<QWidget*>{m_clipL, m_clipG, m_clipLLabel, m_clipGLabel, m_modelType, m_modelTypeLabel}) widget->setVisible(image);
+    m_modelType->setCurrentIndex(0);
     m_options->setOptions(category);
     updateActions();
 }
 void AddModelDialog::updateActions()
 {
-    m_category->setEnabled(!m_busy);
+    m_category->setEnabled(!m_busy && m_existingModelId.isEmpty());
     m_url->setEnabled(!m_busy);
-    m_companion->setEnabled(!m_busy);
+    m_companion->setEnabled(!m_busy && !m_attachedFiles.contains("vae"));
+    m_clipL->setEnabled(!m_busy && !m_attachedFiles.contains("clip-l"));
+    m_clipG->setEnabled(!m_busy && !m_attachedFiles.contains("clip-g"));
+    m_modelType->setEnabled(!m_busy);
     m_options->setEnabled(!m_busy);
-    m_start->setEnabled(!m_busy && m_client->isAuthenticated() && validUrl(m_url->text()) &&
+    m_start->setEnabled(!m_busy && m_client->isAuthenticated() && (!m_existingModelId.isEmpty() || validUrl(m_url->text())) &&
                         (m_category->currentData() == "upscaler" || m_companion->text().trimmed().isEmpty() ||
                          validUrl(m_companion->text())) &&
+                        (m_clipL->text().trimmed().isEmpty() || validUrl(m_clipL->text())) &&
+                        (m_clipG->text().trimmed().isEmpty() || validUrl(m_clipG->text())) &&
                         m_options->isValid());
     m_cancel->setEnabled(!m_canceling);
 }
@@ -130,8 +173,12 @@ void AddModelDialog::startInstall()
     m_progress->show();
     m_progress->setRange(0, 0);
     updateActions();
+    QJsonObject files;
+    if (!m_clipL->text().trimmed().isEmpty()) files.insert("clip-l", m_clipL->text().trimmed());
+    if (!m_clipG->text().trimmed().isEmpty()) files.insert("clip-g", m_clipG->text().trimmed());
     m_installId = m_client->installModel(m_category->currentData().toString(), QUrl(m_url->text().trimmed()),
-                                         QUrl(m_companion->text().trimmed()), m_options->options());
+        QUrl(m_companion->text().trimmed()), m_existingModelId.isEmpty() ? m_options->options() : QJsonObject{},
+        files, m_modelType->isHidden() ? QString("checkpoint") : m_modelType->currentData().toString(), m_existingModelId);
     if (m_installId.isEmpty())
     {
         m_busy = false;
@@ -178,7 +225,7 @@ void AddModelDialog::updateProgress()
         {
             m_status->setText(
                 tr("Downloading %1: %2%3")
-                    .arg(install.fileRole == "companion" ? tr("companion") : tr("model"),
+                    .arg(install.fileRole == "primary" ? tr("model") : install.fileRole == "companion" ? tr("companion") : install.fileRole,
                          bytesText(install.bytesDownloaded),
                          install.totalBytes ? tr(" / %1").arg(bytesText(*install.totalBytes)) : QString()));
             if (install.totalBytes && *install.totalBytes > 0)

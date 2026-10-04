@@ -34,11 +34,11 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
     Q_UNUSED(application)
     const QStringList positional = parser.positionalArguments();
     if (positional.isEmpty()) {
-        QTextStream(stderr) << "A command is required: list, add, or delete. Use --help for usage.\n";
+        QTextStream(stderr) << "A command is required: list, add, attach, or delete. Use --help for usage.\n";
         return 2;
     }
     const QString command = positional.first();
-    if (command != QStringLiteral("list") && command != QStringLiteral("add") && command != QStringLiteral("delete")) {
+    if (command != QStringLiteral("list") && command != QStringLiteral("add") && command != QStringLiteral("attach") && command != QStringLiteral("delete")) {
         QTextStream(stderr) << "Unknown command: " << command << ". Use --help for usage.\n";
         return 2;
     }
@@ -54,7 +54,17 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
         QTextStream(stderr) << "add requires --category <category>.\n";
         return 2;
     }
-    const QString category = parser.value(QStringLiteral("category"));
+    const QString category = command == "attach" ? positional.value(1).section(':', 0, 0) : parser.value("category");
+    if (command == "attach" && (positional.size() != 2 || (category != "image-generation" && category != "edition"))) {
+        QTextStream(stderr) << "attach requires an opaque image-generation or edition model ID.\n"; return 2;
+    }
+    if (parser.value("model-type") != "checkpoint" && parser.value("model-type") != "diffusion") {
+        QTextStream(stderr) << "--model-type must be checkpoint or diffusion.\n"; return 2;
+    }
+    if ((parser.isSet("clip-l") || parser.isSet("clip-g") || parser.isSet("model-type")) &&
+        ((command != "add" && command != "attach") || (category != "image-generation" && category != "edition"))) {
+        QTextStream(stderr) << "CLIP files and model type require an image model add or attach command.\n"; return 2;
+    }
     int companionCount = 0;
     for (const QString &option : {QStringLiteral("companion-lora"), QStringLiteral("mmproj"), QStringLiteral("vae")}) {
         if (!parser.isSet(option)) continue;
@@ -91,6 +101,7 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
     connectionTimeout.setInterval(10000);
     bool finished = false;
     int exitCode = 1;
+    QString installId;
     auto finish = [&](int code, const QString &message = QString()) {
         if (finished) return;
         finished = true;
@@ -122,7 +133,13 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
                     rows.append({category, QStringLiteral("(none)"), QStringLiteral("-"), QStringLiteral("-"), QStringLiteral("-")});
                     continue;
                 }
-                for (const ManagedModelInfo &model : models) rows.append({category, model.id, model.fileName, model.companionFileName.isEmpty() ? QStringLiteral("-") : model.companionFileName, sizeText(model.fileSize)});
+                for (const auto &model : models) {
+                    auto files = model.companionFiles;
+                    if (!model.companionFileName.isEmpty()) files.insert(model.companionRole, model.companionFileName);
+                    QStringList names;
+                    for (auto it = files.begin(); it != files.end(); ++it) names.append(it.key() + ":" + it.value().toString());
+                    rows.append({category, model.id, model.fileName, names.isEmpty() ? QString("-") : names.join(", "), sizeText(model.fileSize)});
+                }
             }
 
             int categoryWidth = QStringLiteral("Category").size();
@@ -158,11 +175,16 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
             }
             finish(0);
         });
-    } else if (command == QStringLiteral("add")) {
-        QString installId;
+    } else if (command == QStringLiteral("add") || command == "attach") {
         QObject::connect(&client, &ManagerServiceClient::serviceStateChanged, &loop, [&](const QString &state, const QString &) {
             if (state != QStringLiteral("connected") || !installId.isEmpty()) return;
-            installId = client.installModel(parser.value(QStringLiteral("category")), QUrl(argument), QUrl(parser.isSet(QStringLiteral("mmproj")) ? parser.value(QStringLiteral("mmproj")) : parser.isSet(QStringLiteral("vae")) ? parser.value(QStringLiteral("vae")) : parser.value(QStringLiteral("companion-lora"))));
+            QJsonObject files;
+            if (parser.isSet("clip-l")) files.insert("clip-l", parser.value("clip-l"));
+            if (parser.isSet("clip-g")) files.insert("clip-g", parser.value("clip-g"));
+            const auto companion = QUrl(parser.isSet("mmproj") ? parser.value("mmproj") : parser.isSet("vae") ? parser.value("vae") : parser.value("companion-lora"));
+            installId = client.installModel(category, command == "attach" ? QUrl{} : QUrl(argument),
+                companion, {}, files, command == "attach" && !parser.isSet("model-type") ? QString() : parser.value("model-type"),
+                command == "attach" ? argument : QString());
             if (installId.isEmpty()) finish(1, QStringLiteral("Could not start model installation."));
         });
         QObject::connect(&client, &ManagerServiceClient::installsChanged, &loop, [&] {
@@ -170,7 +192,11 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
             for (const ManagedInstall &install : client.installs()) {
                 if (install.installId != installId) continue;
                 if (install.state == ManagedInstallState::Downloading && install.totalBytes.has_value()) QTextStream(stdout) << "Downloading " << install.bytesDownloaded << " / " << *install.totalBytes << " bytes\r" << Qt::flush;
-                if (install.state == ManagedInstallState::Completed) { QTextStream(stdout) << "\nInstalled " << install.url.fileName() << '\n'; finish(0); }
+                if (install.state == ManagedInstallState::Completed) {
+                    QTextStream(stdout) << (command == "attach" ? "\nUpdated " : "\nInstalled ")
+                        << (command == "attach" ? argument : install.url.fileName()) << '\n';
+                    finish(0);
+                }
                 if (install.state == ManagedInstallState::Canceled) finish(1, QStringLiteral("Model installation canceled."));
                 if (install.state == ManagedInstallState::Failed) finish(1, install.message);
             }
@@ -207,14 +233,17 @@ int main(int argc, char *argv[])
     parser.addOption({QStringLiteral("category"), QStringLiteral("Model category for add."), QStringLiteral("category")});
     parser.addOption({QStringLiteral("companion-lora"), QStringLiteral("Optional companion LoRA URL for an IP-Adapter add."), QStringLiteral("url")});
     parser.addOption({QStringLiteral("mmproj"), QStringLiteral("Optional mmproj URL for an LLM add."), QStringLiteral("url")});
-    parser.addOption({QStringLiteral("vae"), QStringLiteral("Optional VAE URL for an Edition or Image-generation add."), QStringLiteral("url")});
+    parser.addOption({QStringLiteral("vae"), QStringLiteral("Optional VAE URL for an Edition or Image-generation add/attach."), QStringLiteral("url")});
+    parser.addOption({"clip-l", "Optional CLIP-L URL for image add/attach.", "url"});
+    parser.addOption({"clip-g", "Optional CLIP-G URL for image add/attach.", "url"});
+    parser.addOption({"model-type", "Model contents: checkpoint or diffusion (standalone UNet).", "type", "checkpoint"});
     parser.addOption({QStringLiteral("yes"), QStringLiteral("Confirm deletion without prompting.")});
-    parser.addPositionalArgument(QStringLiteral("command"), QStringLiteral("list, add, or delete."));
-    parser.addPositionalArgument(QStringLiteral("argument"), QStringLiteral("URL for add or opaque ID for delete."), QStringLiteral("[url-or-id]"));
+    parser.addPositionalArgument(QStringLiteral("command"), QStringLiteral("list, add, attach, or delete."));
+    parser.addPositionalArgument(QStringLiteral("argument"), QStringLiteral("URL for add or opaque ID for attach/delete."), QStringLiteral("[url-or-id]"));
     parser.process(*application);
 
     if (guiRequested) {
-        if (!parser.positionalArguments().isEmpty() || parser.isSet(QStringLiteral("category")) || parser.isSet(QStringLiteral("companion-lora")) || parser.isSet(QStringLiteral("mmproj")) || parser.isSet(QStringLiteral("vae")) || parser.isSet(QStringLiteral("yes"))) {
+        if (!parser.positionalArguments().isEmpty() || parser.isSet(QStringLiteral("category")) || parser.isSet(QStringLiteral("companion-lora")) || parser.isSet(QStringLiteral("mmproj")) || parser.isSet(QStringLiteral("vae")) || parser.isSet(QStringLiteral("yes")) || parser.isSet("clip-l") || parser.isSet("clip-g") || parser.isSet("model-type")) {
             QTextStream(stderr) << "--gui cannot be combined with a CLI command.\n";
             return 2;
         }

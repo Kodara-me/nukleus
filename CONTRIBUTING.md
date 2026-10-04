@@ -28,7 +28,11 @@ protocol behavior; applications own settings, files, and UI messages. Keep
 protocol v3 compatible. Model management includes the `ip-adapter` category
 and optional paired companion metadata (IP-Adapter LoRA, LLM mmproj, or Image-generation/Edition VAE).
 The SDK install method accepts an optional companion URL instead of a SHA-256
-checksum. Download checksums are no longer supported; runtime invocation is unchanged.
+checksum. Download checksums are no longer supported. Image models also accept
+`companionUrls` (CLIP-L/CLIP-G/VAE), `modelType` (`checkpoint` or `diffusion`),
+and an existing opaque `id` to attach files without downloading the primary again.
+The GUI exposes this via Optional files; the CLI exposes `attach` with
+`--model-type`, `--clip-l`, `--clip-g`, and `--vae`.
 
 ## Shared manager UI
 
@@ -48,11 +52,24 @@ modal. Shared defaults and strict wire validation live in the Protocol target's
 image job arguments or enable new execution categories.
 
 Category-local `metadata.json` accepts legacy companion strings and new objects
-containing `companionFileName` and/or `recommendedOptions`. Writes preserve
+containing `companionFileName`, `companionFiles`, `modelType`, and/or
+`recommendedOptions`. Role-specific files live in
+`companions/<primary filename>/<role>/<companion filename>`; old single-companion
+paths remain valid. Image roles are `clip-l`, `clip-g`, and `vae`. Missing modelType
+means a complete checkpoint; choose diffusion explicitly for standalone UNets.
+File downloads stage before publication; failures/cancellation preserve an existing
+primary and its recommendations, and remove new partial files. Referenced companion
+files must be readable and within the primary’s companion directory. Writes preserve
 untouched entries and use QSaveFile. Invalid/unreadable JSON blocks mutation
 instead of overwriting metadata. Do not edit users' installed files for tests.
 
 The tests create disposable model stores and local HTTP/WebSocket servers.
+They cover modular execution flags, companion attachment/persistence/deletion,
+download rollback, old metadata, SDK requests and the manager’s optional-file dialog.
+The systemd installer test requires Linux (GNU stat/script); on macOS run the full
+suite to identify platform limits, then use
+`ctest --test-dir build --output-on-failure -E '^kira-service-installer-test$'`
+for the portable checks.
 Run them with local networking permitted. The unavailable-manager CLI check is
 skipped if a real service already responds on port 9384. UI tests isolate
 QSettings and use the offscreen platform. For visual review:

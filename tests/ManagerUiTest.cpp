@@ -104,6 +104,38 @@ class ManagerUiTest final : public QObject
         resolution->setCurrentIndex(7);
         QCOMPARE(widget.options().value("height").toInt(), 2048);
     }
+    void attachesOptionalFilesToExistingModel()
+    {
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.connectToService();
+        QTRY_VERIFY(client.modelListAvailable());
+        AddModelDialog dialog(&client, "image-generation", nullptr, "image-generation:test.gguf");
+        dialog.show();
+        QVERIFY(!dialog.findChild<QLineEdit*>("modelUrl")->isVisible());
+        QVERIFY(!dialog.findChild<QLineEdit*>("companionUrl")->isEnabled());
+        dialog.findChild<QLineEdit*>("clipLUrl")->setText("https://example.test/clip_l.safetensors");
+        dialog.findChild<QLineEdit*>("clipGUrl")->setText("https://example.test/clip_g.safetensors");
+        dialog.findChild<QComboBox*>("modelType")->setCurrentIndex(1);
+        if (qEnvironmentVariableIsSet("KIRA_MANAGER_SCREENSHOT_DIR")) {
+            const QDir directory(qEnvironmentVariable("KIRA_MANAGER_SCREENSHOT_DIR"));
+            QVERIFY(QDir().mkpath(directory.path()));
+            QVERIFY(dialog.grab().save(directory.filePath("optional-model-files.png")));
+        }
+        auto* start = dialog.findChild<QPushButton*>("startDownload");
+        QVERIFY(start->isEnabled());
+        m_messages.clear();
+        start->click();
+        QTRY_VERIFY(!m_messages.isEmpty());
+        const auto request = m_messages.last();
+        QCOMPARE(request.value("id").toString(), QString("image-generation:test.gguf"));
+        QCOMPARE(request.value("modelType").toString(), QString("diffusion"));
+        QCOMPARE(request.value("companionUrls").toObject().size(), 2);
+        QVERIFY(!request.contains("recommendedOptions"));
+        QVERIFY(request.value("url").toString().isEmpty());
+        QVERIFY(!start->isEnabled());
+        dialog.close();
+        QTRY_VERIFY(!dialog.isVisible());
+    }
     void landscapeTreeAndSavedConfiguration()
     {
         ManagerServiceClient client(nullptr, m_server.serverPort());

@@ -30,6 +30,7 @@ class ManageModelsWindow final : public KiraUi::MainWindow
     void selectionChanged();
     void updateActions();
     void addModel();
+    void attachFiles();
     void deleteSelectedModel();
     void saveOptions();
     bool guardChanges(std::function<void()> continuation);
@@ -41,6 +42,7 @@ class ManageModelsWindow final : public KiraUi::MainWindow
     QSplitter *m_splitter;
     ModelOptionsWidget *m_options;
     QPushButton *m_add;
+    QPushButton *m_attach;
     QPushButton *m_delete;
     QPushButton *m_save;
     QString m_selectedId;

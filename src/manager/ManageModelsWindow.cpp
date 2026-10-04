@@ -68,6 +68,9 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     actions->addWidget(m_add);
     actions->addWidget(m_delete);
     left->addLayout(actions);
+    m_attach = new QPushButton(tr("Optional files…"), library);
+    m_attach->setObjectName("attachModelFiles");
+    left->addWidget(m_attach);
     auto *configuration = new KiraUi::Panel(m_splitter);
     auto *right = new QVBoxLayout(configuration);
     right->addWidget(new QLabel(tr("Model configuration"), configuration));
@@ -105,6 +108,7 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
                 updateActions();
             });
     connect(m_add, &QPushButton::clicked, this, &ManageModelsWindow::addModel);
+    connect(m_attach, &QPushButton::clicked, this, &ManageModelsWindow::attachFiles);
     connect(m_delete, &QPushButton::clicked, this, &ManageModelsWindow::deleteSelectedModel);
     connect(m_save, &QPushButton::clicked, this, &ManageModelsWindow::saveOptions);
     connect(m_client, &ManagerServiceClient::modelsChanged, this, &ManageModelsWindow::populateModels);
@@ -174,10 +178,10 @@ void ManageModelsWindow::populateModels()
             item->setData(category.first, Qt::UserRole + 2);
             item->setToolTip(model.fileName);
             branch->appendRow(item);
-            if (!model.companionFileName.isEmpty())
-            {
-                auto *companion = new QStandardItem(model.companionRole + ": " +
-                                                    QFileInfo(model.companionFileName).fileName());
+            auto files = model.companionFiles;
+            if (!model.companionFileName.isEmpty()) files.insert(model.companionRole, model.companionFileName);
+            for (auto it = files.begin(); it != files.end(); ++it) {
+                auto *companion = new QStandardItem(it.key() + ": " + QFileInfo(it.value().toString()).fileName());
                 companion->setEditable(false);
                 companion->setData(model.id, Qt::UserRole + 1);
                 companion->setData(category.first, Qt::UserRole + 2);
@@ -269,6 +273,8 @@ void ManageModelsWindow::updateActions()
     m_tree->setEnabled(!m_saving);
     m_options->setEnabled(m_client->isAuthenticated() && !m_saving);
     m_add->setEnabled(m_client->isAuthenticated() && !m_saving);
+    m_attach->setEnabled(m_client->isAuthenticated() && !m_saving &&
+        (m_selectedId.startsWith("image-generation:") || m_selectedId.startsWith("edition:")));
     m_delete->setEnabled(m_client->modelListAvailable() && m_client->isAuthenticated() && !m_saving &&
                          !m_selectedId.isEmpty());
     m_save->setEnabled(m_client->modelListAvailable() && m_client->isAuthenticated() && !m_saving &&
@@ -304,12 +310,25 @@ void ManageModelsWindow::addModel()
     if (guardChanges(open))
         open();
 }
+void ManageModelsWindow::attachFiles()
+{
+    const auto open = [this] {
+        AddModelDialog dialog(m_client, m_selectedId.section(':', 0, 0), this, m_selectedId);
+        connect(&dialog, &AddModelDialog::modelInstalled, this, [this](const QString &id) {
+            m_client->requestModels();
+            selectModel(id);
+        });
+        dialog.exec();
+    };
+    if (guardChanges(open)) open();
+}
+
 void ManageModelsWindow::deleteSelectedModel()
 {
     const auto remove = [this]
     {
         if (QMessageBox::question(this, tr("Delete model"),
-                                  tr("Delete this model and its companion? This cannot be undone."),
+                                  tr("Delete this model and its companion files? This cannot be undone."),
                                   QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes)
             m_client->deleteModel(m_selectedId);
     };

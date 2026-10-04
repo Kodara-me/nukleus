@@ -79,6 +79,8 @@ private slots:
     void installsIpAdapterPair();
     void managesEditionModels();
     void installsOptionalCompanions();
+    void attachesModularCompanionsWithoutReplacingModel();
+    void attachesFilesOverProtocol();
     void rollsBackFailedCompanion();
     void acceptsExternalModelUrls();
     void rejectsInvalidModelInstall();
@@ -133,8 +135,10 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QVERIFY(executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
     const QString root = directory.filePath("models");
     const QString companion = "companions/model.gguf/vae with space.safetensors";
+    const QString clipL = "companions/model.gguf/clip_l.safetensors";
+    const QString clipG = "companions/model.gguf/clip_g.safetensors";
     QVERIFY(QDir().mkpath(QDir(root).filePath("companions/model.gguf")));
-    for (const QString &name : {QString("model.gguf"), QString("plain.gguf"), companion})
+    for (const QString &name : {QString("model.gguf"), QString("plain.gguf"), companion, clipL, clipG})
     {
         QFile file(QDir(root).filePath(name));
         QVERIFY(file.open(QIODevice::WriteOnly));
@@ -255,6 +259,24 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(args.value(args.indexOf("--cfg-scale") + 1), QString("5.75"));
     QCOMPARE(args.value(args.indexOf("--steps") + 1), QString("37"));
     QCOMPARE(args.value(args.indexOf("--vae") + 1), QDir(root).filePath(companion));
+    QVERIFY(args.contains("--model"));
+    QVERIFY(!args.contains("--diffusion-model"));
+    // Associate modular files without changing the caller's generation options.
+    QVERIFY(metadata.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    metadata.write(QJsonDocument(QJsonObject{{"model.gguf", QJsonObject{
+        {"modelType", "diffusion"}, {"companionFiles", QJsonObject{
+            {"vae", companion}, {"clip-l", clipL}, {"clip-g", clipG}}}}}}).toJson());
+    metadata.close();
+    messages.clear();
+    send("modular", valid);
+    QTRY_VERIFY(terminal("modular"));
+    QTRY_COMPARE(images.count(), 2);
+    args = arguments();
+    QVERIFY(!args.contains("--model"));
+    QCOMPARE(args.value(args.indexOf("--diffusion-model") + 1), QDir(root).filePath("model.gguf"));
+    QCOMPARE(args.value(args.indexOf("--clip_l") + 1), QDir(root).filePath(clipL));
+    QCOMPARE(args.value(args.indexOf("--clip_g") + 1), QDir(root).filePath(clipG));
+    QCOMPARE(args.value(args.indexOf("--vae") + 1), QDir(root).filePath(companion));
     QJsonObject explicitOptions = valid;
     explicitOptions.insert("sampler", "dpm++2m");
     explicitOptions.insert("scheduler", "karras");
@@ -268,7 +290,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QTRY_VERIFY(!messages.isEmpty() && messages.last().value("type") == "upload-required");
     socket.sendBinaryMessage(QByteArray("fixture input"));
     QTRY_VERIFY(terminal("explicit"));
-    QTRY_COMPARE(images.count(), 2);
+    QTRY_COMPARE(images.count(), 3);
     args = arguments();
     QCOMPARE(args.value(args.indexOf("--sampling-method") + 1), QString("dpm++2m"));
     QCOMPARE(args.value(args.indexOf("--scheduler") + 1), QString("karras"));
@@ -285,7 +307,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     messages.clear();
     send("minimal", minimal);
     QTRY_VERIFY(terminal("minimal"));
-    QTRY_COMPARE(images.count(), 3);
+    QTRY_COMPARE(images.count(), 4);
     args = arguments();
     QVERIFY(!args.contains("--vae"));
     QVERIFY(!args.contains("--sampling-method"));
@@ -293,7 +315,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(args.value(args.indexOf("--seed") + 1), QString("-1"));
     for (const auto &message : messages)
         QVERIFY(!QJsonDocument(message).toJson().contains(root.toUtf8()));
-    int completed = 3;
+    int completed = 4;
     for (double cfg : {0.0, 100.0})
     {
         auto boundary = valid;
@@ -563,6 +585,124 @@ void ServiceTest::installsIpAdapterPair()
     QVERIFY(catalog.remove(models.first().id, &error));
     QVERIFY(!QFileInfo::exists(primaryPath));
     QVERIFY(!QFileInfo::exists(companionPath));
+}
+
+void ServiceTest::attachesModularCompanionsWithoutReplacingModel()
+{
+    TestHttpServer server("companion bytes");
+    QVERIFY(server.start());
+    QTemporaryDir directory;
+    QFile primary(directory.filePath("existing.gguf"));
+    QVERIFY(primary.open(QIODevice::WriteOnly));
+    primary.write("original model");
+    primary.close();
+    ModelCatalog catalog(directory.path(), true);
+    ModelInstallRequest request;
+    request.installId = "attach";
+    request.existingModelId = "image-generation:existing.gguf";
+    request.modelType = "diffusion";
+    request.companionUrls = {{"clip-l", server.url("clip_l.safetensors").toString()},
+        {"clip-g", server.url("clip_g.safetensors").toString()},
+        {"vae", server.url("vae.safetensors").toString()}};
+    QString error;
+    QSignalSpy done(&catalog, &ModelCatalog::installFinished);
+    QVERIFY2(catalog.install(request, &error), qPrintable(error));
+    QTRY_COMPARE(done.count(), 1);
+    ModelCatalog restored(directory.path(), true);
+    const auto model = restored.modelById(request.existingModelId);
+    QVERIFY(model);
+    QCOMPARE(model->modelType, QString("diffusion"));
+    QCOMPARE(model->companionFiles.size(), 3);
+    QVERIFY(primary.open(QIODevice::ReadOnly));
+    QCOMPARE(primary.readAll(), QByteArray("original model"));
+    primary.close();
+    request.installId = "duplicate";
+    QVERIFY(!restored.install(request, &error));
+    request.companionUrls = {{"unknown", server.url().toString()}};
+    QVERIFY(!restored.install(request, &error));
+    request.companionUrls = {{"clip-l", true}};
+    QVERIFY(!restored.install(request, &error));
+    const auto options = KiraService::Protocol::defaultModelOptions("image-generation");
+    QVERIFY(restored.configure(request.existingModelId, options, &error));
+    QCOMPARE(restored.modelById(request.existingModelId)->companionFiles, model->companionFiles);
+    QVERIFY(restored.remove(request.existingModelId, &error));
+    for (const auto &name : model->companionFiles)
+        QVERIFY(!QFileInfo::exists(directory.filePath(name.toString())));
+
+    // Failure during a later companion leaves the existing primary untouched.
+    QVERIFY(primary.open(QIODevice::WriteOnly));
+    primary.write("original model");
+    primary.close();
+    request.installId = "failed-attach";
+    request.companionUrls = {{"clip-l", server.url("clip_l.safetensors").toString()},
+        {"clip-g", server.url("missing.safetensors").toString()}};
+    QSignalSpy failed(&restored, &ModelCatalog::installFailed);
+    QVERIFY(restored.install(request, &error));
+    QTRY_COMPARE(failed.count(), 1);
+    QVERIFY(primary.exists());
+    QVERIFY(restored.modelById(request.existingModelId)->companionFiles.isEmpty());
+    QVERIFY(!QFileInfo::exists(directory.filePath("companions/existing.gguf/clip-l/clip_l.safetensors.part")));
+    QVERIFY(!QFileInfo::exists(directory.filePath("companions/existing.gguf/clip-l/clip_l.safetensors")));
+    request.installId = "cancel-attach";
+    request.companionUrls = {{"clip-g", server.url("clip_g.safetensors").toString()},
+        {"clip-l", server.url("slow.gguf").toString()}};
+    QSignalSpy progress(&restored, &ModelCatalog::installProgress);
+    QSignalSpy canceled(&restored, &ModelCatalog::installCanceled);
+    QVERIFY(restored.install(request, &error));
+    const auto secondFileStarted = [&] {
+        for (const auto &event : progress)
+            if (event.first().value<ModelInstallProgress>().fileRole == "clip-l") return true;
+        return false;
+    };
+    QTRY_VERIFY(secondFileStarted());
+    restored.cancel(request.installId);
+    QCOMPARE(canceled.count(), 1);
+    QVERIFY(primary.exists());
+    QVERIFY(restored.modelById(request.existingModelId)->companionFiles.isEmpty());
+    QVERIFY(!QFileInfo::exists(directory.filePath("companions/existing.gguf/clip-g/clip_g.safetensors.part")));
+    QVERIFY(!QFileInfo::exists(directory.filePath("companions/existing.gguf/clip-l/slow.gguf.part")));
+}
+
+void ServiceTest::attachesFilesOverProtocol()
+{
+    QTemporaryDir directory;
+    QFile primary(directory.filePath("existing.gguf"));
+    QVERIFY(primary.open(QIODevice::WriteOnly));
+    primary.write("original model");
+    primary.close();
+    KiraServiceConfiguration configuration;
+    configuration.port = 0;
+    configuration.modelRootPath = directory.path();
+    KiraServiceDaemon service(configuration);
+    QString error;
+    QVERIFY(service.start(&error));
+    QWebSocket socket;
+    QList<QJsonObject> messages;
+    connect(&socket, &QWebSocket::textMessageReceived, this, [&](const QString &text) {
+        messages.append(QJsonDocument::fromJson(text.toUtf8()).object());
+    });
+    socket.open(QUrl(QString("ws://127.0.0.1:%1").arg(service.serverPort())));
+    QTRY_COMPARE(socket.state(), QAbstractSocket::ConnectedState);
+    socket.sendTextMessage("{\"type\":\"authenticate\",\"version\":3}");
+    QTRY_VERIFY(messages.size() >= 2);
+    messages.clear();
+    socket.sendTextMessage("{\"type\":\"models.install\",\"installId\":\"attach\",\"category\":\"image-generation\",\"id\":\"image-generation:existing.gguf\",\"modelType\":\"diffusion\",\"companionUrls\":{}}");
+    QTRY_VERIFY(messages.size() >= 2);
+    QCOMPARE(messages.first().value("type").toString(), QString("models.install.accepted"));
+    QCOMPARE(messages.last().value("type").toString(), QString("models.install.completed"));
+    QCOMPARE(messages.last().value("model").toObject().value("modelType").toString(), QString("diffusion"));
+    for (const auto &message : messages)
+        QVERIFY(!QJsonDocument(message).toJson().contains(directory.path().toUtf8()));
+    ModelCatalog catalog(directory.path(), true);
+    QCOMPARE(catalog.modelById("image-generation:existing.gguf")->modelType, QString("diffusion"));
+    messages.clear();
+    socket.sendTextMessage("{\"type\":\"models.install\",\"installId\":\"preserve-type\",\"category\":\"image-generation\",\"id\":\"image-generation:existing.gguf\"}");
+    QTRY_VERIFY(messages.size() >= 2);
+    QCOMPARE(messages.last().value("model").toObject().value("modelType").toString(), QString("diffusion"));
+    messages.clear();
+    socket.sendTextMessage("{\"type\":\"models.install\",\"installId\":\"bad\",\"category\":\"image-generation\",\"id\":\"image-generation:existing.gguf\",\"companionUrls\":true}");
+    QTRY_VERIFY(!messages.isEmpty());
+    QCOMPARE(messages.last().value("code").toString(), QString("invalid-model-install"));
 }
 
 void ServiceTest::installsOptionalCompanions()

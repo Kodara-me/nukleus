@@ -58,7 +58,18 @@ of 256), steps, CFG scale, sampler, scheduler, and Clip Skip. LLM exposes
 temperature, top-p, context length, and maximum tokens; Upscaler exposes tile
 size (execution remains fixed at 2×); IP-Adapter exposes strength. Existing
 models without recommendations remain usable; proposed defaults are saved only
-on an explicit Save. Canvas does not apply these recommendations yet.
+on an explicit Save. Canvas uses the selected model’s recommendations for unedited generation controls.
+
+Image models can be complete checkpoints or standalone diffusion models (for
+example, a split UNet GGUF). The add dialog includes **Model contents** plus
+optional CLIP-L, CLIP-G and VAE URLs. Select an installed image model and choose
+**Optional files…** to attach missing files without downloading its primary again.
+Leave unused URLs empty; complete checkpoints keep working without extra files.
+Already attached roles cannot be overwritten. Choose compatible components from
+the model publisher; standalone SDXL UNets normally need both CLIP encoders and a VAE.
+The service passes only attached files to `sd-cli`: `--clip_l`, `--clip_g`, and
+`--vae`. Standalone models use `--diffusion-model`; complete checkpoints use
+`--model`. See the [upstream CLI options](https://github.com/leejet/stable-diffusion.cpp/blob/master/examples/common/common.cpp).
 
 The manager also provides local CLI operations:
 
@@ -68,6 +79,7 @@ kira-service-manager add https://huggingface.co/owner/repo/resolve/main/model.gg
 kira-service-manager add https://huggingface.co/h94/IP-Adapter-FaceID/resolve/main/ip-adapter-faceid-plusv2_sdxl.bin?utm_source=chatgpt.com --category ip-adapter --companion-lora 'https://huggingface.co/h94/IP-Adapter-FaceID/resolve/main/ip-adapter-faceid-plusv2_sdxl_lora.safetensors?utm_source=chatgpt.com'
 kira-service-manager add https://example.com/model.gguf --category llm-chat --mmproj https://example.com/mmproj.gguf
 kira-service-manager add https://example.com/edit.safetensors --category edition --vae https://example.com/vae.safetensors
+kira-service-manager attach image-generation:existing.gguf --model-type diffusion --clip-l https://example.com/clip_l.safetensors --clip-g https://example.com/clip_g.safetensors --vae https://example.com/vae.safetensors
 kira-service-manager delete upscaler:model.gguf
 ```
 
@@ -77,7 +89,7 @@ Use `--help` for all options. CLI and GUI manager connections are local-only and
 
 The `edition` category supports installing, listing, and deleting image-editing models in the manager GUI and CLI (`add <url> --category edition`). It accepts `.safetensors`, `.ckpt`, and `.gguf` files. Editing jobs are not implemented yet.
 
-Service models live in `$XDG_DATA_HOME/kira-service/models/`: image-generation files in `models/`, edition models for image editing in `models/edition/`, upscalers in `models/upscale/`, LLM chat files in `models/llm/`, and IP-Adapters in `models/ip-adapter/`. Optional companion files are kept under each category's private `companions/<primary filename>/` directory and linked through persistent category-local metadata: mmproj for LLM-chat, VAE for Image-generation and Edition, and LoRA for IP-Adapter. The manager downloads and installs each pair together; failed or canceled downloads leave no usable pair, and deleting the primary also removes its companion. Model listings expose `companionFileName` and `companionRole` (`mmproj`, `vae`, or `lora`) without exposing service paths. The manager accepts HTTPS model-file URLs and never overwrites an installed filename. SHA-256 fields and download verification are no longer supported. Primary IP-Adapter files support `.bin`, `.safetensors`, `.ckpt`, and `.gguf`; mmproj files require `.gguf`, while VAE and LoRA files accept `.safetensors`, `.ckpt`, or `.gguf`. Query-bearing URLs are accepted and Hugging Face `blob` links are normalized to `resolve` URLs. The add-model modal shows the optional companion URL field appropriate to the selected category. Image-generation VAE companions are passed to sd-cli with --vae; mmproj and LoRA remain catalog attachments.
+Service models live in `$XDG_DATA_HOME/kira-service/models/`: image-generation files in `models/`, edition models for image editing in `models/edition/`, upscalers in `models/upscale/`, LLM chat files in `models/llm/`, and IP-Adapters in `models/ip-adapter/`. Optional companion files are kept under each category's private `companions/<primary filename>/` directory and linked through persistent category-local metadata: mmproj for LLM-chat, VAE for Image-generation and Edition, and LoRA for IP-Adapter. The manager downloads and installs the primary and its optional files together; failed or canceled downloads leave no usable pair, and deleting the primary also removes its companion. Model listings expose `companionFileName` and `companionRole` (`mmproj`, `vae`, or `lora`) without exposing service paths. The manager accepts HTTPS model-file URLs and never overwrites an installed filename. SHA-256 fields and download verification are no longer supported. Primary IP-Adapter files support `.bin`, `.safetensors`, `.ckpt`, and `.gguf`; mmproj files require `.gguf`, while VAE and LoRA files accept `.safetensors`, `.ckpt`, or `.gguf`. Query-bearing URLs are accepted and Hugging Face `blob` links are normalized to `resolve` URLs. The add-model modal shows the optional companion URL field appropriate to the selected category. Image-generation CLIP-L, CLIP-G and VAE companions are passed to sd-cli; mmproj and LoRA remain catalog attachments. Legacy single-companion installations remain supported. New companionFiles metadata maps roles to category-relative filenames, and modelType defaults to checkpoint when absent.
 
 The Linux installer moves legacy models from `$XDG_DATA_HOME/kira-canvas/models/` during an upgrade. It aborts without changing either directory if both model roots already exist.
 

@@ -28,7 +28,7 @@ public:
                 if (type == QStringLiteral("authenticate")) {
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"authenticated\"}"));
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\",\"image.upscale\"]}"));
-                    socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list.result\",\"categories\":[{\"category\":\"image-generation\",\"models\":[{\"id\":\"image-generation:test.safetensors\",\"name\":\"Test\",\"fileName\":\"test.safetensors\",\"bytes\":1,\"companionFileName\":\"companions/test.safetensors/vae.safetensors\",\"companionRole\":\"vae\"}]},{\"category\":\"edition\",\"models\":[{\"id\":\"edition:edit.safetensors\",\"name\":\"Edit\",\"fileName\":\"edit.safetensors\",\"bytes\":5,\"companionFileName\":\"companions/edit.safetensors/vae.gguf\",\"companionRole\":\"vae\"}]},{\"category\":\"upscaler\",\"models\":[{\"id\":\"upscaler:test.gguf\",\"name\":\"Test 2x\",\"recommendedOptions\":{\"tileSize\":128},\"fileName\":\"test.gguf\",\"bytes\":2}]},{\"category\":\"llm-chat\",\"models\":[{\"id\":\"llm-chat:test.gguf\",\"name\":\"Test LLM\",\"fileName\":\"llm.gguf\",\"bytes\":3,\"companionFileName\":\"companions/llm.gguf/mmproj.gguf\",\"companionRole\":\"mmproj\"}]},{\"category\":\"ip-adapter\",\"models\":[{\"id\":\"ip-adapter:test.bin\",\"name\":\"Test Adapter\",\"fileName\":\"test.bin\",\"bytes\":4,\"companionFileName\":\"companions/test.bin/test-lora.safetensors\"}]}]}"));
+                    socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list.result\",\"categories\":[{\"category\":\"image-generation\",\"models\":[{\"id\":\"image-generation:test.safetensors\",\"name\":\"Test\",\"fileName\":\"test.safetensors\",\"bytes\":1,\"modelType\":\"diffusion\",\"companionFiles\":{\"clip-l\":\"companions/test.safetensors/clip-l/clip_l.safetensors\"},\"companionFileName\":\"companions/test.safetensors/vae.safetensors\",\"companionRole\":\"vae\"}]},{\"category\":\"edition\",\"models\":[{\"id\":\"edition:edit.safetensors\",\"name\":\"Edit\",\"fileName\":\"edit.safetensors\",\"bytes\":5,\"companionFileName\":\"companions/edit.safetensors/vae.gguf\",\"companionRole\":\"vae\"}]},{\"category\":\"upscaler\",\"models\":[{\"id\":\"upscaler:test.gguf\",\"name\":\"Test 2x\",\"recommendedOptions\":{\"tileSize\":128},\"fileName\":\"test.gguf\",\"bytes\":2}]},{\"category\":\"llm-chat\",\"models\":[{\"id\":\"llm-chat:test.gguf\",\"name\":\"Test LLM\",\"fileName\":\"llm.gguf\",\"bytes\":3,\"companionFileName\":\"companions/llm.gguf/mmproj.gguf\",\"companionRole\":\"mmproj\"}]},{\"category\":\"ip-adapter\",\"models\":[{\"id\":\"ip-adapter:test.bin\",\"name\":\"Test Adapter\",\"fileName\":\"test.bin\",\"bytes\":4,\"companionFileName\":\"companions/test.bin/test-lora.safetensors\"}]}]}"));
                 } else if (type == "models.configure") {
                     const QJsonObject reply{{"type", "models.configure.completed"}, {"id", message.value("id")}, {"model", QJsonObject{{"recommendedOptions", message.value("recommendedOptions")}}}};
                     socket->sendTextMessage(QString::fromUtf8(QJsonDocument(reply).toJson(QJsonDocument::Compact)));
@@ -85,6 +85,7 @@ private slots:
     void submitsBinaryInputAndReturnsBinaryOutput();
     void supportsMultipleJobs();
     void installsModelWithCompanion();
+    void installsModularCompanionsForExistingModel();
     void reportsConnectionFailure();
 };
 
@@ -120,6 +121,8 @@ void ServiceSdkTest::authenticatesAndDiscoversModels()
     QCOMPARE(editionModels.size(), 1);
     QCOMPARE(editionModels.first().companionRole, QStringLiteral("vae"));
     QCOMPARE(client.models(KiraService::ModelCategory::LlmChat).first().companionRole, QStringLiteral("mmproj"));
+    QCOMPARE(client.models(KiraService::ModelCategory::ImageGeneration).first().modelType, QString("diffusion"));
+    QCOMPARE(client.models(KiraService::ModelCategory::ImageGeneration).first().companionFiles.value("clip-l").toString(), QString("companions/test.safetensors/clip-l/clip_l.safetensors"));
     QCOMPARE(client.models(KiraService::ModelCategory::ImageGeneration).first().companionFileName, QStringLiteral("companions/test.safetensors/vae.safetensors"));
     QCOMPARE(editionModels.first().id, QStringLiteral("edition:edit.safetensors"));
     QCOMPARE(editionModels.first().category, KiraService::ModelCategory::Edition);
@@ -161,6 +164,29 @@ void ServiceSdkTest::installsModelWithCompanion()
     QCOMPARE(message.value(QStringLiteral("companionUrl")).toString(), companion.toString());
     QVERIFY(!message.contains(QStringLiteral("sha256")));
     QCOMPARE(client.installs().last().companionUrl, companion);
+}
+
+void ServiceSdkTest::installsModularCompanionsForExistingModel()
+{
+    FakeSdkService service;
+    QVERIFY(service.start());
+    KiraService::ServiceClient client;
+    client.setConfiguration(service.endpoint(), {});
+    client.connectToService();
+    QTRY_VERIFY(client.modelListAvailable());
+    const QJsonObject files{{"clip-l", "https://example.test/clip_l.safetensors"},
+        {"clip-g", "https://example.test/clip_g.safetensors"}};
+    const auto installId = client.installModel(KiraService::ModelCategory::ImageGeneration, {}, {}, {}, files,
+        "diffusion", "image-generation:test.safetensors");
+    QVERIFY(!installId.isEmpty());
+    QTRY_VERIFY(std::any_of(service.messages().cbegin(), service.messages().cend(), [&](const auto &message) {
+        return message.value("installId").toString() == installId;
+    }));
+    const auto message = service.messages().last();
+    QCOMPARE(message.value("companionUrls").toObject(), files);
+    QCOMPARE(message.value("modelType").toString(), QString("diffusion"));
+    QCOMPARE(message.value("id").toString(), QString("image-generation:test.safetensors"));
+    QVERIFY(!message.contains("recommendedOptions"));
 }
 
 void ServiceSdkTest::supportsMultipleJobs()

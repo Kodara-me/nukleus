@@ -68,6 +68,9 @@ struct KiraServiceDaemon::Submission
     QJsonObject options;
     QString modelPath;
     QString vaePath;
+    QString clipLPath;
+    QString clipGPath;
+    bool diffusionModel = false;
     QPointer<QWebSocket> client;
 };
 
@@ -78,6 +81,9 @@ struct KiraServiceDaemon::Job
     QJsonObject options;
     QString modelPath;
     QString vaePath;
+    QString clipLPath;
+    QString clipGPath;
+    bool diffusionModel = false;
     QPointer<QWebSocket> client;
     std::unique_ptr<QTemporaryDir> directory = std::make_unique<QTemporaryDir>();
     QString inputPath;
@@ -105,6 +111,8 @@ KiraServiceDaemon::KiraServiceDaemon(KiraServiceConfiguration configuration, QOb
         QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
                                 {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
         if (!model.recommendedOptions.isEmpty()) modelObject.insert("recommendedOptions", model.recommendedOptions);
+        modelObject.insert("companionFiles", model.companionFiles);
+        modelObject.insert("modelType", model.modelType);
         if (!model.companionFileName.isEmpty()) {
             modelObject.insert(QStringLiteral("companionFileName"), model.companionFileName);
             modelObject.insert(QStringLiteral("companionRole"), model.companionRole);
@@ -279,6 +287,17 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     submission->modelPath = model->filePath;
     if (generate && model->companionRole == QStringLiteral("vae") && !model->companionFileName.isEmpty())
         submission->vaePath = QDir(QFileInfo(model->filePath).absolutePath()).filePath(model->companionFileName);
+    const QDir modelDirectory(QFileInfo(model->filePath).absolutePath());
+    const auto filePath = [&](const QString &role) {
+        const auto name = model->companionFiles.value(role).toString();
+        return name.isEmpty() ? QString() : modelDirectory.filePath(name);
+    };
+    if (generate) {
+        if (model->companionFiles.contains("vae")) submission->vaePath = filePath("vae");
+        submission->clipLPath = filePath("clip-l");
+        submission->clipGPath = filePath("clip-g");
+        submission->diffusionModel = model->modelType == "diffusion";
+    }
     submission->client = socket;
     if (needsInput) {
         m_pendingUploads.insert(socket, submission);
@@ -291,6 +310,9 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     job->options = options;
     job->modelPath = model->filePath;
     job->vaePath = submission->vaePath;
+    job->clipLPath = submission->clipLPath;
+    job->clipGPath = submission->clipGPath;
+    job->diffusionModel = submission->diffusionModel;
     job->client = socket;
     enqueue(job);
 }
@@ -304,6 +326,8 @@ void KiraServiceDaemon::listModels(QWebSocket *socket) const
             QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
                                     {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
             if (!model.recommendedOptions.isEmpty()) modelObject.insert("recommendedOptions", model.recommendedOptions);
+            modelObject.insert("companionFiles", model.companionFiles);
+            modelObject.insert("modelType", model.modelType);
             if (!model.companionFileName.isEmpty()) {
                 modelObject.insert(QStringLiteral("companionFileName"), model.companionFileName);
                 modelObject.insert(QStringLiteral("companionRole"), model.companionRole);
@@ -331,7 +355,27 @@ void KiraServiceDaemon::installModel(QWebSocket *socket, const QJsonObject &mess
     }
     std::optional<QUrl> companionUrl;
     if (message.contains(QStringLiteral("companionUrl"))) companionUrl = QUrl(message.value(QStringLiteral("companionUrl")).toString());
-    ModelInstallRequest request{installId, *category, QUrl(message.value(QStringLiteral("url")).toString()), companionUrl, {}};
+    ModelInstallRequest request;
+    request.installId = installId;
+    request.category = *category;
+    request.url = QUrl(message.value("url").toString());
+    request.companionUrl = companionUrl;
+    request.existingModelId = message.value("id").toString();
+    request.modelType = message.value("modelType").toString(request.existingModelId.isEmpty() ? "checkpoint" : "");
+    if ((message.contains("companionUrls") && !message.value("companionUrls").isObject())
+        || (message.contains("modelType") && !message.value("modelType").isString())
+        || (message.contains("id") && !message.value("id").isString())) {
+        send(socket, {{"type", "error"}, {"code", "invalid-model-install"}, {"installId", installId},
+            {"message", tr("Invalid companion URLs or model type")}}); return;
+    }
+    request.companionUrls = message.value("companionUrls").toObject();
+    if (!request.existingModelId.isEmpty()) {
+        const auto model = m_models->model(*category, request.existingModelId);
+        if (model && modelInUse(model->filePath)) {
+            send(socket, {{"type", "error"}, {"code", "model-in-use"}, {"installId", installId},
+                {"message", tr("Cannot attach files while this model is in use")}}); return;
+        }
+    }
     if (m_models->isInstalling()) {
         send(socket, {{"type", "error"}, {"code", "model-install-busy"}, {"message", tr("Another model installation is in progress")}, {"installId", installId}});
         return;
@@ -364,6 +408,8 @@ void KiraServiceDaemon::configureModel(QWebSocket *socket, const QJsonObject &me
     }
     const auto model = *m_models->modelById(id);
     QJsonObject value{{"id", model.id}, {"name", model.name}, {"fileName", model.fileName}, {"bytes", model.fileSize}, {"recommendedOptions", model.recommendedOptions}};
+    value.insert("companionFiles", model.companionFiles);
+    value.insert("modelType", model.modelType);
     if (!model.companionFileName.isEmpty()) {
         value.insert("companionFileName", model.companionFileName);
         value.insert("companionRole", model.companionRole);
@@ -427,6 +473,9 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
     job->options = submission->options;
     job->modelPath = submission->modelPath;
     job->vaePath = submission->vaePath;
+    job->clipLPath = submission->clipLPath;
+    job->clipGPath = submission->clipGPath;
+    job->diffusionModel = submission->diffusionModel;
     job->client = socket;
     if (!job->directory->isValid()) { sendError(socket, QStringLiteral("storage-error"), tr("Could not create job storage"), job->id); return; }
     job->inputPath = job->directory->filePath(QStringLiteral("input.png"));
@@ -461,6 +510,9 @@ void KiraServiceDaemon::startNextJob()
         request.baseImageStrength = o.value(QStringLiteral("baseImageStrength")).toDouble(0.55); request.outputPath = m_activeJob->outputPath;
         request.modelPath = m_activeJob->modelPath;
         request.vaePath = m_activeJob->vaePath;
+        request.clipLPath = m_activeJob->clipLPath;
+        request.clipGPath = m_activeJob->clipGPath;
+        request.diffusionModel = m_activeJob->diffusionModel;
         if (o.value(QStringLiteral("hasInput")).toBool()) request.baseImagePath = m_activeJob->inputPath;
         if (!m_sdRunner || !m_sdRunner->runGeneration(request)) { sendError(m_activeJob->client, QStringLiteral("start-failed"), tr("Could not start generation"), m_activeJob->id); m_activeJob.reset(); startNextJob(); }
     } else if (m_activeJob->operation == Operation::Upscale) {

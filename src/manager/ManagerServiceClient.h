@@ -19,6 +19,8 @@ struct ManagedModelInfo
     QString companionFileName;
     QString companionRole;
     QJsonObject recommendedOptions;
+    QJsonObject companionFiles;
+    QString modelType = QStringLiteral("checkpoint");
 };
 
 enum class ManagedInstallState { Requesting, Accepted, Queued, Downloading, Verifying, Completed, Failed, Canceled };
@@ -52,7 +54,8 @@ public:
     QList<ManagedModelInfo> models(const QString &category) const;
     QList<ManagedInstall> installs() const;
     void requestModels();
-    QString installModel(const QString &category, const QUrl &url, const QUrl &companionUrl = {}, const QJsonObject &recommendedOptions = {});
+    QString installModel(const QString &category, const QUrl &url, const QUrl &companionUrl = {}, const QJsonObject &recommendedOptions = {}, const QJsonObject &companionUrls = {},
+        const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {});
     bool configureModel(const QString &id, const QJsonObject &options);
     bool cancelInstall(const QString &installId);
     bool deleteModel(const QString &id);

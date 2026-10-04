@@ -28,7 +28,8 @@ public:
     QList<ModelInfo> models(ModelCategory category = ModelCategory::Unknown) const;
     QList<ModelInstall> installs() const;
     void requestModels();
-    QString installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl = {}, const QJsonObject &recommendedOptions = {});
+    QString installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl = {}, const QJsonObject &recommendedOptions = {}, const QJsonObject &companionUrls = {},
+        const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {});
     bool configureModel(const QString &id, const QJsonObject &options);
     bool cancelInstall(const QString &installId);
     bool deleteModel(const QString &id);

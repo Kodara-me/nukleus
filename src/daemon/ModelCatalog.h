@@ -27,6 +27,8 @@ struct ModelInfo
     QString companionFileName;
     QString companionRole;
     QJsonObject recommendedOptions;
+    QJsonObject companionFiles;
+    QString modelType = QStringLiteral("checkpoint");
 };
 
 Q_DECLARE_METATYPE(ModelInfo)
@@ -38,6 +40,9 @@ struct ModelInstallRequest
     QUrl url;
     std::optional<QUrl> companionUrl;
     std::optional<QJsonObject> recommendedOptions = {};
+    QJsonObject companionUrls;
+    QString existingModelId;
+    QString modelType = QStringLiteral("checkpoint");
 };
 
 enum class ModelInstallState
@@ -99,7 +104,6 @@ private:
     QString fileNameForUrl(const QUrl &url) const;
     void startInstall();
     void startRequest(const QUrl &url);
-    void startCompanionInstall();
     void finishNetworkRequest();
     void writeAvailableData();
     void completeInstall();

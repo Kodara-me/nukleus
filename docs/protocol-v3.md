@@ -110,3 +110,30 @@ Automatic sampler/scheduler flags are omitted from the backend command. Positive
 Clip Skip values are forwarded; -1 omits the flag. CFG and image strength retain
 numeric precision. The selected model's installed VAE is used for direct and
 uploaded-input generation; clients neither submit nor receive its filesystem path.
+
+## Optional image model files (additive v3 extension)
+
+Image-generation and Edition models expose `modelType` (`checkpoint` by default,
+`diffusion` for standalone UNets) and `companionFiles`, mapping `clip-l`, `clip-g`
+and `vae` to category-relative companion filenames. Absolute paths are never
+accepted or returned. The legacy single-companion fields remain compatible.
+
+`models.install` accepts optional `companionUrls` mapping these roles to HTTPS
+URLs, plus `modelType`. A request with an existing model `id` attaches missing
+roles without downloading its primary or changing recommendations. Omit
+`recommendedOptions` to preserve them. An omitted/empty modelType preserves the
+existing type when attaching; new installations default to checkpoint. Duplicate roles, unsupported
+roles, invalid URLs, existing destination files, and models in use are rejected.
+Downloads use the existing install progress, owned cancellation, and completion
+messages; `fileRole` may now be `clip-l`, `clip-g` or `vae` as well as legacy
+`primary`/`companion`. Failures remove newly staged/published files, preserving
+pre-existing model files and metadata. A role's presence means a file is attached,
+not that arbitrary components are mutually compatible.
+
+```json
+{"type":"models.install","installId":"attach-123","category":"image-generation","id":"image-generation:existing.gguf","modelType":"diffusion","companionUrls":{"clip-l":"https://example.com/clip_l.safetensors","clip-g":"https://example.com/clip_g.safetensors","vae":"https://example.com/vae.safetensors"}}
+```
+
+The daemon snapshots attached file paths for each image job. Only registered
+files are passed to the backend; neither folder scanning nor filename/extension
+heuristics determine model type. Unused companions remain optional.

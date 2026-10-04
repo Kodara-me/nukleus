@@ -10,7 +10,7 @@
 - CMake also installs SDK headers and static libraries and generates the `KiraServiceSdk` package. The SDK supports image operations.
 - Use `$XDG_DATA_HOME/kira-service/models/` with `upscale/`, `llm/`, and `edition/` subdirectories. The `edition` category manages image-editing model files; editing jobs remain outside its current scope. Never overwrite installed model files. Keep the legacy-root migration safe and non-merging.
 - Linux systemd deployment keeps the `kira-service` account, `/etc/kira-service`, `/var/lib/kira-service`, `/run/kira-service`, and fixed port `9384`.
-- Optional companions use category-local persistent metadata: mmproj for LLM-chat, VAE for Image-generation/Edition, and LoRA for IP-Adapter. Install and delete them with their primary model; expose only category-relative companion filenames and roles. Do not perform SHA-256 download checks. Image-generation VAE companions are resolved internally and passed with --vae; mmproj and LoRA remain catalog attachments. Validate generation values/types before queuing, omit automatic sampler/scheduler flags, and preserve numeric precision. Never auto-apply recommendedOptions to jobs.
+- Optional companions use category-local persistent metadata: mmproj for LLM-chat, VAE for Image-generation/Edition, and LoRA for IP-Adapter. Install and delete them with their primary model; expose only category-relative companion filenames and roles. Do not perform SHA-256 download checks. Image-generation/Edition also support role-specific optional CLIP-L, CLIP-G and VAE files through companionUrls/companionFiles, with modelType checkpoint (default) or diffusion. Existing image models accept companion attachment via models.install with an opaque id; never redownload or overwrite the primary. Stage all files and publish metadata atomically; cancellation/failure must preserve an existing primary and recommendations. Keep legacy companionUrl, companionFileName and string metadata compatible. Image-generation companions are resolved internally and passed with --clip_l, --clip_g and --vae; diffusion models use --diffusion-model and checkpoints use --model; mmproj and LoRA remain catalog attachments. Validate generation values/types before queuing, omit automatic sampler/scheduler flags, and preserve numeric precision. Never auto-apply recommendedOptions to jobs.
 - Build and run CTest after each slice. Keep README and CONTRIBUTING accurate.
 
 ## Manager UI and recommended options
@@ -28,7 +28,7 @@
 - Install one model (and optional companion) at a time globally. Refuse concurrent
   requests with model-install-busy; keep the image execution FIFO unchanged.
   Closing the download modal cancels its owned install; success closes only after
-  both files and metadata are saved. Errors preserve entered fields for retry.
+  all requested files and metadata are saved. Errors preserve entered fields for retry.
 - Protocol v3 adds optional recommendedOptions, models.configure, and owned
   models.install.cancel. Keep old client calls and enum states source-compatible.
   Options are recommendations only; do not silently change execution arguments.

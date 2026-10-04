@@ -96,7 +96,7 @@ void SdCliRunner::runHelp()
 bool SdCliRunner::runGeneration(const GenerationRequest &request)
 {
     QStringList arguments = {
-        QStringLiteral("--model"), request.modelPath,
+        request.diffusionModel ? QStringLiteral("--diffusion-model") : QStringLiteral("--model"), request.modelPath,
         QStringLiteral("--prompt"), request.prompt,
         QStringLiteral("--negative-prompt"), request.negativePrompt,
         QStringLiteral("--width"), QString::number(request.width),
@@ -108,6 +108,8 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
     if (!request.sampler.isEmpty()) arguments.append({QStringLiteral("--sampling-method"), request.sampler});
     if (!request.scheduler.isEmpty()) arguments.append({QStringLiteral("--scheduler"), request.scheduler});
     if (!request.vaePath.isEmpty()) arguments.append({QStringLiteral("--vae"), request.vaePath});
+    if (!request.clipLPath.isEmpty()) arguments.append({QStringLiteral("--clip_l"), request.clipLPath});
+    if (!request.clipGPath.isEmpty()) arguments.append({QStringLiteral("--clip_g"), request.clipGPath});
     if (!request.baseImagePath.isEmpty()) {
         arguments.append({QStringLiteral("--init-img"), request.baseImagePath,
                           QStringLiteral("--strength"), QString::number(request.baseImageStrength, 'g', 17)});

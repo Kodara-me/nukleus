@@ -1,5 +1,6 @@
 #pragma once
 #include <KiraUi/Dialog.h>
+#include <QJsonObject>
 class ManagerServiceClient;
 class ModelOptionsWidget;
 class QComboBox;
@@ -14,7 +15,7 @@ class AddModelDialog final : public KiraUi::Dialog
     Q_OBJECT
   public:
     explicit AddModelDialog(ManagerServiceClient *client, const QString &category = {},
-                            QWidget *parent = nullptr);
+                            QWidget *parent = nullptr, const QString &existingModelId = {});
   signals:
     void modelInstalled(const QString &id);
 
@@ -31,6 +32,14 @@ class AddModelDialog final : public KiraUi::Dialog
     QComboBox *m_category;
     QLineEdit *m_url;
     QLineEdit *m_companion;
+    QLineEdit *m_clipL;
+    QLineEdit *m_clipG;
+    QLabel *m_clipLLabel;
+    QLabel *m_clipGLabel;
+    QComboBox *m_modelType;
+    QLabel *m_modelTypeLabel;
+    QString m_existingModelId;
+    QJsonObject m_attachedFiles;
     QLabel *m_companionLabel;
     ModelOptionsWidget *m_options;
     QLabel *m_status;

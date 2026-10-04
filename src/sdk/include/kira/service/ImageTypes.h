@@ -30,6 +30,8 @@ struct ModelInfo
     QString companionFileName;
     QString companionRole;
     QJsonObject recommendedOptions;
+    QJsonObject companionFiles;
+    QString modelType = QStringLiteral("checkpoint");
 };
 
 enum class ModelInstallState
