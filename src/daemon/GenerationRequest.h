@@ -30,4 +30,8 @@ struct GenerationRequest
     QString ipAdapterImagePath;
     QString ipAdapterLoraPath;
     double ipAdapterStrength = 1.0;
+    QString photoMakerPath;
+    QString photoMakerIdentityPath;
+    QString photoMakerImagesDirectory;
+    int photoMakerStyleStrength = 20;
 };

@@ -231,10 +231,26 @@ No PhotoMaker model selection is required for this extraction.
 This optional service-host runtime requires a Python environment, the official
 script and its InsightFace dependencies/models. Set `KIRA_PHOTOMAKER_PYTHON`
 and `KIRA_PHOTOMAKER_FACE_DETECT` as described in
-[CONTRIBUTING](CONTRIBUTING.md#photomaker-v2-extractor-setup).
-No Python is required in Canvas. This slice provides catalogue/options, binary
-export and the Canvas default selector; generation conditioning and the Canvas
-crop/export interface remain separate work. Future sd-cli conditioning uses
-`--photo-maker`, `--pm-id-embed-path` and `--pm-style-strength`, alongside
-the identity-image directory required by upstream.
+[the host setup guide](docs/photomaker-host-setup.md).
+No Python is required in Canvas. The SDK also supports PhotoMaker V2 generation
+through `submitGeneration`: select a compatible SDXL `modelId` and
+`photoMakerModelId`, supply `photoMakerIdentityData` and the corresponding
+`photoMakerReferenceImageData`, and optionally set `photoMakerStyleStrength`
+(0–100, default 20). The prompt needs a class word followed by `img`, for example
+`a woman img, in a garden`. Both the reference image and the reusable embeddings
+are required by sd-cli; renaming the local `.bin` is harmless. The service uploads
+both inputs, queues generation and returns a normal image result. Reusing existing
+embeddings does not require the extraction Python environment. PhotoMaker cannot
+be combined with IP-Adapter or image-to-image input in this slice. Canvas generation
+integration remains separate work. See the [protocol](docs/protocol-v3.md#photomaker-v2-generation).
 See [upstream PhotoMaker documentation](https://github.com/leejet/stable-diffusion.cpp/blob/master/docs/photo_maker.md).
+
+## PhotoMaker identity files
+
+The SDK accepts a single `.kiraid` file as `photoMakerIdentityPackageData` for
+PhotoMaker generation. It validates and unpacks the compressed ZIP in memory,
+then uploads its reference and embeddings through the existing protocol-v3 roles.
+`packPhotoMakerIdentity` builds this file from a PNG crop and extracted embeddings.
+The archive contains `reference.png`, `id_embeds.bin` and `manifest.json`
+(`type: photomaker-v2`, `version: 1`). Legacy paired SDK inputs remain supported;
+combining them with a package is rejected. The SDK now requires LibArchive.

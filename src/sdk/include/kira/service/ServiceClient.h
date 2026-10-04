@@ -60,8 +60,9 @@ private:
         QByteArray ipAdapterImageData;
         QString mimeType;
         bool identityExport = false;
+        QByteArray photoMakerIdentityData;
     };
-    QString submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData, const QByteArray &ipAdapterImageData = {});
+    QString submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData, const QByteArray &ipAdapterImageData = {}, const QByteArray &photoMakerIdentityData = {});
     void authenticate();
     void handleTextMessage(const QString &message);
     void handleBinaryMessage(const QByteArray &data);

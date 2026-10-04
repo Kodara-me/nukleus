@@ -133,9 +133,12 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     qputenv("KIRA_TEST_IMAGE", imageFile.fileName().toUtf8());
     QFile executable(directory.filePath("sd-cli"));
     QVERIFY(executable.open(QIODevice::WriteOnly));
-    executable.write("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$KIRA_TEST_ARGS\"\nprevious=\"\"\nfor argument in "
+    executable.write("#!/bin/sh\nif [ \"$KIRA_TEST_PM_FAIL\" = 1 ]; then printf 'Turn off PhotoMaker for this request' >&2; exit 0; fi\n"
+                     "printf '%s\\n' \"$@\" > \"$KIRA_TEST_ARGS\"\nprevious=\"\"\nfor argument in "
                      "\"$@\"; do\n if [ \"$previous\" = --output ]; then cp \"$KIRA_TEST_IMAGE\" "
                      "\"$argument\"; fi\n if [ \"$previous\" = --ip-adapter-image ]; then cp \"$argument\" \"$KIRA_TEST_ARGS.ip\"; fi\n"
+                     " if [ \"$previous\" = --pm-id-embed-path ]; then cp \"$argument\" \"$KIRA_TEST_ARGS.identity\"; fi\n"
+                     " if [ \"$previous\" = --pm-id-images-dir ]; then cp \"$argument/input.png\" \"$KIRA_TEST_ARGS.reference\"; fi\n"
                      " if [ \"$previous\" = --ref-image ]; then cp \"$argument\" \"$KIRA_TEST_ARGS.source\"; fi\n previous=\"$argument\"\ndone\nexit 0\n");
     executable.close();
     QVERIFY(executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
@@ -324,6 +327,69 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
         QFile file(capture + suffix);
         return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
     };
+    const QString photoMakerPath = QDir(root).filePath("photomaker/identity.safetensors");
+    QVERIFY(QDir().mkpath(QFileInfo(photoMakerPath).absolutePath()));
+    QFile photoMakerFile(photoMakerPath);
+    QVERIFY(photoMakerFile.open(QIODevice::WriteOnly)); photoMakerFile.write("weights"); photoMakerFile.close();
+    QJsonObject photoMakerOptions = valid;
+    photoMakerOptions.insert("photoMakerModelId", "photomaker:identity.safetensors");
+    photoMakerOptions.insert("hasPhotoMakerIdentity", true);
+    photoMakerOptions.insert("photoMakerStyleStrength", 31);
+    const QByteArray identityBytes("opaque\0identity", 15);
+    for (int pass = 0; pass < 2; ++pass) {
+        const QString id = QString("photomaker-generate-%1").arg(pass);
+        images.clear(); messages.clear();
+        send(id, photoMakerOptions);
+        QTRY_VERIFY(uploadFor(id, "photomaker-reference"));
+        socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "models.delete"},
+            {"id", "photomaker:identity.safetensors"}}).toJson()));
+        QTRY_COMPARE(messages.last().value("code").toString(), QString("model-in-use"));
+        socket.sendBinaryMessage(image);
+        QTRY_VERIFY(uploadFor(id, "photomaker-identity"));
+        socket.sendBinaryMessage(identityBytes);
+        QTRY_VERIFY(terminal(id)); QTRY_COMPARE(images.count(), 1);
+        const auto args = arguments();
+        QCOMPARE(args.value(args.indexOf("--photo-maker") + 1), photoMakerPath);
+        QCOMPARE(args.value(args.indexOf("--pm-style-strength") + 1), pass == 0 ? QString("31") : QString("20"));
+        QCOMPARE(capturedImage(".identity"), identityBytes);
+        QCOMPARE(capturedImage(".reference"), image);
+        QVERIFY(!args.contains("--init-img")); QVERIFY(!args.contains("--ip-adapter"));
+        QVERIFY(!QFileInfo::exists(args.value(args.indexOf("--pm-id-embed-path") + 1)));
+        photoMakerOptions.remove("photoMakerStyleStrength");
+    }
+    images.clear(); messages.clear();
+    qputenv("KIRA_TEST_PM_FAIL", "1");
+    send("photomaker-disabled", photoMakerOptions);
+    QTRY_VERIFY(uploadFor("photomaker-disabled", "photomaker-reference"));
+    socket.sendBinaryMessage(image);
+    QTRY_VERIFY(uploadFor("photomaker-disabled", "photomaker-identity"));
+    socket.sendBinaryMessage(identityBytes);
+    QTRY_VERIFY(terminal("photomaker-disabled"));
+    QCOMPARE(messages.last().value("type").toString(), QString("error"));
+    QCOMPARE(images.count(), 0);
+    qunsetenv("KIRA_TEST_PM_FAIL");
+    for (int pass = 0; pass < 2; ++pass) {
+        messages.clear();
+        send("photomaker-empty", photoMakerOptions);
+        QTRY_VERIFY(uploadFor("photomaker-empty", "photomaker-reference"));
+        if (pass == 1) {
+            socket.sendBinaryMessage(image);
+            QTRY_VERIFY(uploadFor("photomaker-empty", "photomaker-identity"));
+        }
+        socket.sendBinaryMessage({});
+        QTRY_VERIFY(terminal("photomaker-empty"));
+        QCOMPARE(messages.last().value("code").toString(), QString("invalid-image"));
+    }
+    for (const QJsonObject change : {QJsonObject{{"photoMakerStyleStrength", 1.5}},
+         QJsonObject{{"photoMakerStyleStrength", 101}}, QJsonObject{{"hasPhotoMakerIdentity", false}},
+         QJsonObject{{"photoMakerModelId", "image-generation:model.gguf"}}, QJsonObject{{"hasInput", true}},
+         QJsonObject{{"ipAdapterModelId", "ip-adapter:adapter.safetensors"}}}) {
+        auto invalid = photoMakerOptions;
+        for (auto it = change.begin(); it != change.end(); ++it) invalid.insert(it.key(), it.value());
+        messages.clear(); send("invalid-photomaker", invalid);
+        QTRY_VERIFY(terminal("invalid-photomaker"));
+        QVERIFY(!uploadFor("invalid-photomaker", "photomaker-reference"));
+    }
     images.clear(); messages.clear();
     send("adapter-generate", adapterOptions);
     QTRY_VERIFY(uploadFor("adapter-generate", "ip-adapter"));

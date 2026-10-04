@@ -352,8 +352,49 @@ ID if disconnected, unsupported or given empty input. Completion/failure emits
 also complete this dedicated result; `imageJobFinished` is never emitted for
 an identity export. Clients need not know the script, interpreter or server paths.
 
-This slice does not submit PhotoMaker image generation. Subsequent sd-cli
-conditioning must select compatible SDXL/PhotoMaker V2 weights and supply
-`--photo-maker <model>`, `--pm-id-embed-path <id_embeds.bin>`,
-`--pm-style-strength <0-100>` and the identity-image directory required by
-[upstream](https://github.com/leejet/stable-diffusion.cpp/blob/master/docs/photo_maker.md).
+## PhotoMaker V2 generation
+
+`capabilities.photoMaker` advertises generation conditioning when the image
+backend is available, independently of extraction dependencies. Missing means
+unsupported. Use `image.generate` with the usual prompts and generation values,
+an installed SDXL `modelId`, an installed `photoMakerModelId`, boolean
+`hasPhotoMakerIdentity: true`, and optional integer `photoMakerStyleStrength`
+(0–100, default 20). Recommendations are not applied automatically.
+
+```json
+{"type":"submit","operation":"image.generate","jobId":"pm-job","options":{"modelId":"image-generation:sdxl.safetensors","prompt":"a woman img, in a garden","photoMakerModelId":"photomaker:photomaker-v2.safetensors","hasPhotoMakerIdentity":true,"photoMakerStyleStrength":20}}
+```
+
+The service requests two binary uploads in order: `inputRole` is first
+`photomaker-reference` (one decodable reference image), then `photomaker-identity`
+(the original opaque embedding bytes exported for that image). Both are required:
+sd-cli uses visual features from the reference as well as the V2 embeddings.
+The filename on the client is irrelevant. Each upload uses the configured
+maximumImageBytes limit; empty or oversized uploads release the pending job.
+The embeddings must describe exactly one reference image. The prompt must include
+a class word followed by the `img` trigger, such as `woman img` or `man img`.
+Model compatibility and embedding contents are checked by sd-cli, not the catalog.
+
+The SDK exposes `ImageGenerationRequest.photoMakerModelId`,
+`photoMakerIdentityPackageData` (complete `.kiraid` bytes) and optional
+`photoMakerStyleStrength` through `submitGeneration`. Its LibArchive helper
+validates and unpacks the package in memory and sends the two existing binary
+upload roles above; no new wire operation or server filesystem path is introduced.
+Version 1 is a compressed ZIP with exactly `reference.png`, `id_embeds.bin` and
+`manifest.json` containing `{"type":"photomaker-v2","version":1}`. Only regular
+entries are accepted; duplicate names, unexpected entries and excessive expanded
+sizes are rejected. The crop and opaque embeddings have a combined 64 MiB limit.
+The legacy `photoMakerReferenceImageData` / `photoMakerIdentityData` pair is still
+accepted, but cannot be supplied together with a package. Missing capability, model
+or bytes prevents submission. PhotoMaker cannot be combined with IP-Adapter,
+image-to-image input, editing or upscaling in this slice.
+
+The service protects both selected models during upload, queueing and execution,
+saves private temporary input files and passes `--photo-maker`,
+`--pm-id-embed-path`, `--pm-id-images-dir` and `--pm-style-strength` to sd-cli.
+Clients cannot supply filesystem paths. Results use the normal image job lifecycle
+and binary image delivery; success/failure/disconnection cleans temporary files.
+If sd-cli reports that PhotoMaker conditioning is disabled, the job fails rather
+than returning an unconditioned image. Extraction Python dependencies are not
+needed to reuse existing embeddings.
+See [upstream PhotoMaker documentation](https://github.com/leejet/stable-diffusion.cpp/blob/master/docs/photo_maker.md).

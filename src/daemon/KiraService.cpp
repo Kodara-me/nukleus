@@ -78,6 +78,9 @@ struct KiraServiceDaemon::Submission
     QString ipAdapterLoraPath;
     QPointer<QWebSocket> client;
     bool waitingIpAdapterImage = false;
+    QString photoMakerPath;
+    bool waitingPhotoMakerIdentity = false;
+    QByteArray photoMakerIdentityData;
     QByteArray inputData;
     QByteArray ipAdapterImageData;
 };
@@ -102,6 +105,8 @@ struct KiraServiceDaemon::Job
     QString inputPath;
     QString ipAdapterImagePath;
     QString outputPath;
+    QString photoMakerPath;
+    QString photoMakerIdentityPath;
 };
 
 KiraServiceDaemon::KiraServiceDaemon(KiraServiceConfiguration configuration, QObject *parent)
@@ -345,6 +350,23 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         || options.contains("hasIpAdapterImage") || options.contains("ip_adapter_strength");
     std::optional<ModelInfo> clipVision;
     std::optional<ModelInfo> ipAdapter;
+    const bool hasPhotoMaker = options.contains("photoMakerModelId")
+        || options.contains("hasPhotoMakerIdentity") || options.contains("photoMakerStyleStrength");
+    std::optional<ModelInfo> photoMaker;
+    if (hasPhotoMaker) {
+        if (!generate || hasAdapterOptions || options.value("hasInput").toBool()
+            || !options.value("photoMakerModelId").isString()
+            || !options.value("hasPhotoMakerIdentity").isBool() || !options.value("hasPhotoMakerIdentity").toBool()
+            || !validNumber(options, "photoMakerStyleStrength", 0, 100, true, false)) {
+            sendError(socket, "invalid-request", tr("PhotoMaker generation requires a model, identity embeddings and a reference image"), jobId);
+            return;
+        }
+        photoMaker = m_models->model(ModelCategory::PhotoMaker, options.value("photoMakerModelId").toString());
+        if (!photoMaker) {
+            sendError(socket, "model-unavailable", tr("The requested PhotoMaker model is unavailable"), jobId);
+            return;
+        }
+    }
     if (hasAdapterOptions) {
         if (upscale || !options.value("clipVisionModelId").isString()
             || !options.value("ipAdapterModelId").isString()
@@ -370,6 +392,7 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     submission->operation = edit ? Operation::Edit : generate ? Operation::Generate : Operation::Upscale;
     submission->options = options;
     submission->modelPath = model->filePath;
+    if (photoMaker) submission->photoMakerPath = photoMaker->filePath;
     if ((generate || edit) && model->companionRole == QStringLiteral("vae") && !model->companionFileName.isEmpty())
         submission->vaePath = QDir(QFileInfo(model->filePath).absolutePath()).filePath(model->companionFileName);
     const QDir modelDirectory(QFileInfo(model->filePath).absolutePath());
@@ -401,10 +424,10 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     }
     submission->client = socket;
     submission->waitingIpAdapterImage = !needsInput && hasAdapterOptions;
-    if (needsInput || hasAdapterOptions) {
+    if (needsInput || hasAdapterOptions || hasPhotoMaker) {
         m_pendingUploads.insert(socket, submission);
         send(socket, {{QStringLiteral("type"), QStringLiteral("upload-required")}, {QStringLiteral("jobId"), jobId},
-            {"inputRole", submission->waitingIpAdapterImage ? "ip-adapter" : "source"}});
+            {"inputRole", hasPhotoMaker ? "photomaker-reference" : submission->waitingIpAdapterImage ? "ip-adapter" : "source"}});
         return;
     }
     auto job = std::make_shared<Job>();
@@ -577,7 +600,7 @@ void KiraServiceDaemon::deleteModel(QWebSocket *socket, const QJsonObject &messa
 bool KiraServiceDaemon::modelInUse(const QString &path) const
 {
     const auto usesModel = [&path](const auto &job) {
-        return job && (job->modelPath == path || job->clipVisionPath == path || job->ipAdapterPath == path);
+        return job && (job->modelPath == path || job->clipVisionPath == path || job->ipAdapterPath == path || job->photoMakerPath == path);
     };
     if (usesModel(m_activeJob)) return true;
     for (const auto &job : m_queue) {
@@ -598,8 +621,14 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
         sendError(socket, QStringLiteral("invalid-image"), tr("Image upload is empty or too large"), submission->id);
         return;
     }
-    if (submission->waitingIpAdapterImage) submission->ipAdapterImageData = data;
+    if (submission->waitingPhotoMakerIdentity) submission->photoMakerIdentityData = data;
+    else if (submission->waitingIpAdapterImage) submission->ipAdapterImageData = data;
     else submission->inputData = data;
+    if (!submission->photoMakerPath.isEmpty() && !submission->waitingPhotoMakerIdentity) {
+        submission->waitingPhotoMakerIdentity = true;
+        send(socket, {{"type", "upload-required"}, {"jobId", submission->id}, {"inputRole", "photomaker-identity"}});
+        return;
+    }
     if (!submission->waitingIpAdapterImage && !submission->ipAdapterPath.isEmpty()) {
         submission->waitingIpAdapterImage = true;
         send(socket, {{"type", "upload-required"}, {"jobId", submission->id}, {"inputRole", "ip-adapter"}});
@@ -625,6 +654,7 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
     job->ipAdapterPath = submission->ipAdapterPath;
     job->ipAdapterLoraPath = submission->ipAdapterLoraPath;
     job->client = socket;
+    job->photoMakerPath = submission->photoMakerPath;
     if (!job->directory->isValid()) { sendError(socket, QStringLiteral("storage-error"), tr("Could not create job storage"), job->id); return; }
     const auto saveImage = [&](const QByteArray &bytes, const QString &name, QString &path) {
         if (bytes.isEmpty()) return true;
@@ -633,7 +663,8 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
         return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
     };
     if (!saveImage(submission->inputData, "input.png", job->inputPath)
-        || !saveImage(submission->ipAdapterImageData, "ip-adapter.png", job->ipAdapterImagePath)) {
+        || !saveImage(submission->ipAdapterImageData, "ip-adapter.png", job->ipAdapterImagePath)
+        || !saveImage(submission->photoMakerIdentityData, "id_embeds.bin", job->photoMakerIdentityPath)) {
         sendError(socket, QStringLiteral("storage-error"), tr("Could not save image upload"), job->id);
         return;
     }
@@ -696,6 +727,10 @@ void KiraServiceDaemon::startNextJob()
         request.ipAdapterLoraPath = m_activeJob->ipAdapterLoraPath;
         request.ipAdapterImagePath = m_activeJob->ipAdapterImagePath;
         request.ipAdapterStrength = o.value("ip_adapter_strength").toDouble(1.0);
+        request.photoMakerPath = m_activeJob->photoMakerPath;
+        request.photoMakerIdentityPath = m_activeJob->photoMakerIdentityPath;
+        request.photoMakerImagesDirectory = m_activeJob->directory->path();
+        request.photoMakerStyleStrength = o.value("photoMakerStyleStrength").toInt(20);
         if (m_activeJob->operation == Operation::Edit) request.referenceImagePath = m_activeJob->inputPath;
         else if (o.value(QStringLiteral("hasInput")).toBool()) request.baseImagePath = m_activeJob->inputPath;
         if (!m_sdRunner || !m_sdRunner->runGeneration(request)) { sendError(m_activeJob->client, QStringLiteral("start-failed"), tr("Could not start generation"), m_activeJob->id); m_activeJob.reset(); startNextJob(); }
@@ -758,7 +793,7 @@ void KiraServiceDaemon::sendCapabilities(QWebSocket *socket) const
         operations.append(QStringLiteral("image.edit"));
     }
     if (isPhotoMakerExportReady()) operations.append("photomaker.export");
-    send(socket, {{QStringLiteral("type"), QStringLiteral("capabilities")}, {QStringLiteral("state"), state}, {QStringLiteral("operations"), operations}, {"ipAdapter", isImageReady()}});
+    send(socket, {{QStringLiteral("type"), QStringLiteral("capabilities")}, {QStringLiteral("state"), state}, {QStringLiteral("operations"), operations}, {"ipAdapter", isImageReady()}, {"photoMaker", isImageReady()}});
 }
 
 bool KiraServiceDaemon::isPhotoMakerExportReady() const

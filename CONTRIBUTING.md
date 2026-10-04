@@ -224,6 +224,10 @@ wire fields and backend limitations.
 
 ## PhotoMaker V2 extractor setup
 
+Follow [the host setup guide](docs/photomaker-host-setup.md) for the complete
+virtual-environment installation, service-account model provisioning, strict
+single-face smoke test, systemd configuration and readiness checks.
+
 PhotoMaker catalogues require no additional build dependency. Identity export
 optionally invokes the official `scripts/face_detect.py` from the
 stable-diffusion.cpp checkout matching the deployed backend. The bundled
@@ -234,11 +238,8 @@ than choosing the first. It uses the official CPU provider.
 Provision a dedicated service-side Python environment with the script's imports:
 NumPy, PyTorch, diffusers, safetensors, Pillow, InsightFace 0.7.3 and ONNX Runtime
 (CPU). InsightFace installation can require Python development headers and a
-compiler. For example, after creating a virtual environment:
-
-```sh
-/opt/kira-photomaker/bin/python -m pip install numpy torch diffusers safetensors Pillow insightface==0.7.3 onnxruntime
-```
+compiler. The host guide uses /opt/kira-photomaker/venv and a legacy-compatible
+NumPy constraint; follow its dependency installation and smoke-test commands.
 
 Keep the official checkout/script and environment readable by the service account
 outside /home (systemd ProtectHome remains enabled). Verify extraction with an
@@ -252,8 +253,8 @@ Add these settings to the existing `/etc/kira-service/kira-service.conf`, keepin
 its listen/port/token values, then restart the service:
 
 ```ini
-KIRA_PHOTOMAKER_PYTHON=/opt/kira-photomaker/bin/python
-KIRA_PHOTOMAKER_FACE_DETECT=/opt/stable-diffusion.cpp/scripts/face_detect.py
+KIRA_PHOTOMAKER_PYTHON=/opt/kira-photomaker/venv/bin/python
+KIRA_PHOTOMAKER_FACE_DETECT=/opt/kira-photomaker/face_detect.py
 ```
 
 For a foreground daemon, export the same environment variables before launch.
@@ -272,3 +273,15 @@ they do not validate real embedding quality. On a provisioned host, verify a
 single face, no face, multiple faces and a cropped source against the deployed
 official script. Never persist uploaded identities or introduce identity types
 beyond this concrete PhotoMaker binary result.
+
+## PhotoMaker identity packages
+
+Install LibArchive development files before configuring the SDK/service:
+`libarchive-dev` on Debian/Ubuntu, `libarchive` on Arch, or `brew install libarchive`
+on macOS. Installed SDK consumers also require this CMake dependency.
+Use `photoMakerIdentityPackageData` with complete `.kiraid` bytes instead of
+separate reference/embedding inputs. The SDK validates the version-1 PhotoMaker V2
+manifest, exact entry names, duplicates, entry types and bounded decompressed sizes
+before any submission. Extraction still returns only the binary embedding;
+Canvas packages it together with the exact crop. The daemon's protocol and
+temporary-file lifecycle remain unchanged.

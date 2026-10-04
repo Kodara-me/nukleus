@@ -1,4 +1,7 @@
 #include <kira/service/ServiceClient.h>
+#include <kira/service/PhotoMakerIdentity.h>
+#include <archive.h>
+#include <archive_entry.h>
 #include <kira/service/ServiceProtocol.h>
 #include <kira/service/ModelOptions.h>
 
@@ -32,14 +35,15 @@ public:
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list.result\",\"categories\":[{\"category\":\"image-generation\",\"models\":[{\"id\":\"image-generation:test.safetensors\",\"name\":\"Test\",\"fileName\":\"test.safetensors\",\"bytes\":1,\"modelType\":\"diffusion\",\"explicitContent\":true,\"companionFiles\":{\"clip-l\":\"companions/test.safetensors/clip-l/clip_l.safetensors\"},\"companionFileName\":\"companions/test.safetensors/vae.safetensors\",\"companionRole\":\"vae\"}]},{\"category\":\"edition\",\"models\":[{\"id\":\"edition:edit.safetensors\",\"name\":\"Edit\",\"fileName\":\"edit.safetensors\",\"bytes\":5,\"companionFileName\":\"companions/edit.safetensors/vae.gguf\",\"companionRole\":\"vae\"}]},{\"category\":\"upscaler\",\"models\":[{\"id\":\"upscaler:test.gguf\",\"name\":\"Test 2x\",\"recommendedOptions\":{\"tileSize\":128},\"fileName\":\"test.gguf\",\"bytes\":2}]},{\"category\":\"llm-chat\",\"models\":[{\"id\":\"llm-chat:test.gguf\",\"name\":\"Test LLM\",\"fileName\":\"llm.gguf\",\"bytes\":3,\"companionFileName\":\"companions/llm.gguf/mmproj.gguf\",\"companionRole\":\"mmproj\"}]},{\"category\":\"ip-adapter\",\"models\":[{\"id\":\"ip-adapter:test.bin\",\"name\":\"Test Adapter\",\"fileName\":\"test.bin\",\"bytes\":4,\"companionFileName\":\"companions/test.bin/test-lora.safetensors\"}]}]}"));
                     if (m_ipAdapter) {
                         socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
-                            {"type", "capabilities"}, {"state", "ready"}, {"ipAdapter", true},
+                            {"type", "capabilities"}, {"state", "ready"}, {"ipAdapter", true}, {"photoMaker", true},
                             {"operations", QJsonArray{"image.generate", "image.upscale", "image.edit"}}}).toJson()));
                         socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
                             {"type", "models.list.result"}, {"categories", QJsonArray{
                                 QJsonObject{{"category", "image-generation"}, {"models", QJsonArray{QJsonObject{{"id", "image-generation:test.safetensors"}}}}},
                                 QJsonObject{{"category", "edition"}, {"models", QJsonArray{QJsonObject{{"id", "edition:edit.safetensors"}}}}},
                                 QJsonObject{{"category", "clip_vision"}, {"models", QJsonArray{QJsonObject{{"id", "clip_vision:vision.safetensors"}}}}},
-                                QJsonObject{{"category", "ip_adapter"}, {"models", QJsonArray{QJsonObject{{"id", "ip-adapter:test.bin"}}}}}}}}).toJson()));
+                                QJsonObject{{"category", "ip_adapter"}, {"models", QJsonArray{QJsonObject{{"id", "ip-adapter:test.bin"}}}}},
+                                QJsonObject{{"category", "photomaker"}, {"models", QJsonArray{QJsonObject{{"id", "photomaker:test.safetensors"}}}}}}}}).toJson()));
                     }
                 } else if (type == "models.configure") {
                     const QJsonObject reply{{"type", "models.configure.completed"}, {"id", message.value("id")}, {"model", QJsonObject{{"recommendedOptions", message.value("recommendedOptions")}}}};
@@ -51,6 +55,13 @@ public:
                 } else if (type == QStringLiteral("submit")) {
                     const QString jobId = message.value(QStringLiteral("jobId")).toString();
                     const auto options = message.value("options").toObject();
+                    if (options.value("hasPhotoMakerIdentity").toBool()) {
+                        m_uploadJobs.insert(socket, jobId);
+                        m_photoMakerUploads.insert(socket, 2);
+                        socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+                            {"type", "upload-required"}, {"jobId", jobId}, {"inputRole", "photomaker-reference"}}).toJson()));
+                        return;
+                    }
                     if (options.value("hasInput").toBool() || options.value("hasIpAdapterImage").toBool()) {
                         m_uploadJobs.insert(socket, jobId);
                         if (options.value("hasIpAdapterImage").toBool()) {
@@ -68,6 +79,13 @@ public:
             });
             connect(socket, &QWebSocket::binaryMessageReceived, this, [this, socket](const QByteArray &data) {
                 m_uploadedImages.append(data);
+                if (m_photoMakerUploads.value(socket) == 2) {
+                    m_photoMakerUploads[socket] = 1;
+                    socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+                        {"type", "upload-required"}, {"jobId", m_uploadJobs.value(socket)}, {"inputRole", "photomaker-identity"}}).toJson()));
+                    return;
+                }
+                m_photoMakerUploads.remove(socket);
                 if (m_adapterUploads.value(socket) == 2) {
                     m_adapterUploads[socket] = 1;
                     socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
@@ -104,6 +122,7 @@ private:
     QHash<QWebSocket *, int> m_adapterUploads;
     QList<QByteArray> m_uploadedImages;
     bool m_ipAdapter = false;
+    QHash<QWebSocket *, int> m_photoMakerUploads;
 };
 }
 
@@ -120,7 +139,103 @@ private slots:
     void installsModularCompanionsForExistingModel();
     void reportsConnectionFailure();
     void submitsIpAdapterReferences();
+    void submitsPhotoMakerIdentity();
+    void identityPackages();
 };
+
+void ServiceSdkTest::identityPackages()
+{
+    const QByteArray png = QByteArray::fromHex("89504e470d0a1a0a") + QByteArray(2000, 'x');
+    const QByteArray bin("embedding\0bytes", 15);
+    QString error;
+    const auto package = KiraService::packPhotoMakerIdentity(png, bin, &error);
+    QVERIFY2(!package.isEmpty(), qPrintable(error));
+    QVERIFY(package.startsWith("PK"));
+    QVERIFY(package.size() < png.size());
+    QByteArray reference, identity;
+    QVERIFY2(KiraService::unpackPhotoMakerIdentity(package, reference, identity, &error), qPrintable(error));
+    QCOMPARE(reference, png); QCOMPARE(identity, bin);
+    QVERIFY(!KiraService::unpackPhotoMakerIdentity("not a zip", reference, identity, &error));
+    QVERIFY(!error.isEmpty()); QVERIFY(reference.isEmpty()); QVERIFY(identity.isEmpty());
+    QVERIFY(!KiraService::unpackPhotoMakerIdentity(package.left(package.size() / 2), reference, identity));
+    QVERIFY(KiraService::packPhotoMakerIdentity(png, {}).isEmpty());
+    QVERIFY(KiraService::packPhotoMakerIdentity("not png", bin).isEmpty());
+    // Independently authored ZIPs exercise strict entry/manifest validation.
+    const auto customZip = [](const QList<QPair<QByteArray, QByteArray>>& files) {
+        QByteArray output(8192, Qt::Uninitialized);
+        size_t used = 0;
+        auto* writer = archive_write_new();
+        archive_write_set_format_zip(writer);
+        archive_write_open_memory(writer, output.data(), output.size(), &used);
+        for (const auto& file : files) {
+            auto* entry = archive_entry_new();
+            archive_entry_set_pathname(entry, file.first.constData());
+            archive_entry_set_filetype(entry, AE_IFREG);
+            archive_entry_set_perm(entry, 0600);
+            archive_entry_set_size(entry, file.second.size());
+            archive_write_header(writer, entry);
+            archive_write_data(writer, file.second.constData(), file.second.size());
+            archive_entry_free(entry);
+        }
+        archive_write_close(writer); archive_write_free(writer);
+        output.resize(used); return output;
+    };
+    QList<QPair<QByteArray, QByteArray>> files{
+        {"reference.png", png}, {"id_embeds.bin", bin},
+        {"manifest.json", "{\"type\":\"photomaker-v2\",\"version\":1}"}};
+    QVERIFY(KiraService::unpackPhotoMakerIdentity(customZip(files), reference, identity));
+    auto bad = files; bad.removeLast();
+    QVERIFY(!KiraService::unpackPhotoMakerIdentity(customZip(bad), reference, identity));
+    bad = files; bad.append(files.first());
+    QVERIFY(!KiraService::unpackPhotoMakerIdentity(customZip(bad), reference, identity));
+    bad = files; bad.first().first = "../reference.png";
+    QVERIFY(!KiraService::unpackPhotoMakerIdentity(customZip(bad), reference, identity));
+    bad = files; bad.last().second = "{\"type\":\"photomaker-v2\",\"version\":2}";
+    QVERIFY(!KiraService::unpackPhotoMakerIdentity(customZip(bad), reference, identity));
+}
+
+void ServiceSdkTest::submitsPhotoMakerIdentity()
+{
+    FakeSdkService service(true); QVERIFY(service.start());
+    KiraService::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+    QTRY_VERIFY(client.capabilities().photoMaker);
+    QTRY_COMPARE(client.models(KiraService::ModelCategory::PhotoMaker).size(), 1);
+    KiraService::ImageGenerationRequest request;
+    request.modelId = "image-generation:test.safetensors"; request.prompt = "a woman img";
+    request.photoMakerModelId = "photomaker:test.safetensors";
+    request.photoMakerReferenceImageData = "reference";
+    request.photoMakerIdentityData = QByteArray("identity\0bytes", 14);
+    request.photoMakerStyleStrength = 17;
+    QSignalSpy results(&client, &KiraService::ServiceClient::imageJobFinished);
+    QVERIFY(!client.submitGeneration(request).isEmpty()); QTRY_COMPARE(results.count(), 1);
+    QCOMPARE(service.uploadedImages(), QList<QByteArray>({request.photoMakerReferenceImageData, request.photoMakerIdentityData}));
+    const auto options = service.messages().last().value("options").toObject();
+    QCOMPARE(options.value("photoMakerModelId").toString(), request.photoMakerModelId);
+    QCOMPARE(options.value("photoMakerStyleStrength").toInt(), 17);
+    QVERIFY(!options.value("hasInput").toBool());
+    request.photoMakerReferenceImageData = QByteArray::fromHex("89504e470d0a1a0a") + "reference";
+    const auto reference = request.photoMakerReferenceImageData;
+    const auto identity = request.photoMakerIdentityData;
+    request.photoMakerIdentityPackageData = KiraService::packPhotoMakerIdentity(reference, identity);
+    QVERIFY(client.submitGeneration(request).isEmpty()); // Ambiguous package + legacy inputs.
+    request.photoMakerReferenceImageData.clear(); request.photoMakerIdentityData.clear();
+    QVERIFY(!client.submitGeneration(request).isEmpty()); QTRY_COMPARE(results.count(), 2);
+    QCOMPARE(service.uploadedImages().mid(2), QList<QByteArray>({reference, identity}));
+    request.photoMakerIdentityPackageData = "invalid";
+    QVERIFY(client.submitGeneration(request).isEmpty());
+    request.photoMakerIdentityPackageData.clear();
+    request.photoMakerReferenceImageData = reference; request.photoMakerIdentityData = identity;
+    QVERIFY(client.submitEdit(request).isEmpty());
+    request.photoMakerStyleStrength = 101; QVERIFY(client.submitGeneration(request).isEmpty());
+    request.photoMakerStyleStrength.reset(); request.photoMakerIdentityData.clear();
+    QVERIFY(client.submitGeneration(request).isEmpty());
+    client.disconnectFromService(); QTRY_VERIFY(!client.isAuthenticated());
+    QVERIFY(!client.capabilities().photoMaker);
+    FakeSdkService legacy; QVERIFY(legacy.start());
+    client.setConfiguration(legacy.endpoint(), {}); client.connectToService(); QTRY_VERIFY(client.modelListAvailable());
+    request.photoMakerIdentityData = "identity";
+    QVERIFY(client.submitGeneration(request).isEmpty());
+}
 
 void ServiceSdkTest::submitsIpAdapterReferences()
 {

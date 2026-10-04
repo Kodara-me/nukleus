@@ -4,6 +4,7 @@ include(CMakePackageConfigHelpers)
 option(KIRA_SERVICE_SDK_INSTALL "Install and export the Kira Service SDK" ON)
 
 find_package(Qt6 6.2 REQUIRED COMPONENTS Core Network WebSockets)
+find_package(LibArchive REQUIRED)
 
 add_library(KiraServiceProtocol STATIC
     include/kira/service/GenerationProgress.h
@@ -21,6 +22,8 @@ target_include_directories(KiraServiceProtocol PUBLIC
 target_link_libraries(KiraServiceProtocol PUBLIC Qt6::Core)
 
 add_library(KiraServiceSdk STATIC
+    include/kira/service/PhotoMakerIdentity.h
+    src/PhotoMakerIdentity.cpp
     include/kira/service/ImageTypes.h
     include/kira/service/ServiceClient.h
     src/ServiceClient.cpp
@@ -31,7 +34,7 @@ target_include_directories(KiraServiceSdk PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
-target_link_libraries(KiraServiceSdk PUBLIC KiraService::Protocol Qt6::Network Qt6::WebSockets)
+target_link_libraries(KiraServiceSdk PUBLIC KiraService::Protocol Qt6::Network Qt6::WebSockets LibArchive::LibArchive)
 
 foreach(target KiraServiceProtocol KiraServiceSdk)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

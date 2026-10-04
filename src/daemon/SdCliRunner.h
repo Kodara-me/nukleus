@@ -60,6 +60,8 @@ private:
     QStringList m_arguments;
     QString m_outputPath;
     bool m_memoryFailure = false;
+    bool m_photoMakerRequested = false;
+    bool m_photoMakerFailure = false;
     QString m_standardOutput;
     QString m_standardError;
     QString m_pendingStandardOutput;

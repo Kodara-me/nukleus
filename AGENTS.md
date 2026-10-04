@@ -158,4 +158,25 @@ dependencies only; Canvas never runs them. Configure KIRA_PHOTOMAKER_PYTHON and
 KIRA_PHOTOMAKER_FACE_DETECT on the service host. Advertise extraction independently
 of sd-cli when these paths are configured; dependency/model failures remain explicit.
 Do not add InstantID, DINOv2, general identity abstractions, or a Canvas crop/export
-UI in this slice. PhotoMaker generation conditioning is a separate future slice.
+UI in this slice.
+
+PhotoMaker V2 generation is supported by image.generate and capabilities.photoMaker.
+Resolve photoMakerModelId internally; require hasPhotoMakerIdentity and upload one
+photomaker-reference image followed by photomaker-identity opaque embedding bytes.
+The matching reference image remains required by sd-cli, even with existing embeddings.
+SDK fields are photoMakerModelId, photoMakerReferenceImageData, photoMakerIdentityData
+and optional photoMakerStyleStrength (integer 0–100, default 20). Do not combine
+with editing, upscaling, image-to-image or IP-Adapter. Protect both models throughout
+the lifecycle and clean temporary files. Use --photo-maker, --pm-id-embed-path,
+--pm-id-images-dir and --pm-style-strength; report backend conditioning disablement
+as failure. Prompts require a class word followed by img; callers select compatible
+SDXL/PhotoMaker V2 weights. Reuse needs no Python extraction runtime.
+
+## PhotoMaker identity package contract
+
+The SDK's LibArchive-backed `.kiraid` helper owns the compressed ZIP format:
+reference.png, id_embeds.bin, manifest.json (type photomaker-v2, version 1).
+Generation accepts photoMakerIdentityPackageData and unpacks it in memory before
+uploading existing protocol-v3 roles. Reject malformed, oversized and ambiguous
+package-plus-paired inputs; preserve legacy paired requests. Extraction continues
+to return only id_embeds.bin. No Python or archive executable runs in Canvas.

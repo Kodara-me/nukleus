@@ -87,6 +87,11 @@ struct ImageGenerationRequest
     QString ipAdapterModelId;
     QByteArray ipAdapterImageData;
     std::optional<double> ipAdapterStrength;
+    QString photoMakerModelId;
+    QByteArray photoMakerIdentityPackageData; // Complete .kiraid file; preferred over the legacy pair.
+    QByteArray photoMakerIdentityData;
+    QByteArray photoMakerReferenceImageData;
+    std::optional<int> photoMakerStyleStrength;
 };
 
 struct ImageUpscaleRequest
@@ -113,6 +118,7 @@ struct ServiceCapabilities
     bool imageEdit = false;
     bool ipAdapter = false;
     bool photoMakerIdentityExport = false;
+    bool photoMaker = false;
 };
 
 struct PhotoMakerIdentityResult
