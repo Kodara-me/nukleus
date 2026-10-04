@@ -1,6 +1,7 @@
 #include "SdCliRunner.h"
 
 #include <QDebug>
+#include <QFileInfo>
 #include <QProcess>
 #include <QTimer>
 
@@ -114,6 +115,18 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
     if (!request.llmVisionPath.isEmpty()) arguments.append({QStringLiteral("--llm_vision"), request.llmVisionPath});
     if (!request.clipLPath.isEmpty()) arguments.append({QStringLiteral("--clip_l"), request.clipLPath});
     if (!request.clipGPath.isEmpty()) arguments.append({QStringLiteral("--clip_g"), request.clipGPath});
+    if (!request.ipAdapterPath.isEmpty()) {
+        arguments.append({QStringLiteral("--clip_vision"), request.clipVisionPath,
+            QStringLiteral("--ip-adapter"), request.ipAdapterPath,
+            QStringLiteral("--ip-adapter-image"), request.ipAdapterImagePath,
+            QStringLiteral("--ip-adapter-strength"), QString::number(request.ipAdapterStrength, 'g', 17)});
+        if (!request.ipAdapterLoraPath.isEmpty()) {
+            const QFileInfo lora(request.ipAdapterLoraPath);
+            arguments.append({QStringLiteral("--lora-model-dir"), lora.absolutePath()});
+            arguments[arguments.indexOf(QStringLiteral("--prompt")) + 1] +=
+                QStringLiteral(" <lora:%1:1>").arg(lora.fileName());
+        }
+    }
     if (!request.referenceImagePath.isEmpty())
         arguments.append({QStringLiteral("--ref-image"), request.referenceImagePath,
             QStringLiteral("--flow-shift"), QStringLiteral("3"),

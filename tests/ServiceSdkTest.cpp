@@ -4,6 +4,7 @@
 
 #include <QHostAddress>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QWebSocket>
 #include <QWebSocketServer>
@@ -16,8 +17,8 @@ namespace
 class FakeSdkService final : public QObject
 {
 public:
-    FakeSdkService()
-        : m_server(QStringLiteral("sdk-test"), QWebSocketServer::NonSecureMode, this)
+    explicit FakeSdkService(bool ipAdapter = false)
+        : m_server(QStringLiteral("sdk-test"), QWebSocketServer::NonSecureMode, this), m_ipAdapter(ipAdapter)
     {
         connect(&m_server, &QWebSocketServer::newConnection, this, [this] {
             QWebSocket *socket = m_server.nextPendingConnection();
@@ -29,6 +30,17 @@ public:
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"authenticated\"}"));
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\",\"image.upscale\"]}"));
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list.result\",\"categories\":[{\"category\":\"image-generation\",\"models\":[{\"id\":\"image-generation:test.safetensors\",\"name\":\"Test\",\"fileName\":\"test.safetensors\",\"bytes\":1,\"modelType\":\"diffusion\",\"explicitContent\":true,\"companionFiles\":{\"clip-l\":\"companions/test.safetensors/clip-l/clip_l.safetensors\"},\"companionFileName\":\"companions/test.safetensors/vae.safetensors\",\"companionRole\":\"vae\"}]},{\"category\":\"edition\",\"models\":[{\"id\":\"edition:edit.safetensors\",\"name\":\"Edit\",\"fileName\":\"edit.safetensors\",\"bytes\":5,\"companionFileName\":\"companions/edit.safetensors/vae.gguf\",\"companionRole\":\"vae\"}]},{\"category\":\"upscaler\",\"models\":[{\"id\":\"upscaler:test.gguf\",\"name\":\"Test 2x\",\"recommendedOptions\":{\"tileSize\":128},\"fileName\":\"test.gguf\",\"bytes\":2}]},{\"category\":\"llm-chat\",\"models\":[{\"id\":\"llm-chat:test.gguf\",\"name\":\"Test LLM\",\"fileName\":\"llm.gguf\",\"bytes\":3,\"companionFileName\":\"companions/llm.gguf/mmproj.gguf\",\"companionRole\":\"mmproj\"}]},{\"category\":\"ip-adapter\",\"models\":[{\"id\":\"ip-adapter:test.bin\",\"name\":\"Test Adapter\",\"fileName\":\"test.bin\",\"bytes\":4,\"companionFileName\":\"companions/test.bin/test-lora.safetensors\"}]}]}"));
+                    if (m_ipAdapter) {
+                        socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+                            {"type", "capabilities"}, {"state", "ready"}, {"ipAdapter", true},
+                            {"operations", QJsonArray{"image.generate", "image.upscale", "image.edit"}}}).toJson()));
+                        socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+                            {"type", "models.list.result"}, {"categories", QJsonArray{
+                                QJsonObject{{"category", "image-generation"}, {"models", QJsonArray{QJsonObject{{"id", "image-generation:test.safetensors"}}}}},
+                                QJsonObject{{"category", "edition"}, {"models", QJsonArray{QJsonObject{{"id", "edition:edit.safetensors"}}}}},
+                                QJsonObject{{"category", "clip_vision"}, {"models", QJsonArray{QJsonObject{{"id", "clip_vision:vision.safetensors"}}}}},
+                                QJsonObject{{"category", "ip_adapter"}, {"models", QJsonArray{QJsonObject{{"id", "ip-adapter:test.bin"}}}}}}}}).toJson()));
+                    }
                 } else if (type == "models.configure") {
                     const QJsonObject reply{{"type", "models.configure.completed"}, {"id", message.value("id")}, {"model", QJsonObject{{"recommendedOptions", message.value("recommendedOptions")}}}};
                     socket->sendTextMessage(QString::fromUtf8(QJsonDocument(reply).toJson(QJsonDocument::Compact)));
@@ -38,8 +50,16 @@ public:
                     socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "models.install.canceled"}, {"installId", message.value("installId")}}).toJson(QJsonDocument::Compact)));
                 } else if (type == QStringLiteral("submit")) {
                     const QString jobId = message.value(QStringLiteral("jobId")).toString();
-                    if (message.value(QStringLiteral("options")).toObject().value(QStringLiteral("hasInput")).toBool()) {
+                    const auto options = message.value("options").toObject();
+                    if (options.value("hasInput").toBool() || options.value("hasIpAdapterImage").toBool()) {
                         m_uploadJobs.insert(socket, jobId);
+                        if (options.value("hasIpAdapterImage").toBool()) {
+                            m_adapterUploads.insert(socket, options.value("hasInput").toBool() ? 2 : 1);
+                            socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+                                {"type", "upload-required"}, {"jobId", jobId},
+                                {"inputRole", options.value("hasInput").toBool() ? "source" : "ip-adapter"}}).toJson()));
+                            return;
+                        }
                         socket->sendTextMessage(QStringLiteral("{\"type\":\"upload-required\",\"jobId\":\"%1\"}").arg(jobId));
                     } else {
                         complete(socket, jobId, QByteArray("sdk-result"));
@@ -47,6 +67,14 @@ public:
                 }
             });
             connect(socket, &QWebSocket::binaryMessageReceived, this, [this, socket](const QByteArray &data) {
+                m_uploadedImages.append(data);
+                if (m_adapterUploads.value(socket) == 2) {
+                    m_adapterUploads[socket] = 1;
+                    socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+                        {"type", "upload-required"}, {"jobId", m_uploadJobs.value(socket)}, {"inputRole", "ip-adapter"}}).toJson()));
+                    return;
+                }
+                m_adapterUploads.remove(socket);
                 const QString jobId = m_uploadJobs.take(socket);
                 complete(socket, jobId, data.isEmpty() ? QByteArray("sdk-result") : QByteArray("sdk-result"));
             });
@@ -57,6 +85,7 @@ public:
     QString errorString() const { return m_server.errorString(); }
     QUrl endpoint() const { return QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(m_server.serverPort())); }
     const QList<QJsonObject> &messages() const { return m_messages; }
+    const QList<QByteArray> &uploadedImages() const { return m_uploadedImages; }
 
 private:
     void complete(QWebSocket *socket, const QString &jobId, const QByteArray &data)
@@ -72,6 +101,9 @@ private:
     QWebSocketServer m_server;
     QList<QJsonObject> m_messages;
     QHash<QWebSocket *, QString> m_uploadJobs;
+    QHash<QWebSocket *, int> m_adapterUploads;
+    QList<QByteArray> m_uploadedImages;
+    bool m_ipAdapter = false;
 };
 }
 
@@ -87,7 +119,40 @@ private slots:
     void installsModelWithCompanion();
     void installsModularCompanionsForExistingModel();
     void reportsConnectionFailure();
+    void submitsIpAdapterReferences();
 };
+
+void ServiceSdkTest::submitsIpAdapterReferences()
+{
+    FakeSdkService service(true); QVERIFY(service.start());
+    KiraService::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+    QTRY_VERIFY(client.capabilities().ipAdapter);
+    QTRY_COMPARE(client.models(KiraService::ModelCategory::ClipVision).size(), 1);
+    QCOMPARE(client.models(KiraService::ModelCategory::IpAdapter).size(), 1);
+    KiraService::ImageGenerationRequest request;
+    request.modelId = "image-generation:test.safetensors"; request.prompt = "test";
+    request.clipVisionModelId = "clip_vision:vision.safetensors";
+    request.ipAdapterModelId = "ip-adapter:test.bin";
+    request.ipAdapterImageData = "adapter reference"; request.ipAdapterStrength = 0.85;
+    QSignalSpy results(&client, &KiraService::ServiceClient::imageJobFinished);
+    QVERIFY(!client.submitGeneration(request).isEmpty()); QTRY_COMPARE(results.count(), 1);
+    QCOMPARE(service.uploadedImages(), QList<QByteArray>{QByteArray("adapter reference")});
+    auto options = service.messages().last().value("options").toObject();
+    QCOMPARE(options.value("clipVisionModelId").toString(), request.clipVisionModelId);
+    QCOMPARE(options.value("ipAdapterModelId").toString(), request.ipAdapterModelId);
+    QCOMPARE(options.value("ip_adapter_strength").toDouble(), 0.85);
+    QVERIFY(!options.value("hasInput").toBool());
+    request.modelId = "edition:edit.safetensors"; request.baseImageData = "editing source";
+    QVERIFY(!client.submitEdit(request).isEmpty()); QTRY_COMPARE(results.count(), 2);
+    QCOMPARE(service.uploadedImages(), QList<QByteArray>({"adapter reference", "editing source", "adapter reference"}));
+    request.ipAdapterImageData.clear(); QVERIFY(client.submitEdit(request).isEmpty());
+    client.disconnectFromService(); QTRY_VERIFY(!client.isAuthenticated());
+    QVERIFY(!client.capabilities().ipAdapter);
+    FakeSdkService legacy; QVERIFY(legacy.start());
+    client.setConfiguration(legacy.endpoint(), {}); client.connectToService(); QTRY_VERIFY(client.modelListAvailable());
+    request.modelId = "image-generation:test.safetensors"; request.ipAdapterImageData = "reference";
+    QVERIFY(!client.capabilities().ipAdapter); QVERIFY(client.submitGeneration(request).isEmpty());
+}
 
 void ServiceSdkTest::configuresAndCancelsModels()
 {

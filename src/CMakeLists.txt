@@ -2,6 +2,7 @@ include(GNUInstallDirs)
 add_subdirectory(sdk)
 
 set(SERVICE_DAEMON_SOURCES
+    daemon/resources.qrc
     daemon/GenerationRequest.h
     daemon/KiraService.cpp
     daemon/KiraService.h
@@ -20,6 +21,7 @@ add_executable(kira-service
     daemon/kira-service-main.cpp
     ${SERVICE_DAEMON_SOURCES}
 )
+set_target_properties(kira-service PROPERTIES AUTORCC ON)
 target_include_directories(kira-service PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/daemon
 )

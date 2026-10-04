@@ -14,7 +14,9 @@ enum class ModelCategory
     Upscaler,
     LlmChat,
     IpAdapter,
-    Edition
+    Edition,
+    ClipVision,
+    PhotoMaker
 };
 
 struct ModelInfo

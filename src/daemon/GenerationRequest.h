@@ -25,4 +25,9 @@ struct GenerationRequest
     QString clipLPath;
     QString clipGPath;
     bool diffusionModel = false;
+    QString clipVisionPath;
+    QString ipAdapterPath;
+    QString ipAdapterImagePath;
+    QString ipAdapterLoraPath;
+    double ipAdapterStrength = 1.0;
 };

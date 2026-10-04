@@ -60,7 +60,7 @@ Recommended options are metadata returned to clients, not enforced execution
 settings. Image generation/Edition expose square resolution (256–2048 in steps
 of 256), steps, CFG scale, sampler, scheduler, and Clip Skip. LLM exposes
 temperature, top-p, context length, and maximum tokens; Upscaler exposes tile
-size (execution remains fixed at 2×); IP-Adapter exposes strength. Existing
+size (execution remains fixed at 2×); IP-Adapter exposes strength; CLIP Vision exposes image size and input normalization. Existing
 models without recommendations remain usable; proposed defaults are saved only
 on an explicit Save. Canvas uses the selected model’s recommendations for unedited generation controls.
 
@@ -80,7 +80,8 @@ The manager also provides local CLI operations:
 ```sh
 kira-service-manager list
 kira-service-manager add https://huggingface.co/owner/repo/resolve/main/model.gguf --category upscaler
-kira-service-manager add https://huggingface.co/h94/IP-Adapter-FaceID/resolve/main/ip-adapter-faceid-plusv2_sdxl.bin?utm_source=chatgpt.com --category ip-adapter --companion-lora 'https://huggingface.co/h94/IP-Adapter-FaceID/resolve/main/ip-adapter-faceid-plusv2_sdxl_lora.safetensors?utm_source=chatgpt.com'
+kira-service-manager add https://example.com/clip_vision_h.safetensors --category clip_vision
+kira-service-manager add https://huggingface.co/h94/IP-Adapter/resolve/main/models/ip-adapter_sd15.safetensors --category ip_adapter
 kira-service-manager add https://example.com/model.gguf --category llm-chat --mmproj https://example.com/mmproj.gguf
 kira-service-manager add https://example.com/edit.safetensors --category edition --vae https://example.com/vae.safetensors
 kira-service-manager attach image-generation:existing.gguf --model-type diffusion --clip-l https://example.com/clip_l.safetensors --clip-g https://example.com/clip_g.safetensors --vae https://example.com/vae.safetensors
@@ -93,7 +94,7 @@ Use `--help` for all options. CLI and GUI manager connections are local-only and
 
 The `edition` category supports installing, listing, and deleting image-editing models in the manager GUI and CLI (`add <url> --category edition`). It accepts `.safetensors`, `.ckpt`, and `.gguf` files. Editing jobs use image.edit with uploaded reference images.
 
-Service models live in `$XDG_DATA_HOME/kira-service/models/`: image-generation files in `models/`, edition models for image editing in `models/edition/`, upscalers in `models/upscale/`, LLM chat files in `models/llm/`, and IP-Adapters in `models/ip-adapter/`. Optional companion files are kept under each category's private `companions/<primary filename>/` directory and linked through persistent category-local metadata: mmproj for LLM-chat, VAE for Image-generation and Edition, and LoRA for IP-Adapter. The manager downloads and installs the primary and its optional files together; failed or canceled downloads leave no usable pair, and deleting the primary also removes its companion. Model listings expose `companionFileName` and `companionRole` (`mmproj`, `vae`, or `lora`) without exposing service paths. The manager accepts HTTPS model-file URLs and never overwrites an installed filename. SHA-256 fields and download verification are no longer supported. Primary IP-Adapter files support `.bin`, `.safetensors`, `.ckpt`, and `.gguf`; mmproj files require `.gguf`, while VAE and LoRA files accept `.safetensors`, `.ckpt`, or `.gguf`. Query-bearing URLs are accepted and Hugging Face `blob` links are normalized to `resolve` URLs. The add-model modal shows the optional companion URL field appropriate to the selected category. Image-generation CLIP-L, CLIP-G, VAE, LLM text encoder and mmproj companions are passed to sd-cli; LLM-chat mmproj and IP-Adapter LoRA remain catalog attachments. Legacy single-companion installations remain supported. New companionFiles metadata maps roles to category-relative filenames, and modelType defaults to checkpoint when absent.
+Service models live in `$XDG_DATA_HOME/kira-service/models/`: image-generation files in `models/`, edition models for image editing in `models/edition/`, upscalers in `models/upscale/`, LLM chat files in `models/llm/`, IP-Adapters in `models/ip-adapter/`, and CLIP Vision encoders in `models/clip_vision/`. Optional companion files are kept under each category's private `companions/<primary filename>/` directory and linked through persistent category-local metadata: mmproj for LLM-chat, VAE for Image-generation and Edition, and LoRA for IP-Adapter. The manager downloads and installs the primary and its optional files together; failed or canceled downloads leave no usable pair, and deleting the primary also removes its companion. Model listings expose `companionFileName` and `companionRole` (`mmproj`, `vae`, or `lora`) without exposing service paths. The manager accepts HTTPS model-file URLs and never overwrites an installed filename. SHA-256 fields and download verification are no longer supported. Primary IP-Adapter and CLIP Vision files support `.bin`, `.safetensors`, `.ckpt`, and `.gguf`; mmproj files require `.gguf`, while VAE and LoRA files accept `.safetensors`, `.ckpt`, or `.gguf`. Query-bearing URLs are accepted and Hugging Face `blob` links are normalized to `resolve` URLs. The add-model modal shows the optional companion URL field appropriate to the selected category. Image-generation CLIP-L, CLIP-G, VAE, LLM text encoder and mmproj companions are passed to sd-cli; LLM-chat mmproj remains a catalog attachment. An explicitly selected IP-Adapter uses its optional auxiliary LoRA through --lora-model-dir and a generated prompt tag. Legacy single-companion installations remain supported. New companionFiles metadata maps roles to category-relative filenames, and modelType defaults to checkpoint when absent.
 
 The Linux installer moves legacy models from `$XDG_DATA_HOME/kira-canvas/models/` during an upgrade. It aborts without changing either directory if both model roots already exist.
 
@@ -192,3 +193,48 @@ restart the service. Tracked changes, diverged branches, and build/test failures
 stop the update before installation. The restart interrupts active jobs.
 Build dependencies and Kira UI Framework must already be available; sibling
 checkouts and `sd-cli` are not updated. See `--help` for build and installer options.
+
+
+## IP-Adapter
+
+The Manager lists `clip_vision` encoders and `ip_adapter` weights and saves their
+category options. IP-Adapter keeps its existing `models/ip-adapter/` storage and
+opaque IDs; `ip-adapter` remains an accepted category alias. An optional auxiliary
+LoRA uses the existing companion workflow.
+
+SDK generation/editing requests can select both installed IDs, supply a distinct
+`ipAdapterImageData`, and set `ipAdapterStrength`. The service supplies sd-cli's
+`--clip_vision`, `--ip-adapter`, `--ip-adapter-image`, and
+`--ip-adapter-strength` arguments. Editing source bytes remain separate.
+Recommendations do not activate conditioning automatically; CLIP Vision's
+`image_size`/`normalize_input` remain metadata because sd-cli owns preprocessing.
+Use compatible classic/Plus SD 1.5 or SDXL weights; other base architectures are
+subject to sd-cli support. See [protocol details](docs/protocol-v3.md#ip-adapter-conditioning).
+
+## PhotoMaker V2 identity export
+
+The Manager supports the separate `photomaker` category: one required
+`.safetensors` file, stored in `models/photomaker/`, with integer
+`style_strength` recommendations (0–100, default 20). Use weights converted for
+sd-cli, such as `photomaker-v2.safetensors`; the original .bin weights are not
+supported by sd-cli. Installation, configuration and deletion use the normal
+model workflow.
+
+The SDK's `exportPhotoMakerIdentity(sourceImageData)` accepts a full image or
+an already prepared crop. Its dedicated `photoMakerIdentityExportFinished`
+signal returns `PhotoMakerIdentityResult.identityData`: the unchanged
+`id_embeds.bin` bytes, never an image. The service runs upstream
+`face_detect.py` with a strict single-face guard, reports absent/ambiguous faces
+and extraction failures, and removes job files on completion or disconnection.
+No PhotoMaker model selection is required for this extraction.
+
+This optional service-host runtime requires a Python environment, the official
+script and its InsightFace dependencies/models. Set `KIRA_PHOTOMAKER_PYTHON`
+and `KIRA_PHOTOMAKER_FACE_DETECT` as described in
+[CONTRIBUTING](CONTRIBUTING.md#photomaker-v2-extractor-setup).
+No Python is required in Canvas. This slice provides catalogue/options, binary
+export and the Canvas default selector; generation conditioning and the Canvas
+crop/export interface remain separate work. Future sd-cli conditioning uses
+`--photo-maker`, `--pm-id-embed-path` and `--pm-style-strength`, alongside
+the identity-image directory required by upstream.
+See [upstream PhotoMaker documentation](https://github.com/leejet/stable-diffusion.cpp/blob/master/docs/photo_maker.md).

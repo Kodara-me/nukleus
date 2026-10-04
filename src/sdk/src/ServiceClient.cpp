@@ -14,8 +14,10 @@ KiraService::ModelCategory categoryFromName(const QString &name)
     if (name == QStringLiteral("image-generation")) return KiraService::ModelCategory::ImageGeneration;
     if (name == QStringLiteral("upscaler")) return KiraService::ModelCategory::Upscaler;
     if (name == QStringLiteral("llm-chat")) return KiraService::ModelCategory::LlmChat;
-    if (name == QStringLiteral("ip-adapter")) return KiraService::ModelCategory::IpAdapter;
+    if (name == QStringLiteral("ip-adapter") || name == QStringLiteral("ip_adapter")) return KiraService::ModelCategory::IpAdapter;
     if (name == QStringLiteral("edition")) return KiraService::ModelCategory::Edition;
+    if (name == "clip_vision") return KiraService::ModelCategory::ClipVision;
+    if (name == "photomaker") return KiraService::ModelCategory::PhotoMaker;
     return KiraService::ModelCategory::Unknown;
 }
 
@@ -25,8 +27,19 @@ QString categoryName(KiraService::ModelCategory category)
     if (category == KiraService::ModelCategory::Upscaler) return QStringLiteral("upscaler");
     if (category == KiraService::ModelCategory::LlmChat) return QStringLiteral("llm-chat");
     if (category == KiraService::ModelCategory::Edition) return QStringLiteral("edition");
+    // Retain the accepted alias so existing SDK installation calls also work with older servers.
     if (category == KiraService::ModelCategory::IpAdapter) return QStringLiteral("ip-adapter");
+    if (category == KiraService::ModelCategory::ClipVision) return QStringLiteral("clip_vision");
+    if (category == KiraService::ModelCategory::PhotoMaker) return QStringLiteral("photomaker");
     return {};
+}
+
+void addIpAdapterOptions(QJsonObject &options, const KiraService::ImageGenerationRequest &request)
+{
+    if (!request.clipVisionModelId.isEmpty()) options.insert("clipVisionModelId", request.clipVisionModelId);
+    if (!request.ipAdapterModelId.isEmpty()) options.insert("ipAdapterModelId", request.ipAdapterModelId);
+    if (!request.ipAdapterImageData.isEmpty()) options.insert("hasIpAdapterImage", true);
+    if (request.ipAdapterStrength) options.insert("ip_adapter_strength", *request.ipAdapterStrength);
 }
 
 QString operationName(KiraService::ImageOperation operation)
@@ -186,7 +199,7 @@ bool ServiceClient::deleteModel(const QString &id)
 
 QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
 {
-    const QJsonObject options{{QStringLiteral("prompt"), request.prompt},
+    QJsonObject options{{QStringLiteral("prompt"), request.prompt},
                               {QStringLiteral("negativePrompt"), request.negativePrompt},
                               {QStringLiteral("sampler"), request.sampler},
                               {QStringLiteral("scheduler"), request.scheduler},
@@ -199,17 +212,19 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
                               {QStringLiteral("hasInput"), !request.baseImageData.isEmpty()},
                               {QStringLiteral("baseImageStrength"), request.baseImageStrength},
                               {QStringLiteral("modelId"), request.modelId}};
-    return submit(ImageOperation::Generate, options, request.baseImageData);
+    addIpAdapterOptions(options, request);
+    return submit(ImageOperation::Generate, options, request.baseImageData, request.ipAdapterImageData);
 }
 
 QString ServiceClient::submitEdit(const ImageGenerationRequest &request)
 {
     if (request.baseImageData.isEmpty() || request.prompt.trimmed().isEmpty()) return {};
-    return submit(ImageOperation::Edit,
-        {{"modelId", request.modelId}, {"hasInput", true}, {"prompt", request.prompt},
+    QJsonObject options{{"modelId", request.modelId}, {"hasInput", true}, {"prompt", request.prompt},
          {"width", request.width}, {"height", request.height}, {"steps", request.steps},
          {"cfgScale", request.cfgScale}, {"sampler", request.sampler},
-         {"scheduler", request.scheduler}, {"clipSkip", request.clipSkip}}, request.baseImageData);
+         {"scheduler", request.scheduler}, {"clipSkip", request.clipSkip}};
+    addIpAdapterOptions(options, request);
+    return submit(ImageOperation::Edit, options, request.baseImageData, request.ipAdapterImageData);
 }
 
 QString ServiceClient::submitUpscale(const ImageUpscaleRequest &request)
@@ -220,11 +235,30 @@ QString ServiceClient::submitUpscale(const ImageUpscaleRequest &request)
                   request.sourceImageData);
 }
 
-QString ServiceClient::submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData)
+QString ServiceClient::exportPhotoMakerIdentity(const QByteArray &sourceImageData)
+{
+    if (!m_authenticated || !m_capabilities.photoMakerIdentityExport || sourceImageData.isEmpty()) return {};
+    const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    PendingJob job;
+    job.inputData = sourceImageData;
+    job.identityExport = true;
+    m_pendingJobs.insert(jobId, job);
+    const QJsonObject message{{"type", "submit"}, {"jobId", jobId}, {"operation", "photomaker.export"},
+        {"options", QJsonObject{}}};
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
+    return jobId;
+}
+
+QString ServiceClient::submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData, const QByteArray &ipAdapterImageData)
 {
     if (!canSubmit(operation, options.value(QStringLiteral("modelId")).toString())) return {};
+    const bool adapterRequested = options.contains("clipVisionModelId") || options.contains("ipAdapterModelId")
+        || options.contains("hasIpAdapterImage") || options.contains("ip_adapter_strength");
+    if (adapterRequested && (!m_capabilities.ipAdapter || ipAdapterImageData.isEmpty()
+        || !containsModel(options.value("clipVisionModelId").toString(), ModelCategory::ClipVision)
+        || !containsModel(options.value("ipAdapterModelId").toString(), ModelCategory::IpAdapter))) return {};
     const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    m_pendingJobs.insert(jobId, PendingJob{operation, inputData, {}});
+    m_pendingJobs.insert(jobId, PendingJob{operation, inputData, ipAdapterImageData, {}});
     const QJsonObject message{{QStringLiteral("type"), QStringLiteral("submit")},
                               {QStringLiteral("jobId"), jobId},
                               {QStringLiteral("operation"), operationName(operation)},
@@ -255,7 +289,8 @@ void ServiceClient::handleTextMessage(const QString &message)
     }
     if (type == QStringLiteral("capabilities")) {
         const QJsonArray operations = object.value(QStringLiteral("operations")).toArray();
-        updateCapabilities({operations.contains(QStringLiteral("image.generate")), operations.contains(QStringLiteral("image.upscale")), operations.contains(QStringLiteral("image.edit"))});
+        updateCapabilities({operations.contains(QStringLiteral("image.generate")), operations.contains(QStringLiteral("image.upscale")), operations.contains(QStringLiteral("image.edit")), object.value("ipAdapter").toBool(false),
+            operations.contains("photomaker.export")});
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
         return;
@@ -352,7 +387,9 @@ void ServiceClient::handleTextMessage(const QString &message)
     if (!m_pendingJobs.contains(jobId)) return;
     if (type == QStringLiteral("upload-required")) {
         emit jobStateChanged(jobId, JobState::Uploading, -1);
-        m_socket->sendBinaryMessage(m_pendingJobs.value(jobId).inputData);
+        const auto &job = m_pendingJobs.value(jobId);
+        m_socket->sendBinaryMessage(object.value("inputRole").toString() == "ip-adapter"
+            ? job.ipAdapterImageData : job.inputData);
     } else if (type == QStringLiteral("progress")) {
         emit generationProgressChanged(jobId, Protocol::progressFromJson(object.value(QStringLiteral("progress")).toObject()));
     } else if (type == QStringLiteral("output")) {
@@ -375,12 +412,15 @@ void ServiceClient::handleBinaryMessage(const QByteArray &data)
     const QString jobId = m_resultJobs.dequeue();
     const PendingJob job = m_pendingJobs.take(jobId);
     emit jobStateChanged(jobId, JobState::Completed, -1);
-    emit imageJobFinished({jobId, job.operation, true, data, job.mimeType, {}, {}});
+    if (job.identityExport) emit photoMakerIdentityExportFinished({jobId, true, data, {}, {}});
+    else emit imageJobFinished({jobId, job.operation, true, data, job.mimeType, {}, {}});
 }
 
 void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
 {
-    if (m_capabilities.imageGeneration == capabilities.imageGeneration && m_capabilities.imageUpscale == capabilities.imageUpscale && m_capabilities.imageEdit == capabilities.imageEdit) return;
+    if (m_capabilities.imageGeneration == capabilities.imageGeneration && m_capabilities.imageUpscale == capabilities.imageUpscale && m_capabilities.imageEdit == capabilities.imageEdit
+        && m_capabilities.ipAdapter == capabilities.ipAdapter
+        && m_capabilities.photoMakerIdentityExport == capabilities.photoMakerIdentityExport) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
 }
@@ -417,7 +457,8 @@ void ServiceClient::failJob(const QString &jobId, const QString &errorCode, cons
     const PendingJob job = m_pendingJobs.take(jobId);
     m_resultJobs.removeAll(jobId);
     emit jobStateChanged(jobId, JobState::Failed, -1);
-    emit imageJobFinished({jobId, job.operation, false, {}, job.mimeType, errorCode, message});
+    if (job.identityExport) emit photoMakerIdentityExportFinished({jobId, false, {}, errorCode, message});
+    else emit imageJobFinished({jobId, job.operation, false, {}, job.mimeType, errorCode, message});
 }
 
 void ServiceClient::failAllJobs(const QString &errorCode, const QString &message)

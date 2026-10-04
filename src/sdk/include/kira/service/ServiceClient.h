@@ -37,6 +37,7 @@ public:
     QString submitEdit(const ImageGenerationRequest &request);
     QString submitGeneration(const ImageGenerationRequest &request);
     QString submitUpscale(const ImageUpscaleRequest &request);
+    QString exportPhotoMakerIdentity(const QByteArray &sourceImageData);
 signals:
     void serviceStateChanged(KiraService::ServiceConnectionState state, const QString &code, const QString &detail);
     void capabilitiesChanged(const KiraService::ServiceCapabilities &capabilities);
@@ -50,14 +51,17 @@ signals:
     void jobOutput(const QString &jobId, const QString &stream, const QString &text);
     void generationProgressChanged(const QString &jobId, const KiraService::GenerationProgress &progress);
     void imageJobFinished(const KiraService::ImageJobResult &result);
+    void photoMakerIdentityExportFinished(const KiraService::PhotoMakerIdentityResult &result);
 private:
     struct PendingJob
     {
         ImageOperation operation = ImageOperation::Generate;
         QByteArray inputData;
+        QByteArray ipAdapterImageData;
         QString mimeType;
+        bool identityExport = false;
     };
-    QString submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData);
+    QString submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData, const QByteArray &ipAdapterImageData = {});
     void authenticate();
     void handleTextMessage(const QString &message);
     void handleBinaryMessage(const QByteArray &data);

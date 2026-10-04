@@ -93,5 +93,7 @@ private:
     QList<ManagedModelInfo> m_upscaleModels;
     QList<ManagedModelInfo> m_llmChatModels;
     QList<ManagedModelInfo> m_ipAdapterModels;
+    QList<ManagedModelInfo> m_clipVisionModels;
+    QList<ManagedModelInfo> m_photoMakerModels;
     QList<ManagedInstall> m_installs;
 };

@@ -17,8 +17,12 @@ QJsonObject defaultModelOptions(const QString &category)
         return {{"temperature", 0.8}, {"topP", 0.95}, {"contextLength", 4096}, {"maxTokens", 1024}};
     if (category == "upscaler")
         return {{"tileSize", 128}};
-    if (category == "ip-adapter")
+    if (category == "ip-adapter" || category == "ip_adapter")
         return {{"strength", 1.0}};
+    if (category == "clip_vision")
+        return {{"image_size", 224}, {"normalize_input", true}};
+    if (category == "photomaker")
+        return {{"style_strength", 20}};
     return {};
 }
 bool validateModelOptions(const QString &category, const QJsonObject &options, QString *error)
@@ -62,6 +66,16 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
     {
         if (!number("tileSize", 64, 1024, true) ||
             !QList<int>{64, 128, 256, 512, 1024}.contains(options.value("tileSize").toInt()))
+            return fail();
+    }
+    else if (category == "clip_vision")
+    {
+        if (!number("image_size", 1, 4096, true) || !options.value("normalize_input").isBool())
+            return fail();
+    }
+    else if (category == "photomaker")
+    {
+        if (!number("style_strength", 0, 100, true))
             return fail();
     }
     else if (!number("strength", 0, 2))

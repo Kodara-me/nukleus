@@ -26,7 +26,8 @@ const QList<QPair<QString, QString>> categories{{"edition", "Edition"},
                                                 {"llm-chat", "LLM"},
                                                 {"image-generation", "Image generation"},
                                                 {"upscaler", "Upscaler"},
-                                                {"ip-adapter", "IP-Adapter"}};
+                                                {"ip_adapter", "IP-Adapter"}, {"clip_vision", "CLIP Vision"},
+                                                {"photomaker", "PhotoMaker"}};
 QString sizeText(qint64 bytes) { return QObject::tr("%1 MiB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1); }
 } // namespace
 ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *client)
@@ -277,7 +278,8 @@ void ManageModelsWindow::updateActions()
     m_options->setEnabled(m_client->isAuthenticated() && !m_saving);
     m_add->setEnabled(m_client->isAuthenticated() && !m_saving);
     m_attach->setEnabled(m_client->isAuthenticated() && !m_saving &&
-        (m_selectedId.startsWith("image-generation:") || m_selectedId.startsWith("edition:")));
+        (m_selectedId.startsWith("image-generation:") || m_selectedId.startsWith("edition:") || m_selectedId.startsWith("ip-adapter:")
+         || m_selectedId.startsWith("ip_adapter:")));
     m_delete->setEnabled(m_client->modelListAvailable() && m_client->isAuthenticated() && !m_saving &&
                          !m_selectedId.isEmpty());
     m_save->setEnabled(m_client->modelListAvailable() && m_client->isAuthenticated() && !m_saving &&

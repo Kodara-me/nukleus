@@ -17,7 +17,9 @@ enum class ModelCategory
     LlmChat,
     IpAdapter,
     Unknown,
-    Edition
+    Edition,
+    ClipVision,
+    PhotoMaker
 };
 
 struct ModelInfo
@@ -81,6 +83,10 @@ struct ImageGenerationRequest
     QByteArray baseImageData;
     double baseImageStrength = 0.55;
     QString modelId;
+    QString clipVisionModelId;
+    QString ipAdapterModelId;
+    QByteArray ipAdapterImageData;
+    std::optional<double> ipAdapterStrength;
 };
 
 struct ImageUpscaleRequest
@@ -105,6 +111,17 @@ struct ServiceCapabilities
     bool imageGeneration = false;
     bool imageUpscale = false;
     bool imageEdit = false;
+    bool ipAdapter = false;
+    bool photoMakerIdentityExport = false;
+};
+
+struct PhotoMakerIdentityResult
+{
+    QString jobId;
+    bool succeeded = false;
+    QByteArray identityData;
+    QString errorCode;
+    QString message;
 };
 
 enum class ServiceConnectionState
@@ -131,6 +148,7 @@ Q_DECLARE_METATYPE(KiraService::ModelInstall)
 Q_DECLARE_METATYPE(KiraService::ImageGenerationRequest)
 Q_DECLARE_METATYPE(KiraService::ImageUpscaleRequest)
 Q_DECLARE_METATYPE(KiraService::ImageJobResult)
+Q_DECLARE_METATYPE(KiraService::PhotoMakerIdentityResult)
 Q_DECLARE_METATYPE(KiraService::ServiceCapabilities)
 Q_DECLARE_METATYPE(KiraService::ServiceConnectionState)
 Q_DECLARE_METATYPE(KiraService::JobState)

@@ -55,8 +55,8 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
         return 2;
     }
     const QString category = command == "attach" ? positional.value(1).section(':', 0, 0) : parser.value("category");
-    if (command == "attach" && (positional.size() != 2 || (category != "image-generation" && category != "edition"))) {
-        QTextStream(stderr) << "attach requires an opaque image-generation or edition model ID.\n"; return 2;
+    if (command == "attach" && (positional.size() != 2 || (category != "image-generation" && category != "edition" && category != "ip_adapter" && category != "ip-adapter"))) {
+        QTextStream(stderr) << "attach requires an opaque image-generation, edition or IP-Adapter model ID.\n"; return 2;
     }
     if (parser.value("model-type") != "checkpoint" && parser.value("model-type") != "diffusion") {
         QTextStream(stderr) << "--model-type must be checkpoint or diffusion.\n"; return 2;
@@ -71,7 +71,7 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
         if (option == "mmproj" && (category == "image-generation" || category == "edition")
             && (command == "add" || command == "attach")) continue;
         ++companionCount;
-        const bool validCategory = option == QStringLiteral("companion-lora") ? category == QStringLiteral("ip-adapter")
+        const bool validCategory = option == QStringLiteral("companion-lora") ? (category == QStringLiteral("ip_adapter") || category == QStringLiteral("ip-adapter"))
             : option == QStringLiteral("mmproj") ? category == QStringLiteral("llm-chat")
             : category == QStringLiteral("edition") || category == QStringLiteral("image-generation");
         if (!validCategory || companionCount > 1) {
@@ -129,7 +129,7 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
                 QString size;
             };
             QList<ModelRow> rows;
-            for (const QString &category : {QStringLiteral("image-generation"), QStringLiteral("edition"), QStringLiteral("upscaler"), QStringLiteral("llm-chat"), QStringLiteral("ip-adapter")}) {
+            for (const QString &category : {QStringLiteral("image-generation"), QStringLiteral("edition"), QStringLiteral("upscaler"), QStringLiteral("llm-chat"), QStringLiteral("ip_adapter"), QStringLiteral("clip_vision"), QStringLiteral("photomaker")}) {
                 const QList<ManagedModelInfo> models = client.models(category);
                 if (models.isEmpty()) {
                     rows.append({category, QStringLiteral("(none)"), QStringLiteral("-"), QStringLiteral("-"), QStringLiteral("-")});
@@ -236,7 +236,7 @@ int main(int argc, char *argv[])
     parser.addHelpOption();
     parser.addOption({QStringLiteral("gui"), QStringLiteral("Start the graphical manager.")});
     parser.addOption({QStringLiteral("category"), QStringLiteral("Model category for add."), QStringLiteral("category")});
-    parser.addOption({QStringLiteral("companion-lora"), QStringLiteral("Optional companion LoRA URL for an IP-Adapter add."), QStringLiteral("url")});
+    parser.addOption({QStringLiteral("companion-lora"), QStringLiteral("Optional auxiliary LoRA URL for an IP-Adapter add/attach."), QStringLiteral("url")});
     parser.addOption({QStringLiteral("mmproj"), QStringLiteral("Optional mmproj URL for LLM add or image add/attach."), QStringLiteral("url")});
     parser.addOption({QStringLiteral("vae"), QStringLiteral("Optional VAE URL for an Edition or Image-generation add/attach."), QStringLiteral("url")});
     parser.addOption({"clip-l", "Optional CLIP-L URL for image add/attach.", "url"});

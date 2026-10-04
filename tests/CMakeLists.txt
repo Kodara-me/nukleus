@@ -5,6 +5,7 @@ endif()
 find_package(Qt6 6.2 REQUIRED COMPONENTS Network Test WebSockets)
 
 add_executable(kira-service-test
+    ../src/daemon/resources.qrc
     ServiceTest.cpp
     ../src/daemon/GenerationRequest.h
     ../src/sdk/include/kira/service/GenerationProgress.h
@@ -20,10 +21,11 @@ add_executable(kira-service-test
     ../src/daemon/ServicePaths.cpp
     ../src/daemon/ServicePaths.h
 )
+set_target_properties(kira-service-test PROPERTIES AUTORCC ON)
 target_include_directories(kira-service-test PRIVATE
     ../src/daemon
 )
-target_link_libraries(kira-service-test PRIVATE KiraService::Protocol Qt6::Network Qt6::Test Qt6::WebSockets)
+target_link_libraries(kira-service-test PRIVATE KiraService::SDK Qt6::Network Qt6::Test Qt6::WebSockets)
 add_test(NAME kira-service-test COMMAND kira-service-test)
 
 add_executable(kira-service-sdk-test ServiceSdkTest.cpp)

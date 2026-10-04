@@ -34,9 +34,12 @@ bool isSafeFileName(const QString &fileName)
 QStringList extensionsFor(ModelCategory category)
 {
     switch (category) {
+    case ModelCategory::PhotoMaker:
+        return {QStringLiteral("safetensors")};
     case ModelCategory::ImageGeneration:
     case ModelCategory::Edition:
         return {QStringLiteral("safetensors"), QStringLiteral("ckpt"), QStringLiteral("gguf")};
+    case ModelCategory::ClipVision:
     case ModelCategory::IpAdapter:
         return {QStringLiteral("bin"), QStringLiteral("safetensors"), QStringLiteral("ckpt"), QStringLiteral("gguf")};
     case ModelCategory::Upscaler:
@@ -110,7 +113,7 @@ ModelCatalog::~ModelCatalog() = default;
 
 QList<ModelCategory> ModelCatalog::categories()
 {
-    return {ModelCategory::ImageGeneration, ModelCategory::Edition, ModelCategory::Upscaler, ModelCategory::LlmChat, ModelCategory::IpAdapter};
+    return {ModelCategory::ImageGeneration, ModelCategory::Edition, ModelCategory::Upscaler, ModelCategory::LlmChat, ModelCategory::IpAdapter, ModelCategory::ClipVision, ModelCategory::PhotoMaker};
 }
 
 QString ModelCatalog::categoryName(ModelCategory category)
@@ -120,7 +123,9 @@ QString ModelCatalog::categoryName(ModelCategory category)
     case ModelCategory::Edition: return QStringLiteral("edition");
     case ModelCategory::Upscaler: return QStringLiteral("upscaler");
     case ModelCategory::LlmChat: return QStringLiteral("llm-chat");
-    case ModelCategory::IpAdapter: return QStringLiteral("ip-adapter");
+    case ModelCategory::IpAdapter: return QStringLiteral("ip_adapter");
+    case ModelCategory::ClipVision: return QStringLiteral("clip_vision");
+    case ModelCategory::PhotoMaker: return QStringLiteral("photomaker");
     }
     return {};
 }
@@ -132,13 +137,16 @@ QString ModelCatalog::companionRole(ModelCategory category)
     case ModelCategory::LlmChat: return QStringLiteral("mmproj");
     case ModelCategory::ImageGeneration:
     case ModelCategory::Edition: return QStringLiteral("vae");
-    case ModelCategory::Upscaler: return {};
+    case ModelCategory::Upscaler:
+    case ModelCategory::PhotoMaker:
+    case ModelCategory::ClipVision: return {};
     }
     return {};
 }
 
 std::optional<ModelCategory> ModelCatalog::categoryFromName(const QString &name)
 {
+    if (name == "ip-adapter") return ModelCategory::IpAdapter;
     for (const ModelCategory category : categories()) {
         if (name == categoryName(category)) return category;
     }
@@ -170,7 +178,9 @@ QList<ModelInfo> ModelCatalog::models(ModelCategory category) const
         }
         const auto type = entry.toObject().value("modelType").toString("checkpoint");
         if (!valid || (type != "checkpoint" && type != "diffusion")) continue;
-        models.append({categoryName(category) + QLatin1Char(':') + fileName,
+        // Retain existing opaque adapter IDs independently of the canonical category name.
+        const QString idCategory = category == ModelCategory::IpAdapter ? QStringLiteral("ip-adapter") : categoryName(category);
+        models.append({idCategory + QLatin1Char(':') + fileName,
                        fileInfo.completeBaseName(), fileName, fileInfo.size(), fileInfo.absoluteFilePath(),
                        companionFileName, companionFileName.isEmpty() ? QString() : companionRole(category),
                        entry.toObject().value("recommendedOptions").toObject(), files, type, entry.toObject().value("explicitContent").toBool(false)});
@@ -185,7 +195,8 @@ std::optional<ModelInfo> ModelCatalog::model(ModelCategory category, const QStri
 {
     const QList<ModelInfo> availableModels = models(category);
     const auto model = std::find_if(availableModels.cbegin(), availableModels.cend(), [&id](const ModelInfo &candidate) {
-        return candidate.id == id;
+        return candidate.id == id
+            || (candidate.id.startsWith("ip-adapter:") && id == "ip_adapter:" + candidate.fileName);
     });
     return model == availableModels.cend() ? std::nullopt : std::optional<ModelInfo>(*model);
 }
@@ -234,7 +245,8 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
     if (request.modelType != "checkpoint" && request.modelType != "diffusion"
         && !(request.modelType.isEmpty() && !request.existingModelId.isEmpty())) return fail(tr("Invalid model type"));
     const bool image = request.category == ModelCategory::ImageGeneration || request.category == ModelCategory::Edition;
-    if (!image && (request.modelType != "checkpoint" || !request.companionUrls.isEmpty()))
+    if (!image && ((request.modelType != "checkpoint" && !(request.modelType.isEmpty() && !request.existingModelId.isEmpty()))
+        || (request.category != ModelCategory::IpAdapter && !request.companionUrls.isEmpty())))
         return fail(tr("CLIP/VAE files and diffusion models require an image model category"));
     if (request.recommendedOptions && !KiraService::Protocol::validateModelOptions(categoryName(request.category), *request.recommendedOptions, errorMessage)) return false;
     const auto acceptsSource = [&](const QUrl& url) {
@@ -379,6 +391,8 @@ QString ModelCatalog::directoryPath(ModelCategory category) const
     case ModelCategory::Upscaler: return QDir(root).filePath(QStringLiteral("upscale"));
     case ModelCategory::LlmChat: return QDir(root).filePath(QStringLiteral("llm"));
     case ModelCategory::IpAdapter: return QDir(root).filePath(QStringLiteral("ip-adapter"));
+    case ModelCategory::ClipVision: return QDir(root).filePath(QStringLiteral("clip_vision"));
+    case ModelCategory::PhotoMaker: return QDir(root).filePath(QStringLiteral("photomaker"));
     }
     return {};
 }

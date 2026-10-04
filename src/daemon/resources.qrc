@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/photomaker">
+        <file>photomaker-export.py</file>
+    </qresource>
+</RCC>

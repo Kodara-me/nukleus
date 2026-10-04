@@ -8,14 +8,21 @@ Clients authenticate first:
 
 The version-3 authentication message is required for every client. Loopback peers may send an empty token. Non-loopback peers must send the configured shared LAN token.
 
-The service replies with `authenticated` and `capabilities`. `models.list` returns the `image-generation`, `edition`, `upscaler`, `llm-chat`, and `ip-adapter` categories. Each model contains `id`, `name`, `fileName`, and `bytes`; a model with a companion also includes the category-relative `companionFileName` and `companionRole` (`lora`, `mmproj`, or `vae`).
+The service replies with `authenticated` and `capabilities`. `models.list` returns
+`image-generation`, `edition`, `upscaler`, `llm-chat`, `ip_adapter`,
+`clip_vision` and `photomaker`. `ip-adapter` remains an accepted category alias;
+existing opaque `ip-adapter:` IDs and the storage directory are preserved.
+Each model contains `id`, `name`, `fileName` and `bytes`; a model with a
+companion also includes the category-relative `companionFileName` and
+`companionRole` (`lora`, `mmproj` or `vae`). PhotoMaker does not accept companions.
 
-Model administrators send `models.install` with a client-generated `installId`, explicit category, and HTTPS model-file URL. Optional `companionUrl` is a LoRA for `ip-adapter`, mmproj for `llm-chat`, or VAE for `image-generation` and `edition`; it is rejected for `upscaler`. mmproj requires a `.gguf` filename; VAE and LoRA accept `.safetensors`, `.ckpt`, or `.gguf`. SHA-256 is no longer checked or accepted by the SDK/manager; legacy protocol `sha256` fields are ignored. The service stages both downloads and commits the primary, companion, and relationship metadata together, so a failed or canceled pair leaves no usable catalog entry. A restart preserves the relationship; deletion removes both files. Listings and install completion expose the companion filename and role, never absolute paths. Image-generation VAE companions are resolved internally and passed to sd-cli with --vae; image LLM text encoders and mmproj use --llm and --llm_vision respectively; LLM-chat mmproj and IP-Adapter LoRA do not alter image invocation. The service emits `models.install.accepted`, `models.install.progress`, `models.install.completed`, or an `error` containing that `installId`.
+Model administrators send `models.install` with a client-generated `installId`, explicit category, and HTTPS model-file URL. Optional `companionUrl` is an auxiliary LoRA for `ip_adapter`, mmproj for `llm-chat`, or VAE for `image-generation` and `edition`; it is rejected for `upscaler` and `clip_vision`. mmproj requires a `.gguf` filename; VAE and LoRA accept `.safetensors`, `.ckpt`, or `.gguf`. SHA-256 is no longer checked or accepted by the SDK/manager; legacy protocol `sha256` fields are ignored. The service stages both downloads and commits the primary, companion, and relationship metadata together, so a failed or canceled pair leaves no usable catalog entry. A restart preserves the relationship; deletion removes both files. Listings and install completion expose the companion filename and role, never absolute paths. Image-generation VAE companions are resolved internally and passed to sd-cli with --vae; image LLM text encoders and mmproj use --llm and --llm_vision respectively; LLM-chat mmproj does not alter image invocation. IP-Adapter auxiliary LoRA is consumed when the adapter is explicitly selected (see below). The service emits `models.install.accepted`, `models.install.progress`, `models.install.completed`, or an `error` containing that `installId`.
 
 For example:
 
 ```json
-{"type":"models.install","installId":"adapter-1","category":"ip-adapter","url":"https://huggingface.co/h94/IP-Adapter-FaceID/resolve/main/ip-adapter-faceid-plusv2_sdxl.bin?utm_source=chatgpt.com","companionUrl":"https://huggingface.co/h94/IP-Adapter-FaceID/resolve/main/ip-adapter-faceid-plusv2_sdxl_lora.safetensors?utm_source=chatgpt.com"}
+{"type":"models.install","installId":"vision-1","category":"clip_vision","url":"https://example.com/clip_vision_h.safetensors","recommendedOptions":{"image_size":224,"normalize_input":true}}
+{"type":"models.install","installId":"adapter-1","category":"ip_adapter","url":"https://huggingface.co/h94/IP-Adapter/resolve/main/models/ip-adapter_sd15.safetensors","recommendedOptions":{"strength":1.0}}
 ```
 
 Model administrators may delete an installed model by its opaque ID:
@@ -43,7 +50,14 @@ when provided, the object must contain exactly the category's complete fields:
 | image-generation / edition | `width` and `height`: identical integers 256–2048, multiples of 256; `steps`: integer 1–200; `cfgScale`: number 0–100; `sampler` and `scheduler`: allowed strings; `clipSkip`: -1 or integer 1–12 |
 | llm-chat | `temperature`: number 0–2; `topP`: number >0 and ≤1; `contextLength`: integer 256–131072; `maxTokens`: integer 1–contextLength |
 | upscaler | `tileSize`: integer 64, 128, 256, 512 or 1024 |
-| ip-adapter | `strength`: number 0–2 |
+| ip_adapter (legacy ip-adapter alias) | `strength`: number 0–2, default 1.0 |
+| clip_vision | `image_size`: integer 1–4096, default 224; `normalize_input`: boolean, default true |
+| photomaker | `style_strength`: integer 0–100, default 20 |
+
+IP-Adapter options contain only `strength`. Clients such as Canvas explicitly
+select the adapter and CLIP Vision models. Recommendations do not implicitly
+enable an adapter or change job strength. CLIP Vision preprocessing remains owned by sd-cli: `image_size` and
+`normalize_input` are saved/exposed recommendations, not unsupported CLI flags.
 
 Samplers: empty (Automatic), `euler`, `euler_a`, `heun`, `dpm2`, `dpm++2m`, `lcm`.
 Schedulers: empty (Automatic), `discrete`, `karras`, `exponential`, `ays`,
@@ -146,7 +160,7 @@ heuristics determine model type. Unused companions remain optional.
 Every model object in `models.list.result`, `models.install.completed` and
 `models.configure.completed` includes `explicitContent`, a boolean that defaults
 to `false` for models without saved classification. It is separate from
-`recommendedOptions` and applies to all five categories.
+`recommendedOptions` and applies to all seven categories.
 
 `models.install` and `models.configure` accept optional `explicitContent`.
 Non-boolean values are rejected. Omission leaves existing classification unchanged
@@ -208,3 +222,138 @@ shell-quoted text for diagnosis; execution still uses QProcess argument lists.
 ### Reference-image editing
 
 `capabilities.operations` includes `image.edit` when the image backend is ready. Submit an installed Edition `modelId`, nonblank `prompt`, source `width`/`height`, and generation options through `submit` with operation `image.edit`. The service requires source bytes through the existing `upload-required` binary upload flow, even if `hasInput` is omitted. Validation, queue/progress, result bytes and job errors follow the generation lifecycle. Results identify `image.edit`. Optional installed LLM, VAE and mmproj companions are resolved by the daemon; clients never supply paths. SDK clients use `submitEdit(ImageGenerationRequest)` and `ServiceCapabilities::imageEdit`.
+
+
+### IP-Adapter conditioning
+
+Protocol v3 adds `capabilities.ipAdapter` (boolean), true when the image backend
+is available. The SDK exposes `ServiceCapabilities::ipAdapter`; an older server
+that omits it cannot accept SDK IP-Adapter submissions. Existing requests without
+adapter fields and their single binary upload flow remain unchanged. Updated
+SDK/Manager clients recognize both category spellings; consumers that need
+IP-Adapter discovery must recognize the canonical `ip_adapter` category.
+
+`clip_vision` requires one CLIP Vision weight file. `ip_adapter` requires one
+IP-Adapter weight file and accepts one optional auxiliary LoRA through
+`companionUrl` or `companionUrls.lora`. Both primary categories accept `.bin`,
+`.safetensors`, `.ckpt`, and `.gguf`, retaining existing IP-Adapter file validation;
+filename acceptance is not a guarantee of backend tensor compatibility. Auxiliary
+LoRA accepts `.safetensors`, `.ckpt`, or `.gguf`. Installation/import, cancellation,
+atomic publication, configuration, and deletion use the existing model lifecycle.
+The Manager's Optional files dialog and CLI `attach <id> --companion-lora <url>`
+can attach or replace an auxiliary LoRA (remove the existing role first).
+No CLIP Vision companion roles are accepted.
+
+Generation and editing optionally accept the following `options` fields together:
+
+| Field | Meaning |
+| --- | --- |
+| `clipVisionModelId` | Installed opaque CLIP Vision model ID |
+| `ipAdapterModelId` | Installed opaque IP-Adapter model ID |
+| `hasIpAdapterImage` | Must be boolean true; requests the reference upload |
+| `ip_adapter_strength` | Optional finite number 0–2; omitted means 1.0 |
+
+Incomplete combinations, wrong model categories, unavailable weights, malformed
+strength, and any adapter fields on upscale are rejected before upload. Example:
+
+```json
+{"type":"submit","operation":"image.generate","jobId":"adapter-job","options":{"modelId":"image-generation:sd15.safetensors","prompt":"a landscape","clipVisionModelId":"clip_vision:clip_vision_h.safetensors","ipAdapterModelId":"ip-adapter:ip-adapter_sd15.safetensors","hasIpAdapterImage":true,"ip_adapter_strength":0.8}}
+```
+
+`upload-required` now includes `inputRole`. Send one binary image message for each
+request, in the requested order:
+
+- `source`: the existing edit/upscale/input image (absent for text-to-image).
+- `ip-adapter`: the distinct IP-Adapter reference image.
+
+Editing with conditioning requests the source first, then the adapter image.
+Queueing begins only after all requested images arrive. Each image has the existing
+size limit; empty/oversized uploads fail the job and release its pending state.
+Only one submission may await uploads per connection; a concurrent submission
+returns `upload-in-progress` without replacing the pending job. Disconnection
+releases pending uploads. The selected primary, adapter and vision weights are
+protected against deletion/companion mutation while uploading, queued or active.
+
+The daemon writes uploads to private temporary job files and resolves model IDs
+internally, then supplies `--clip_vision`, `--ip-adapter`, `--ip-adapter-image`, and
+`--ip-adapter-strength`. Editing also retains its separate `--ref-image`; a
+text-to-image adapter reference never becomes an `--init-img`. The optional
+auxiliary LoRA uses its private directory with `--lora-model-dir` and a generated
+`<lora:filename:1>` prompt tag. With an auxiliary LoRA attached, user-supplied
+LoRA tags and filenames that cannot form an unambiguous tag are rejected.
+Clients cannot supply model or image filesystem paths.
+
+SDK installation calls retain the accepted `ip-adapter` wire alias for older
+servers; listing names on the updated service are canonical.
+
+SDK `ImageGenerationRequest` adds `clipVisionModelId`, `ipAdapterModelId`,
+`ipAdapterImageData`, and optional `ipAdapterStrength`. Use them with
+`submitGeneration` or `submitEdit`; `baseImageData` remains the independent source
+image. The SDK answers each upload role with the corresponding bytes. Explicit
+IDs, reference bytes and advertised support are required; recommendations never
+select or activate an adapter automatically.
+
+Use weights compatible with the installed sd-cli and base model. Upstream
+[IP-Adapter documentation](https://github.com/leejet/stable-diffusion.cpp/blob/master/docs/ip_adapter.md)
+describes classic/Plus adapters for SD 1.5 and SDXL with a compatible CLIP Vision
+encoder. An Edition request can carry the same conditioning fields, but its base
+model must support IP-Adapter in sd-cli; this does not add support to incompatible
+architectures. PhotoMaker uses the separate operation below; InstantID, DINOv2
+and IP-Adapter FaceID pipelines remain outside this implementation.
+
+## PhotoMaker V2 identity export
+
+`models.list` additionally returns `photomaker`. Its required primary filename
+ends in `.safetensors`; companions are rejected. Install/configure use the usual
+atomic model workflow and `recommendedOptions: {"style_strength":20}`.
+`style_strength` must be an integer from 0 through 100. It recommends sd-cli's
+`--pm-style-strength`; it is not an extraction parameter. PhotoMaker and
+IP-Adapter catalogue IDs/options are independent.
+
+When the service-host extractor is configured, `capabilities.operations`
+includes `photomaker.export`, independently of sd-cli image capabilities.
+The SDK exposes `ServiceCapabilities.photoMakerIdentityExport`.
+
+```json
+{"type":"submit","operation":"photomaker.export","jobId":"identity-job","options":{}}
+{"type":"upload-required","jobId":"identity-job","inputRole":"source"}
+```
+
+The client sends one binary message containing the source image (full or cropped).
+No model, prompts or generation options are accepted. The source must contain
+exactly one detectable face. Uploads follow the existing image-size limit.
+Normal queued/queue-position/running events use the same FIFO as image jobs.
+The server creates temporary storage, saves the image, executes the official
+PhotoMaker V2 extractor and returns:
+
+```json
+{"type":"result","operation":"photomaker.export","jobId":"identity-job","mimeType":"application/octet-stream","fileName":"id_embeds.bin"}
+```
+
+The next binary message contains only the unchanged identity-file bytes.
+There is no base64/JSON encoding, generated image, service path or persistent
+identity record. Temporary files are removed on success/failure and after
+process cancellation on client disconnection.
+
+Job-scoped error codes:
+
+- `photomaker-unavailable`: extraction is not configured.
+- `photomaker-no-face`: no face detected after the official fallback attempts.
+- `photomaker-multiple-faces`: multiple detected faces make the source ambiguous;
+  provide a crop containing one face.
+- `photomaker-extraction-failed`: interpreter/dependency/model/inference failure,
+  timeout, or unreadable/empty output.
+- `photomaker-output-missing`: successful process did not produce id_embeds.bin.
+
+The SDK call `exportPhotoMakerIdentity(QByteArray)` returns a job ID or an empty
+ID if disconnected, unsupported or given empty input. Completion/failure emits
+`photoMakerIdentityExportFinished(PhotoMakerIdentityResult)`, with `jobId`,
+`succeeded`, `identityData`, `errorCode` and `message`. Connection failures
+also complete this dedicated result; `imageJobFinished` is never emitted for
+an identity export. Clients need not know the script, interpreter or server paths.
+
+This slice does not submit PhotoMaker image generation. Subsequent sd-cli
+conditioning must select compatible SDXL/PhotoMaker V2 weights and supply
+`--photo-maker <model>`, `--pm-id-embed-path <id_embeds.bin>`,
+`--pm-style-strength <0-100>` and the identity-image directory required by
+[upstream](https://github.com/leejet/stable-diffusion.cpp/blob/master/docs/photo_maker.md).

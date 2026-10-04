@@ -37,10 +37,22 @@ QString ServicePaths::ipAdapterModelsPath()
     return root.isEmpty() ? QString() : QDir(root).filePath(QStringLiteral("ip-adapter"));
 }
 
+QString ServicePaths::clipVisionModelsPath()
+{
+    const QString root = modelsPath();
+    return root.isEmpty() ? QString() : QDir(root).filePath(QStringLiteral("clip_vision"));
+}
+
 QString ServicePaths::legacyModelsPath()
 {
     const QString dataPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
     return dataPath.isEmpty() ? QString() : QDir(dataPath).filePath(QStringLiteral("kira-canvas/models"));
+}
+
+QString ServicePaths::photoMakerModelsPath()
+{
+    const QString root = modelsPath();
+    return root.isEmpty() ? QString() : QDir(root).filePath(QStringLiteral("photomaker"));
 }
 
 bool ServicePaths::migrateLegacyModels(QString *errorMessage)
@@ -71,7 +83,7 @@ bool ServicePaths::ensureModelDirectories(QString *errorMessage)
         if (errorMessage) *errorMessage = QObject::tr("Service data directory is unavailable");
         return false;
     }
-    const std::array<QString, 5> paths = {root, modelsPath(), upscaleModelsPath(), chatModelsPath(), ipAdapterModelsPath()};
+    const std::array<QString, 7> paths = {root, modelsPath(), upscaleModelsPath(), chatModelsPath(), ipAdapterModelsPath(), clipVisionModelsPath(), photoMakerModelsPath()};
     for (const QString &path : paths) {
         if (!QDir().mkpath(path)) {
             if (errorMessage) *errorMessage = QObject::tr("Could not create %1").arg(path);

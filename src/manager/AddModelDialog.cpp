@@ -85,10 +85,12 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
                                                            {tr("Edition"), "edition"},
                                                            {tr("Upscaler"), "upscaler"},
                                                            {tr("LLM"), "llm-chat"},
-                                                           {tr("IP-Adapter"), "ip-adapter"}})
+                                                           {tr("IP-Adapter"), "ip_adapter"},
+                                                           {tr("CLIP Vision"), "clip_vision"},
+                                                           {tr("PhotoMaker"), "photomaker"}})
         m_category->addItem(item.first, item.second);
     if (!category.isEmpty())
-        m_category->setCurrentIndex(m_category->findData(category));
+        m_category->setCurrentIndex(m_category->findData(category == "ip-adapter" ? "ip_adapter" : category));
     m_url = new QLineEdit(content);
     m_url->setObjectName("modelUrl");
     m_url->setPlaceholderText("https://example.com/model.gguf");
@@ -191,7 +193,7 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
             if (!model.companionFileName.isEmpty()) m_attachedFiles.insert(model.companionRole, model.companionFileName);
             m_modelType->setCurrentIndex(m_modelType->findData(model.modelType));
         }
-        const QList<QPair<QString, QLineEdit*>> fields{{"vae", m_companion}, {"clip-l", m_clipL}, {"clip-g", m_clipG}, {"llm", m_textEncoder}, {"mmproj", m_mmproj}};
+        const QList<QPair<QString, QLineEdit*>> fields{{roleFor(m_companion), m_companion}, {"clip-l", m_clipL}, {"clip-g", m_clipG}, {"llm", m_textEncoder}, {"mmproj", m_mmproj}};
         for (const auto &field : fields)
             if (m_attachedFiles.contains(field.first)) field.second->setPlaceholderText(tr("Already attached: %1").arg(m_attachedFiles.value(field.first).toString().section('/', -1)));
         updateActions();
@@ -201,11 +203,11 @@ void AddModelDialog::updateCategory()
 {
     const QString category = m_category->currentData().toString();
     m_companion->clear();
-    const bool supports = category != "upscaler";
+    const bool supports = category != "upscaler" && category != "clip_vision" && category != "photomaker";
     m_companion->setVisible(supports);
     m_companionLabel->setVisible(supports);
     m_companionLabel->setText(category == "llm-chat"     ? tr("Optional mmproj URL:")
-                              : category == "ip-adapter" ? tr("Optional LoRA URL:")
+                              : category == "ip_adapter" ? tr("Optional LoRA URL:")
                                                          : tr("Optional VAE URL:"));
     const bool image = category == "image-generation" || category == "edition";
     m_clipL->clear();
@@ -214,7 +216,7 @@ void AddModelDialog::updateCategory()
     m_mmproj->clear();
     for (QWidget *widget : QList<QWidget*>{m_clipL, m_clipG, m_clipLLabel, m_clipGLabel, m_textEncoder, m_mmproj, m_textEncoderLabel, m_mmprojLabel, m_modelType, m_modelTypeLabel}) widget->setVisible(image);
     for (auto* field : {m_clipL, m_clipG, m_textEncoder, m_mmproj}) field->parentWidget()->setVisible(image);
-    m_companion->parentWidget()->setVisible(category != "upscaler");
+    m_companion->parentWidget()->setVisible(supports);
     m_modelType->setCurrentIndex(0);
     m_options->setOptions(category);
     updateActions();
@@ -359,7 +361,7 @@ QString AddModelDialog::roleFor(QLineEdit* field) const
     if (field == m_mmproj) return "mmproj";
     if (field == m_companion) {
         const QString category = m_category->currentData().toString();
-        return category == "llm-chat" ? "mmproj" : category == "ip-adapter" ? "lora" : "vae";
+        return category == "llm-chat" ? "mmproj" : category == "ip_adapter" ? "lora" : "vae";
     }
     return {};
 }

@@ -40,6 +40,13 @@ void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &
         connect(field, &QSpinBox::valueChanged, this, &ModelOptionsWidget::optionsChanged);
         add(key, label, field);
     };
+    const auto boolean = [&](const QString &key, const QString &label)
+    {
+        auto *field = new QCheckBox(this);
+        field->setChecked(values.value(key).toBool());
+        connect(field, &QCheckBox::toggled, this, &ModelOptionsWidget::optionsChanged);
+        add(key, label, field);
+    };
     const auto decimal = [&](const QString &key, const QString &label, double low, double high, int precision)
     {
         auto *field = new QDoubleSpinBox(this);
@@ -96,15 +103,28 @@ void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &
         add("tileSize", tr("Tile size:"), tiles);
         m_form->addRow(new QLabel(tr("Upscaling remains fixed at 2×."), this));
     }
-    else if (category == "ip-adapter")
+    else if (category == "ip-adapter" || category == "ip_adapter")
+    {
         decimal("strength", tr("Strength:"), 0, 2, 2);
+    }
+    else if (category == "clip_vision")
+    {
+        integer("image_size", tr("Image size:"), 1, 4096);
+        boolean("normalize_input", tr("Normalize input:"));
+    }
+    else if (category == "photomaker")
+    {
+        integer("style_strength", tr("Style strength:"), 0, 100);
+    }
 }
 QJsonObject ModelOptionsWidget::options() const
 {
     QJsonObject values;
     for (auto it = m_fields.cbegin(); it != m_fields.cend(); ++it)
     {
-        if (auto *spin = qobject_cast<QSpinBox *>(it.value()))
+        if (auto *check = qobject_cast<QCheckBox *>(it.value()))
+            values.insert(it.key(), check->isChecked());
+        else if (auto *spin = qobject_cast<QSpinBox *>(it.value()))
             values.insert(it.key(), spin->value());
         else if (auto *decimal = qobject_cast<QDoubleSpinBox *>(it.value()))
             values.insert(it.key(), decimal->value());

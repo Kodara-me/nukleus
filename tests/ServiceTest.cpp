@@ -3,6 +3,7 @@
 #include "ServicePaths.h"
 #include <kira/service/ServiceProtocol.h>
 #include <kira/service/ModelOptions.h>
+#include <kira/service/ServiceClient.h>
 
 #include <QDir>
 #include <QScopeGuard>
@@ -78,6 +79,9 @@ private slots:
     void removesModelByOpaqueId();
     void installsModelAtomically();
     void installsIpAdapterPair();
+    void installsClipVision();
+    void installsPhotoMaker();
+    void exportsPhotoMakerIdentity();
     void managesEditionModels();
     void installsOptionalCompanions();
     void attachesModularCompanionsWithoutReplacingModel();
@@ -131,7 +135,8 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QVERIFY(executable.open(QIODevice::WriteOnly));
     executable.write("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$KIRA_TEST_ARGS\"\nprevious=\"\"\nfor argument in "
                      "\"$@\"; do\n if [ \"$previous\" = --output ]; then cp \"$KIRA_TEST_IMAGE\" "
-                     "\"$argument\"; fi\n previous=\"$argument\"\ndone\nexit 0\n");
+                     "\"$argument\"; fi\n if [ \"$previous\" = --ip-adapter-image ]; then cp \"$argument\" \"$KIRA_TEST_ARGS.ip\"; fi\n"
+                     " if [ \"$previous\" = --ref-image ]; then cp \"$argument\" \"$KIRA_TEST_ARGS.source\"; fi\n previous=\"$argument\"\ndone\nexit 0\n");
     executable.close();
     QVERIFY(executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
     const QString root = directory.filePath("models");
@@ -170,6 +175,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     KiraServiceConfiguration configuration;
     configuration.port = 0;
     configuration.modelRootPath = root;
+    configuration.maximumImageBytes = 1024;
     KiraServiceDaemon service(configuration);
     QString error;
     QVERIFY2(service.start(&error), qPrintable(error));
@@ -289,6 +295,121 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(editArgs.value(editArgs.indexOf("--vae") + 1), QDir(editionRoot).filePath("companions/edit.gguf/vae.safetensors"));
     QCOMPARE(editArgs.value(editArgs.indexOf("--llm_vision") + 1), QDir(editionRoot).filePath("companions/edit.gguf/mmproj.gguf"));
     QCOMPARE(messages.last().value("operation").toString(), QString("image.edit"));
+    const QString visionPath = QDir(root).filePath("clip_vision/vision.safetensors");
+    const QString adapterPath = QDir(root).filePath("ip-adapter/adapter.safetensors");
+    const QString auxiliaryPath = QDir(root).filePath("ip-adapter/companions/adapter.safetensors/lora/auxiliary.safetensors");
+    for (const auto &path : {visionPath, adapterPath, auxiliaryPath}) {
+        QVERIFY(QDir().mkpath(QFileInfo(path).absolutePath()));
+        QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("weights");
+    }
+    QFile adapterMetadata(QDir(root).filePath("ip-adapter/metadata.json"));
+    QVERIFY(adapterMetadata.open(QIODevice::WriteOnly));
+    adapterMetadata.write(QJsonDocument(QJsonObject{{"adapter.safetensors", QJsonObject{
+        {"companionFiles", QJsonObject{{"lora", "companions/adapter.safetensors/lora/auxiliary.safetensors"}}},
+        {"recommendedOptions", QJsonObject{{"strength", 1.8}}}}}}).toJson());
+    adapterMetadata.close();
+    QJsonObject adapterOptions = valid;
+    adapterOptions.insert("clipVisionModelId", "clip_vision:vision.safetensors");
+    adapterOptions.insert("ipAdapterModelId", "ip-adapter:adapter.safetensors");
+    adapterOptions.insert("hasIpAdapterImage", true);
+    adapterOptions.insert("ip_adapter_strength", 0.8123456789);
+    const QByteArray adapterImage("distinct IP-Adapter reference");
+    const auto uploadFor = [&](const QString &id, const QString &role) {
+        return std::any_of(messages.begin(), messages.end(), [&](const auto &message) {
+            return message.value("type") == "upload-required" && message.value("jobId") == id
+                && message.value("inputRole") == role;
+        });
+    };
+    const auto capturedImage = [&](const QString &suffix) {
+        QFile file(capture + suffix);
+        return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+    };
+    images.clear(); messages.clear();
+    send("adapter-generate", adapterOptions);
+    QTRY_VERIFY(uploadFor("adapter-generate", "ip-adapter"));
+    // All selected weights are protected while either reference upload is pending.
+    for (const auto &id : {QString("clip_vision:vision.safetensors"), QString("ip-adapter:adapter.safetensors")}) {
+        socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "models.delete"}, {"id", id}}).toJson()));
+        QTRY_COMPARE(messages.last().value("code").toString(), QString("model-in-use"));
+        messages.removeLast();
+    }
+    socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"type", "models.companion.delete"}, {"id", "ip-adapter:adapter.safetensors"}, {"role", "lora"}}).toJson()));
+    QTRY_COMPARE(messages.last().value("code").toString(), QString("model-in-use"));
+    socket.sendBinaryMessage(adapterImage);
+    QTRY_VERIFY(terminal("adapter-generate"));
+    QTRY_COMPARE(images.count(), 1);
+    auto adapterArgs = arguments();
+    QCOMPARE(adapterArgs.value(adapterArgs.indexOf("--clip_vision") + 1), visionPath);
+    QCOMPARE(adapterArgs.value(adapterArgs.indexOf("--ip-adapter") + 1), adapterPath);
+    QCOMPARE(adapterArgs.value(adapterArgs.indexOf("--ip-adapter-strength") + 1).toDouble(), 0.8123456789);
+    QCOMPARE(adapterArgs.value(adapterArgs.indexOf("--lora-model-dir") + 1), QFileInfo(auxiliaryPath).absolutePath());
+    QCOMPARE(adapterArgs.value(adapterArgs.indexOf("--prompt") + 1), QString("test <lora:auxiliary.safetensors:1>"));
+    QVERIFY(!adapterArgs.contains("--init-img")); QVERIFY(!adapterArgs.contains("--ref-image"));
+    QCOMPARE(capturedImage(".ip"), adapterImage);
+
+    images.clear(); messages.clear();
+    adapterOptions.insert("modelId", "edition:edit.gguf");
+    adapterOptions.remove("ip_adapter_strength");
+    socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"type", "submit"}, {"operation", "image.edit"}, {"jobId", "adapter-edit"}, {"options", adapterOptions}}).toJson()));
+    QTRY_VERIFY(uploadFor("adapter-edit", "source"));
+    socket.sendBinaryMessage(image);
+    QTRY_VERIFY(uploadFor("adapter-edit", "ip-adapter"));
+    QVERIFY(!terminal("adapter-edit"));
+    socket.sendBinaryMessage(adapterImage);
+    QTRY_VERIFY(terminal("adapter-edit"));
+    QTRY_COMPARE(images.count(), 1);
+    adapterArgs = arguments();
+    QVERIFY(adapterArgs.contains("--ref-image")); QVERIFY(adapterArgs.contains("--ip-adapter-image"));
+    QVERIFY(!adapterArgs.contains("--init-img"));
+    QVERIFY(adapterArgs.value(adapterArgs.indexOf("--ref-image") + 1)
+        != adapterArgs.value(adapterArgs.indexOf("--ip-adapter-image") + 1));
+    QCOMPARE(capturedImage(".source"), image); QCOMPARE(capturedImage(".ip"), adapterImage);
+    QCOMPARE(adapterArgs.value(adapterArgs.indexOf("--ip-adapter-strength") + 1), QString("1"));
+    // Recommendations never silently change explicit runtime selection or strength.
+    adapterOptions.insert("modelId", "image-generation:model.gguf");
+    int invalidAdapterIndex = 0;
+    for (const auto &change : QList<QPair<QString, QJsonValue>>{
+        {"clipVisionModelId", "edition:edit.gguf"}, {"ipAdapterModelId", "image-generation:model.gguf"},
+        {"clipVisionModelId", 1}, {"ipAdapterModelId", "ip-adapter:missing.safetensors"},
+        {"hasIpAdapterImage", false}, {"hasIpAdapterImage", "true"},
+        {"ip_adapter_strength", "1"}, {"ip_adapter_strength", -0.1}, {"ip_adapter_strength", 2.1}}) {
+        auto invalidOptions = adapterOptions; invalidOptions.insert(change.first, change.second);
+        const auto id = QString("invalid-adapter-%1").arg(++invalidAdapterIndex);
+        messages.clear(); send(id, invalidOptions); QTRY_VERIFY(terminal(id));
+        QCOMPARE(messages.last().value("type").toString(), QString("error"));
+        QVERIFY(!uploadFor(id, "ip-adapter"));
+    }
+    messages.clear(); send("adapter-empty", adapterOptions);
+    QTRY_VERIFY(uploadFor("adapter-empty", "ip-adapter"));
+    socket.sendBinaryMessage(QByteArray()); QTRY_VERIFY(terminal("adapter-empty"));
+    QCOMPARE(messages.last().value("code").toString(), QString("invalid-image"));
+    messages.clear(); send("adapter-oversized", adapterOptions);
+    QTRY_VERIFY(uploadFor("adapter-oversized", "ip-adapter"));
+    socket.sendBinaryMessage(QByteArray(1025, 'x')); QTRY_VERIFY(terminal("adapter-oversized"));
+    QCOMPARE(messages.last().value("code").toString(), QString("invalid-image"));
+    messages.clear(); send("adapter-pending", adapterOptions);
+    QTRY_VERIFY(uploadFor("adapter-pending", "ip-adapter"));
+    send("concurrent-upload", adapterOptions); QTRY_VERIFY(terminal("concurrent-upload"));
+    QCOMPARE(messages.last().value("code").toString(), QString("upload-in-progress"));
+    socket.sendBinaryMessage(adapterImage); QTRY_VERIFY(terminal("adapter-pending"));
+    messages.clear();
+    adapterOptions.insert("modelId", "edition:edit.gguf");
+    socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"type", "submit"}, {"operation", "image.edit"}, {"jobId", "adapter-disconnect"}, {"options", adapterOptions}}).toJson()));
+    QTRY_VERIFY(uploadFor("adapter-disconnect", "source")); socket.sendBinaryMessage(image);
+    QTRY_VERIFY(uploadFor("adapter-disconnect", "ip-adapter"));
+    socket.close(); QTRY_COMPARE(socket.state(), QAbstractSocket::UnconnectedState);
+    messages.clear(); socket.open(QUrl(QString("ws://127.0.0.1:%1").arg(service.serverPort())));
+    QTRY_COMPARE(socket.state(), QAbstractSocket::ConnectedState);
+    socket.sendTextMessage("{\"type\":\"authenticate\",\"version\":3}"); QTRY_VERIFY(messages.size() >= 2);
+    messages.clear();
+    socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"type", "models.delete"}, {"id", "clip_vision:vision.safetensors"}}).toJson()));
+    QTRY_VERIFY(!messages.isEmpty());
+    QTRY_COMPARE(messages.last().value("type").toString(), QString("models.delete.completed"));
+    QVERIFY(!QFileInfo::exists(visionPath)); // Incomplete disconnected uploads released the selected weights.
     images.clear();
     messages.clear();
     send("automatic", valid);
@@ -297,6 +418,8 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(images.last().first().toByteArray(), image);
     auto args = arguments();
     QCOMPARE(args.count("--offload-to-cpu"), 1);
+    QVERIFY(!args.contains("--ip-adapter"));
+    QVERIFY(!args.contains("--clip_vision"));
     QVERIFY(!args.contains("--sampling-method"));
     QVERIFY(!args.contains("--scheduler"));
     QVERIFY(!args.contains("--clip-skip"));
@@ -356,6 +479,8 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QTRY_COMPARE(images.count(), 4);
     args = arguments();
     QVERIFY(!args.contains("--vae"));
+    QVERIFY(!args.contains("--ip-adapter"));
+    QVERIFY(!args.contains("--clip_vision"));
     QVERIFY(!args.contains("--sampling-method"));
     QCOMPARE(args.value(args.indexOf("--cfg-scale") + 1), QString("7"));
     QCOMPARE(args.value(args.indexOf("--seed") + 1), QString("-1"));
@@ -375,6 +500,8 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QVERIFY(!args.contains("--llm"));
     QVERIFY(!args.contains("--llm_vision"));
     QVERIFY(!args.contains("--clip_g"));
+    QVERIFY(!args.contains("--ip-adapter"));
+    QVERIFY(!args.contains("--clip_vision"));
     QVERIFY(!args.contains("--sampling-method"));
     QVERIFY(!args.contains("--scheduler"));
     int completed = 5;
@@ -441,7 +568,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
 void ServiceTest::validatesRecommendedOptions()
 {
     using namespace KiraService::Protocol;
-    for (auto category : {"image-generation", "edition", "llm-chat", "upscaler", "ip-adapter"}) {
+    for (auto category : {"image-generation", "edition", "llm-chat", "upscaler", "ip-adapter", "ip_adapter", "clip_vision", "photomaker"}) {
         auto options = defaultModelOptions(category); QVERIFY(validateModelOptions(category, options));
         options.insert("unrelated", true); QVERIFY(!validateModelOptions(category, options));
     }
@@ -454,6 +581,21 @@ void ServiceTest::validatesRecommendedOptions()
     llm.insert("maxTokens", 4096); llm.insert("topP", 0); QVERIFY(!validateModelOptions("llm-chat", llm));
     QVERIFY(!validateModelOptions("upscaler", {{"tileSize", 129}}));
     QVERIFY(!validateModelOptions("ip-adapter", {{"strength", 2.1}}));
+    QCOMPARE(defaultModelOptions("clip_vision"), QJsonObject({{"image_size", 224}, {"normalize_input", true}}));
+    QCOMPARE(defaultModelOptions("ip_adapter"), QJsonObject({{"strength", 1.0}}));
+    QVERIFY(validateModelOptions("ip_adapter", {{"strength", 0.8}}));
+    auto vision = defaultModelOptions("clip_vision");
+    for (const auto &value : {QJsonValue(0), QJsonValue(224.5), QJsonValue("224"), QJsonValue(4097)}) {
+        vision.insert("image_size", value); QVERIFY(!validateModelOptions("clip_vision", vision));
+    }
+    vision = defaultModelOptions("clip_vision"); vision.insert("normalize_input", 1);
+    QVERIFY(!validateModelOptions("clip_vision", vision));
+    QCOMPARE(defaultModelOptions("photomaker"), QJsonObject({{"style_strength", 20}}));
+    for (const auto &value : {QJsonValue(-1), QJsonValue(101), QJsonValue(20.5), QJsonValue("20"), QJsonValue(true)}) {
+        QVERIFY(!validateModelOptions("photomaker", {{"style_strength", value}}));
+    }
+    QVERIFY(validateModelOptions("photomaker", {{"style_strength", 0}}));
+    QVERIFY(validateModelOptions("photomaker", {{"style_strength", 100}}));
 }
 
 void ServiceTest::persistsOptionsAndLegacyMetadata()
@@ -696,14 +838,171 @@ void ServiceTest::managesEditionModels()
     }
 }
 
+void ServiceTest::installsClipVision()
+{
+    TestHttpServer server("vision weights"); QVERIFY(server.start());
+    QTemporaryDir directory; QVERIFY(directory.isValid()); ModelCatalog catalog(directory.path(), true);
+    QSignalSpy finished(&catalog, &ModelCatalog::installFinished);
+    QString error;
+    ModelInstallRequest request;
+    request.installId = "vision"; request.category = ModelCategory::ClipVision;
+    request.url = server.url("clip_vision_h.safetensors");
+    request.recommendedOptions = KiraService::Protocol::defaultModelOptions("clip_vision");
+    QVERIFY2(catalog.install(request, &error), qPrintable(error)); QTRY_COMPARE(finished.count(), 1);
+    const auto id = QString("clip_vision:clip_vision_h.safetensors");
+    const auto model = catalog.modelById(id); QVERIFY(model);
+    QCOMPARE(model->filePath, directory.filePath("clip_vision/clip_vision_h.safetensors"));
+    QCOMPARE(model->recommendedOptions, *request.recommendedOptions);
+    QVERIFY(!catalog.install(request, &error)); // Never overwrite installed weights.
+    QVERIFY(catalog.configure(id, {{"image_size", 336}, {"normalize_input", false}}, &error));
+    ModelCatalog restored(directory.path(), true);
+    QCOMPARE(restored.modelById(id)->recommendedOptions, QJsonObject({{"image_size", 336}, {"normalize_input", false}}));
+    QVERIFY(!catalog.configure(id, {{"image_size", 224}, {"normalize_input", "false"}}, &error));
+    QVERIFY(catalog.remove(id, &error)); QVERIFY(!QFileInfo::exists(model->filePath));
+    request.companionUrl = server.url("auxiliary.gguf");
+    QVERIFY(!catalog.install(request, &error)); // CLIP Vision has only its required primary.
+    QCOMPARE(ModelCatalog::categoryName(ModelCategory::IpAdapter), QString("ip_adapter"));
+    QCOMPARE(*ModelCatalog::categoryFromName("ip_adapter"), ModelCategory::IpAdapter);
+}
+
+void ServiceTest::installsPhotoMaker()
+{
+    TestHttpServer server("photomaker weights"); QVERIFY(server.start());
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    ModelCatalog catalog(directory.path(), true);
+    QSignalSpy finished(&catalog, &ModelCatalog::installFinished);
+    QString error;
+    ModelInstallRequest request;
+    request.installId = "photomaker"; request.category = ModelCategory::PhotoMaker;
+    request.url = server.url("photomaker-v2.safetensors");
+    request.recommendedOptions = KiraService::Protocol::defaultModelOptions("photomaker");
+    QVERIFY2(catalog.install(request, &error), qPrintable(error));
+    QTRY_COMPARE(finished.count(), 1);
+    const QString id = "photomaker:photomaker-v2.safetensors";
+    const auto model = catalog.modelById(id); QVERIFY(model);
+    QCOMPARE(model->filePath, directory.filePath("photomaker/photomaker-v2.safetensors"));
+    QCOMPARE(model->recommendedOptions, *request.recommendedOptions);
+    QVERIFY(!catalog.install(request, &error));
+    QVERIFY(catalog.configure(id, {{"style_strength", 100}}, &error));
+    ModelCatalog restored(directory.path(), true);
+    QCOMPARE(restored.modelById(id)->recommendedOptions, QJsonObject({{"style_strength", 100}}));
+    QVERIFY(!catalog.configure(id, {{"style_strength", 20.5}}, &error));
+    QVERIFY(catalog.remove(id, &error));
+    request.url = server.url("photomaker.bin"); QVERIFY(!catalog.install(request, &error));
+    request.url = server.url("photomaker.safetensors");
+    request.companionUrl = server.url("auxiliary.gguf"); QVERIFY(!catalog.install(request, &error));
+}
+
+void ServiceTest::exportsPhotoMakerIdentity()
+{
+    const QString python = QStandardPaths::findExecutable("python3");
+    if (python.isEmpty()) QSKIP("python3 is required for the identity-extractor fixture");
+    QTemporaryDir fixture; QVERIFY(fixture.isValid());
+    QVERIFY(QDir().mkpath(fixture.filePath("insightface")));
+    const auto write = [&](const QString &name, const QByteArray &data) {
+        QFile file(fixture.filePath(name));
+        return file.open(QIODevice::WriteOnly) && file.write(data) == data.size();
+    };
+    QVERIFY(write("insightface/__init__.py", ""));
+    QVERIFY(write("insightface/app.py",
+        "class FaceAnalysis:\n"
+        "    def get(self, image, max_num=0):\n"
+        "        return [{}] * (2 if image == b'multiple' else 0 if image == b'none' else 1)\n"));
+    // Exercise the bundled guard around the official subclass/get and runpy entry point.
+    // Replace heavyweight inference only; no model download or GPU is used in this test.
+    QVERIFY(write("face_detect.py", R"PY(
+import pathlib, sys, time
+from insightface.app import FaceAnalysis
+class FaceAnalysis2(FaceAnalysis):
+    def get(self, img, max_num=0, det_size=(640, 640)):
+        return super().get(img, max_num)
+directory = pathlib.Path(sys.argv[1])
+pathlib.Path(__file__ + ".log").write_text(str(directory))
+assert [path.name for path in directory.iterdir()] == ["input.png"]
+image = (directory / "input.png").read_bytes()
+if image == b"failure":
+    raise RuntimeError("fixture extraction failure")
+if image == b"missing":
+    sys.exit(0)
+if image == b"slow":
+    time.sleep(60)
+faces = FaceAnalysis2().get(image)
+if not faces:
+    raise ValueError("No face detected in input image pool")
+(directory / "id_embeds.bin").write_bytes(b"\x04\x00\x00\x00identity-fixture")
+)PY"));
+    const QByteArray oldPythonPath = qgetenv("PYTHONPATH");
+    const auto restore = qScopeGuard([oldPythonPath] {
+        if (oldPythonPath.isNull()) qunsetenv("PYTHONPATH");
+        else qputenv("PYTHONPATH", oldPythonPath);
+    });
+    qputenv("PYTHONPATH", fixture.path().toUtf8());
+    KiraServiceConfiguration configuration;
+    configuration.port = 0;
+    configuration.modelRootPath = fixture.filePath("models");
+    configuration.photoMakerPython = python;
+    configuration.photoMakerFaceDetect = fixture.filePath("face_detect.py");
+    KiraServiceDaemon service(configuration);
+    QString error; QVERIFY2(service.start(&error), qPrintable(error));
+    KiraService::ServiceClient client;
+    QSignalSpy results(&client, &KiraService::ServiceClient::photoMakerIdentityExportFinished);
+    QSignalSpy images(&client, &KiraService::ServiceClient::imageJobFinished);
+    client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(service.serverPort())), {});
+    client.connectToService();
+    QTRY_VERIFY(client.capabilities().photoMakerIdentityExport);
+    QVERIFY(client.exportPhotoMakerIdentity({}).isEmpty());
+    for (const auto &source : {QByteArray("single"), QByteArray("none"), QByteArray("multiple"),
+                              QByteArray("failure"), QByteArray("missing")}) {
+        results.clear();
+        const QString id = client.exportPhotoMakerIdentity(source); QVERIFY(!id.isEmpty());
+        QTRY_COMPARE(results.count(), 1);
+        const auto result = qvariant_cast<KiraService::PhotoMakerIdentityResult>(results.first().first());
+        QCOMPARE(result.jobId, id);
+        if (source == "single") {
+            QVERIFY2(result.succeeded, qPrintable(result.message));
+            QCOMPARE(result.identityData, QByteArray::fromHex("04000000") + "identity-fixture");
+        } else {
+            QVERIFY(!result.succeeded); QVERIFY(result.identityData.isEmpty());
+            const QString expected = source == "none" ? "photomaker-no-face"
+                : source == "multiple" ? "photomaker-multiple-faces"
+                : source == "missing" ? "photomaker-output-missing" : "photomaker-extraction-failed";
+            QCOMPARE(result.errorCode, expected); QVERIFY(!result.message.isEmpty());
+        }
+        QFile log(fixture.filePath("face_detect.py.log")); QVERIFY(log.open(QIODevice::ReadOnly));
+        const QString workingDirectory = QString::fromUtf8(log.readAll());
+        QTRY_VERIFY(!QFileInfo::exists(workingDirectory));
+        QCOMPARE(images.count(), 0);
+    }
+    results.clear();
+    const QString canceled = client.exportPhotoMakerIdentity("slow"); QVERIFY(!canceled.isEmpty());
+    QFile log(fixture.filePath("face_detect.py.log"));
+    QString workingDirectory;
+    QTRY_VERIFY(([&] {
+        if (!log.open(QIODevice::ReadOnly)) return false;
+        workingDirectory = QString::fromUtf8(log.readAll()); log.close();
+        return QFileInfo::exists(workingDirectory);
+    })());
+    client.disconnectFromService();
+    QTRY_COMPARE(results.count(), 1);
+    QCOMPARE(qvariant_cast<KiraService::PhotoMakerIdentityResult>(results.first().first()).errorCode,
+        QString("connection-closed"));
+    QTRY_VERIFY(!QFileInfo::exists(workingDirectory));
+    client.connectToService(); QTRY_VERIFY(client.capabilities().photoMakerIdentityExport);
+    results.clear(); QVERIFY(!client.exportPhotoMakerIdentity("single").isEmpty());
+    QTRY_COMPARE(results.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::PhotoMakerIdentityResult>(results.first().first()).succeeded);
+    QCOMPARE(images.count(), 0);
+}
+
 void ServiceTest::installsIpAdapterPair()
 {
     TestHttpServer server(QByteArray("model-bytes")); QVERIFY(server.start());
     QTemporaryDir directory; QVERIFY(directory.isValid()); ModelCatalog catalog(directory.path(), true);
     QSignalSpy finished(&catalog, &ModelCatalog::installFinished); QString error;
-    const ModelInstallRequest request{QStringLiteral("ip-adapter-install"), ModelCategory::IpAdapter,
+    ModelInstallRequest request{QStringLiteral("ip-adapter-install"), ModelCategory::IpAdapter,
                                       server.url(QStringLiteral("ip-adapter-faceid-plusv2_sdxl.bin")),
                                       server.url(QStringLiteral("ip-adapter-faceid-plusv2_sdxl_lora.safetensors"))};
+    request.recommendedOptions = KiraService::Protocol::defaultModelOptions("ip_adapter");
     QVERIFY(catalog.install(request, &error));
     QTRY_COMPARE(finished.count(), 1);
     const QString primaryPath = directory.filePath(QStringLiteral("ip-adapter/ip-adapter-faceid-plusv2_sdxl.bin"));
@@ -715,8 +1014,25 @@ void ServiceTest::installsIpAdapterPair()
     const QList<ModelInfo> models = catalog.models(ModelCategory::IpAdapter);
     QCOMPARE(models.size(), 1);
     QCOMPARE(models.first().companionFileName, companionRelativePath);
+    QVERIFY(models.first().id.startsWith("ip-adapter:"));
+    QVERIFY(catalog.model(ModelCategory::IpAdapter, "ip_adapter:" + models.first().fileName));
+    QVERIFY(catalog.configure(models.first().id, {{"strength", 0.75}}, &error));
     ModelCatalog restoredCatalog(directory.path(), true);
     QCOMPARE(restoredCatalog.models(ModelCategory::IpAdapter).first().companionFileName, companionRelativePath);
+    QCOMPARE(restoredCatalog.models(ModelCategory::IpAdapter).first().recommendedOptions,
+        QJsonObject({{"strength", 0.75}}));
+    QVERIFY(catalog.removeCompanion(models.first().id, "lora", &error));
+    QVERIFY(QFileInfo::exists(primaryPath)); QVERIFY(!QFileInfo::exists(companionPath));
+    ModelInstallRequest attachment;
+    attachment.installId = "adapter-auxiliary"; attachment.category = ModelCategory::IpAdapter;
+    attachment.existingModelId = models.first().id; attachment.modelType.clear();
+    attachment.companionUrls = {{"lora", server.url("replacement.safetensors").toString()}};
+    QVERIFY2(catalog.install(attachment, &error), qPrintable(error)); QTRY_COMPARE(finished.count(), 2);
+    const auto updated = catalog.modelById(models.first().id); QVERIFY(updated);
+    QCOMPARE(updated->companionFiles.value("lora").toString(),
+        QString("companions/%1/lora/replacement.safetensors").arg(updated->fileName));
+    QCOMPARE(updated->recommendedOptions, QJsonObject({{"strength", 0.75}}));
+    QVERIFY(!catalog.install(attachment, &error));
     QVERIFY(catalog.remove(models.first().id, &error));
     QVERIFY(!QFileInfo::exists(primaryPath));
     QVERIFY(!QFileInfo::exists(companionPath));

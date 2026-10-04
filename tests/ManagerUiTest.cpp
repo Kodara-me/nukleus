@@ -134,13 +134,20 @@ class ManagerUiTest final : public QObject
     void fieldsFollowCategory()
     {
         ModelOptionsWidget widget;
-        for (const auto &category : {"image-generation", "edition", "llm-chat", "upscaler", "ip-adapter"})
+        for (const auto &category : {"image-generation", "edition", "llm-chat", "upscaler", "ip-adapter", "ip_adapter", "clip_vision", "photomaker"})
         {
             widget.setOptions(category);
             QCOMPARE(widget.options(), KiraService::Protocol::defaultModelOptions(category));
             QVERIFY(widget.isValid());
             QVERIFY(!widget.explicitContent());
         }
+        widget.setOptions("ip_adapter", {{"strength", 0.75}});
+        QCOMPARE(widget.options(), QJsonObject({{"strength", 0.75}}));
+        widget.setOptions("clip_vision");
+        widget.findChild<QCheckBox *>("normalize_input")->setChecked(false);
+        widget.findChild<QSpinBox *>("image_size")->setValue(336);
+        QCOMPARE(widget.options(), QJsonObject({{"image_size", 336}, {"normalize_input", false}}));
+        QVERIFY(widget.isValid());
         widget.setOptions("llm-chat");
         QVERIFY(!widget.findChild<QComboBox *>("resolution"));
         widget.findChild<QSpinBox *>("maxTokens")->setValue(5000);
@@ -222,7 +229,7 @@ class ManagerUiTest final : public QObject
         QVERIFY(tree);
         QCOMPARE(tree->model()->rowCount(), 1);
         auto root = tree->model()->index(0, 0);
-        QCOMPARE(tree->model()->rowCount(root), 5);
+        QCOMPARE(tree->model()->rowCount(root), 7);
         auto branch = tree->model()->index(2, 0, root);
         auto model = tree->model()->index(0, 0, branch);
         tree->setCurrentIndex(model);

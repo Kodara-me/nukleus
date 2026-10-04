@@ -10,7 +10,7 @@ ctest --test-dir build --output-on-failure
 
 Run the daemon with `./build/src/kira-service`. Run the local administrator UI with `./build/src/kira-service-manager --gui`, or exercise the manager CLI with `./build/src/kira-service-manager --help`. Use the root installer only for Linux systemd deployments.
 
-Image-editing models use the `edition` catalog category and `models/edition/` storage; the manager GUI, CLI, and SDK support their installation, listing, and deletion. This category does not add an editing job operation.
+Image-editing models use the `edition` catalog category and `models/edition/` storage; the manager GUI, CLI, and SDK support their installation, listing, and deletion. Edition jobs use `image.edit` with uploaded source images.
 
 Sources are organized under `src/daemon/`, `src/manager/`, and `src/sdk/`.
 The two executable targets remain declared by `src/CMakeLists.txt`, so their
@@ -25,7 +25,7 @@ The SDK targets are `KiraService::Protocol` and `KiraService::SDK`. A source
 checkout can add `src/sdk` directly, while installed consumers use
 `find_package(KiraServiceSdk CONFIG REQUIRED)`. The SDK owns WebSocket and
 protocol behavior; applications own settings, files, and UI messages. Keep
-protocol v3 compatible. Model management includes the `ip-adapter` category
+protocol v3 compatible. Model management includes the `ip_adapter` category (legacy `ip-adapter` alias) and `clip_vision`
 and optional paired companion metadata (IP-Adapter LoRA, LLM mmproj, or Image-generation/Edition VAE).
 The SDK install method accepts an optional companion URL instead of a SHA-256
 checksum. Download checksums are no longer supported. Image models also accept
@@ -196,3 +196,79 @@ ssh -t user@service-host 'sudo -v && /path/to/kira-service/scripts/update-kira-s
 Unattended runs require suitable passwordless sudo access. Do not run the entire
 updater as root. Build/test failures leave the installed service untouched, but
 the checkout may already have advanced to the fetched revision.
+
+
+## IP-Adapter integration
+
+`clip_vision` adds `models/clip_vision/`; `ip_adapter` reuses the existing
+`models/ip-adapter/` directory and opaque IDs. The legacy category alias and
+strength-only option objects remain accepted. Both categories use the existing
+catalogue's download/import, atomic metadata and no-overwrite behavior. Configure
+`image_size`/`normalize_input` for vision and `strength` for
+adapters through the Manager. They remain recommendations; sd-cli controls image
+preprocessing and requests explicitly choose conditioning IDs/strength.
+
+The SDK adds separate IP-Adapter bytes to generation/editing requests. Protocol v3
+uses role-labelled sequential binary uploads so an editing source and conditioning
+reference cannot overwrite one another. The daemon resolves both weight IDs,
+protects them through the pending/queued/active lifecycle and passes the four
+IP-Adapter flags to sd-cli. Auxiliary weights use the existing optional `lora`
+companion role and sd-cli's LoRA directory/prompt syntax.
+
+Tests use disposable weight files, local servers and a fake sd-cli to validate
+catalogue persistence, booleans/numeric ranges, SDK uploads, distinct editing and
+conditioning images, CLI argument precision, defaults, pending-model protection,
+and invalid uploads/selections. They do not verify GPU inference or real weight
+compatibility. See [protocol-v3.md](docs/protocol-v3.md#ip-adapter-conditioning) for
+wire fields and backend limitations.
+
+## PhotoMaker V2 extractor setup
+
+PhotoMaker catalogues require no additional build dependency. Identity export
+optionally invokes the official `scripts/face_detect.py` from the
+stable-diffusion.cpp checkout matching the deployed backend. The bundled
+`src/daemon/photomaker-export.py` guard runs it via runpy, preserving its
+embedding computation and binary serializer, but refuses multiple faces rather
+than choosing the first. It uses the official CPU provider.
+
+Provision a dedicated service-side Python environment with the script's imports:
+NumPy, PyTorch, diffusers, safetensors, Pillow, InsightFace 0.7.3 and ONNX Runtime
+(CPU). InsightFace installation can require Python development headers and a
+compiler. For example, after creating a virtual environment:
+
+```sh
+/opt/kira-photomaker/bin/python -m pip install numpy torch diffusers safetensors Pillow insightface==0.7.3 onnxruntime
+```
+
+Keep the official checkout/script and environment readable by the service account
+outside /home (systemd ProtectHome remains enabled). Verify extraction with an
+image containing exactly one face under that account, and provision/cache the
+InsightFace model assets before relying on offline operation. InsightFace uses
+the service account's `~/.insightface`; the installed account's home is
+`/var/lib/kira-service`, which the existing systemd sandbox permits writing.
+Other Python caches must also live within that writable state directory.
+
+Add these settings to the existing `/etc/kira-service/kira-service.conf`, keeping
+its listen/port/token values, then restart the service:
+
+```ini
+KIRA_PHOTOMAKER_PYTHON=/opt/kira-photomaker/bin/python
+KIRA_PHOTOMAKER_FACE_DETECT=/opt/stable-diffusion.cpp/scripts/face_detect.py
+```
+
+For a foreground daemon, export the same environment variables before launch.
+The interpreter defaults to python3; the script has no default. The capability
+is advertised only when the interpreter resolves and the script exists; missing
+dependencies or model assets return an explicit extraction error. No dependencies
+are installed automatically by Kira Service. Valid installer configuration is
+preserved by the normal update workflow, including these additional variables.
+
+Exports share the existing FIFO and upload limit (64 MiB by default), run with a
+ten-minute timeout and clean temporary image/binary files after the process stops.
+Tests replace heavyweight inference with Python fixtures while exercising the
+actual bundled single-face guard, subprocess, SDK binary result, failure codes
+and disconnection cleanup. They require python3 and skip that fixture if absent;
+they do not validate real embedding quality. On a provisioned host, verify a
+single face, no face, multiple faces and a cropped source against the deployed
+official script. Never persist uploaded identities or introduce identity types
+beyond this concrete PhotoMaker binary result.

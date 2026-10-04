@@ -1,5 +1,14 @@
 # Kira Service Development Contract
 
+## Reviewable and reversible edits
+
+- Use the `apply_patch` tool for all manual text-file additions, edits, and deletions. Do not use Python, Perl, sed, shell redirection, or other scripts to rewrite project files.
+- Project generators and formatters may update files when required by the task. Identify these tool-generated changes and review their diffs.
+- Inspect Git status before editing, preserve pre-existing user changes, and keep edits uncommitted unless the user requests a commit. Review the final diff, run `git diff --check`, and report changed files, including new untracked files.
+- Keep changes small so they can be reviewed and undone independently. When asked to undo work, revert only the agent's changes while preserving subsequent user edits; never use a broad reset or discard unrelated changes.
+
+## Development rules
+
 - Kira Service is a C++20 Qt 6 backend project. Keep the daemon and native manager separate executables, and keep reusable image transport code in the installable SDK under `src/sdk/`.
 - The daemon owns model storage, a single active HTTPS model installation, recommended model options, temporary jobs, and a FIFO execution queue for `sd-cli` image jobs. It never exposes service paths over WebSocket.
 - The manager is local-only: it connects to `127.0.0.1:9384`, supports GUI and `list`/`add`/`delete` CLI modes, and is installed into the invoking user's `~/.local/bin`.
@@ -10,7 +19,7 @@
 - CMake also installs SDK headers and static libraries and generates the `KiraServiceSdk` package. The SDK supports image operations.
 - Use `$XDG_DATA_HOME/kira-service/models/` with `upscale/`, `llm/`, and `edition/` subdirectories. The `edition` category manages image-editing model files; image.edit jobs use reference-image conditioning. Never overwrite installed model files. Keep the legacy-root migration safe and non-merging.
 - Linux systemd deployment keeps the `kira-service` account, `/etc/kira-service`, `/var/lib/kira-service`, `/run/kira-service`, and fixed port `9384`.
-- Optional companions use category-local persistent metadata: mmproj for LLM-chat, VAE for Image-generation/Edition, and LoRA for IP-Adapter. Install and delete them with their primary model; expose only category-relative companion filenames and roles. Do not perform SHA-256 download checks. Image-generation/Edition also support role-specific optional CLIP-L, CLIP-G, VAE, LLM text encoder and mmproj files through companionUrls/companionFiles, with modelType checkpoint (default) or diffusion. Existing image models accept companion attachment via models.install with an opaque id; never redownload or overwrite the primary. Stage all files and publish metadata atomically; cancellation/failure must preserve an existing primary and recommendations. Keep legacy companionUrl, companionFileName and string metadata compatible. Image-generation companions are resolved internally and passed with --clip_l, --clip_g, --vae, --llm and --llm_vision; diffusion models use --diffusion-model and checkpoints use --model; LLM-chat mmproj and IP-Adapter LoRA remain catalog attachments. Validate generation values/types before queuing, omit automatic sampler/scheduler flags, and preserve numeric precision. Never auto-apply recommendedOptions to jobs.
+- Optional companions use category-local persistent metadata: mmproj for LLM-chat, VAE for Image-generation/Edition, and LoRA for IP-Adapter. Install and delete them with their primary model; expose only category-relative companion filenames and roles. Do not perform SHA-256 download checks. Image-generation/Edition also support role-specific optional CLIP-L, CLIP-G, VAE, LLM text encoder and mmproj files through companionUrls/companionFiles, with modelType checkpoint (default) or diffusion. Existing image models accept companion attachment via models.install with an opaque id; never redownload or overwrite the primary. Stage all files and publish metadata atomically; cancellation/failure must preserve an existing primary and recommendations. Keep legacy companionUrl, companionFileName and string metadata compatible. Image-generation companions are resolved internally and passed with --clip_l, --clip_g, --vae, --llm and --llm_vision; diffusion models use --diffusion-model and checkpoints use --model; LLM-chat mmproj remains a catalog attachment. An explicitly selected IP-Adapter uses its optional auxiliary LoRA through --lora-model-dir and a generated prompt tag. Validate generation values/types before queuing, omit automatic sampler/scheduler flags, and preserve numeric precision. Never auto-apply recommendedOptions to jobs.
 - Build and run CTest after each slice. Keep README and CONTRIBUTING accurate.
 - Missing image-generation dimensions/steps use GenerationRequest defaults (1024×1024, 28), while supplied invalid values remain errors. Keep absent CFG at 7 and automatic backend choices omitted. An external VAE remains optional for complete checkpoints; never substitute numeric defaults for missing model weights.
 
@@ -38,7 +47,7 @@
 - ModelOptions in the Protocol target owns category defaults and validation.
   Image generation/Edition use square resolution, steps, CFG, sampler, scheduler,
   Clip Skip; LLM uses temperature/top-p/context/max tokens; Upscaler uses tile
-  size; IP-Adapter uses strength. Hide unrelated fields.
+  size; IP-Adapter uses strength; CLIP Vision uses image_size/normalize_input. Hide unrelated fields.
 - Preserve legacy metadata.json companion strings and untouched entries when
   adding object entries. Write atomically with QSaveFile; reject mutation on
   unreadable metadata. Keep existing models without recommendations usable.
@@ -116,3 +125,37 @@ fetch and fast-forward the configured upstream, configure/build/test, then invok
 the existing systemd installer with `sudo -n`. Keep installation gated on passing
 tests and retain existing installer configuration/model-preservation behavior.
 Sibling checkouts and sd-cli are not updated by this script.
+
+
+IP-Adapter conditioning uses canonical categories `clip_vision` and `ip_adapter`;
+keep legacy `ip-adapter` requests, opaque IDs/storage and strength-only options
+compatible. CLIP Vision requires a primary weight and stores image_size (224) /
+normalize_input (true); IP-Adapter requires primary weights, an optional auxiliary
+LoRA, and strength (1.0). Never auto-apply these
+recommendations. sd-cli owns preprocessing; do not invent CLI flags for these
+metadata fields. Preserve model installation/configuration and atomic file behavior.
+
+Generation/editing select both opaque IDs and upload a separate conditioning image.
+Protocol v3 advertises capabilities.ipAdapter and upload-required.inputRole; source
+then ip-adapter binary uploads queue one job only after both arrive. Protect selected
+weights/companions while pending, queued or active; reject incomplete combinations
+and adapter fields on upscale. SDK requests use clipVisionModelId, ipAdapterModelId,
+ipAdapterImageData and optional ipAdapterStrength (wire ip_adapter_strength, 0–2,
+default 1). Use --clip_vision/--ip-adapter/--ip-adapter-image/--ip-adapter-strength;
+retain edit --ref-image separately. Optional auxiliary LoRA uses --lora-model-dir
+and a generated <lora:filename:1> tag; reject user LoRA tags for these jobs.
+PhotoMaker V2 is a separate `photomaker` category: one required .safetensors
+primary, no companions, and integer style_strength (0–100, default 20).
+Use existing model installation/configuration/storage conventions.
+The additive protocol-v3 `photomaker.export` operation accepts one source image
+(including a client-prepared crop) and returns only id_embeds.bin bytes through
+the SDK's dedicated photoMakerIdentityExportFinished result. No image job result
+or image generation occurs. Share the FIFO, keep temporary storage until process
+termination, and clean it on success/failure/disconnection.
+Run the official stable-diffusion.cpp scripts/face_detect.py through the bundled
+strict single-face guard. Python/InsightFace are optional service-side extraction
+dependencies only; Canvas never runs them. Configure KIRA_PHOTOMAKER_PYTHON and
+KIRA_PHOTOMAKER_FACE_DETECT on the service host. Advertise extraction independently
+of sd-cli when these paths are configured; dependency/model failures remain explicit.
+Do not add InstantID, DINOv2, general identity abstractions, or a Canvas crop/export
+UI in this slice. PhotoMaker generation conditioning is a separate future slice.

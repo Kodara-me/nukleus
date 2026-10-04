@@ -63,7 +63,7 @@ ManagerServiceClient::ManagerServiceClient(QObject *parent, quint16 localPort)
     connect(m_socket, &QWebSocket::disconnected, this, [this] {
         m_authenticated = false;
         m_modelListAvailable = false;
-        m_generationModels.clear(); m_editionModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_ipAdapterModels.clear();
+        m_generationModels.clear(); m_editionModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_ipAdapterModels.clear(); m_clipVisionModels.clear(); m_photoMakerModels.clear();
         failActiveInstalls(tr("Service connection was closed"));
         emit modelsChanged();
         emit serviceStateChanged(QStringLiteral("offline"), tr("Service connection was closed"));
@@ -92,7 +92,9 @@ QList<ManagedModelInfo> ManagerServiceClient::models(const QString &category) co
     if (category == QStringLiteral("edition")) return m_editionModels;
     if (category == QStringLiteral("upscaler")) return m_upscaleModels;
     if (category == QStringLiteral("llm-chat")) return m_llmChatModels;
-    if (category == QStringLiteral("ip-adapter")) return m_ipAdapterModels;
+    if (category == QStringLiteral("ip-adapter") || category == "ip_adapter") return m_ipAdapterModels;
+    if (category == "clip_vision") return m_clipVisionModels;
+    if (category == "photomaker") return m_photoMakerModels;
     return {};
 }
 QList<ManagedInstall> ManagerServiceClient::installs() const { return m_installs; }
@@ -164,7 +166,7 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
     const QJsonObject object = document.object(); const QString type = object.value(QStringLiteral("type")).toString();
     if (type == QStringLiteral("authenticated")) { m_authenticated = true; requestModels(); emit serviceStateChanged(QStringLiteral("connected"), tr("Connected to service")); return; }
     if (type == QStringLiteral("models.list.result")) {
-        m_generationModels.clear(); m_editionModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_ipAdapterModels.clear();
+        m_generationModels.clear(); m_editionModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_ipAdapterModels.clear(); m_clipVisionModels.clear(); m_photoMakerModels.clear();
         for (const QJsonValue &categoryValue : object.value(QStringLiteral("categories")).toArray()) {
             const QJsonObject category = categoryValue.toObject(); QList<ManagedModelInfo> *modelsForCategory = nullptr;
             const QString name = category.value(QStringLiteral("category")).toString();
@@ -172,7 +174,9 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
             else if (name == QStringLiteral("edition")) modelsForCategory = &m_editionModels;
             else if (name == QStringLiteral("upscaler")) modelsForCategory = &m_upscaleModels;
             else if (name == QStringLiteral("llm-chat")) modelsForCategory = &m_llmChatModels;
-            else if (name == QStringLiteral("ip-adapter")) modelsForCategory = &m_ipAdapterModels;
+            else if (name == QStringLiteral("ip-adapter") || name == "ip_adapter") modelsForCategory = &m_ipAdapterModels;
+            else if (name == "clip_vision") modelsForCategory = &m_clipVisionModels;
+            else if (name == "photomaker") modelsForCategory = &m_photoMakerModels;
             if (!modelsForCategory) continue;
             for (const QJsonValue &modelValue : category.value(QStringLiteral("models")).toArray()) {
                 const QJsonObject model = modelValue.toObject();
