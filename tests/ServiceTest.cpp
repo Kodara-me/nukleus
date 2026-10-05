@@ -62,6 +62,7 @@ class ServiceTest final : public QObject
 
 private slots:
     void persistsPromptStyles();
+    void installsAndPersistsPromptEnhancer();
     void configuresStylesOverProtocol();
     void generatesWithValidatedOptionsAndVae();
     void validatesRecommendedOptions();
@@ -805,11 +806,25 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
 void ServiceTest::validatesRecommendedOptions()
 {
     using namespace KiraService::Protocol;
-    for (auto category : {"image-generation", "edition", "llm-chat", "upscaler", "ip-adapter", "ip_adapter", "clip_vision", "photomaker"}) {
+    for (auto category : {"image-generation", "edition", "llm-chat", "upscaler", "ip-adapter", "ip_adapter", "clip_vision", "photomaker", "prompt-enhancer"}) {
         auto options = defaultModelOptions(category); QVERIFY(validateModelOptions(category, options));
         options.insert("unrelated", true); QVERIFY(!validateModelOptions(category, options));
     }
     auto image = defaultModelOptions("image-generation"); image.insert("steps", "28"); QVERIFY(!validateModelOptions("image-generation", image));
+    for (const auto& subtype : {"T5", "LLM", "VLM"}) {
+        auto enhancer = defaultPromptEnhancerOptions(subtype);
+        QVERIFY(validateModelOptions("prompt-enhancer", enhancer));
+        enhancer.insert("maxOutputTokens", 0);
+        QVERIFY(!validateModelOptions("prompt-enhancer", enhancer));
+        enhancer = defaultPromptEnhancerOptions(subtype);
+        enhancer.insert("doSample", "false");
+        QVERIFY(!validateModelOptions("prompt-enhancer", enhancer));
+    }
+    QVERIFY(defaultPromptEnhancerOptions("unknown").isEmpty());
+    auto t5 = defaultPromptEnhancerOptions("T5", true);
+    QVERIFY(validateModelOptions("prompt-enhancer", t5));
+    t5.insert("doSample", false);
+    QVERIFY(!validateModelOptions("prompt-enhancer", t5));
     image.insert("steps", 28.5); QVERIFY(!validateModelOptions("image-generation", image));
     image.insert("steps", 200); image.insert("width", 2048); image.insert("height", 2048); QVERIFY(validateModelOptions("image-generation", image));
     image.insert("clipSkip", 0); QVERIFY(!validateModelOptions("image-generation", image));
@@ -1100,6 +1115,34 @@ void ServiceTest::installsClipVision()
     QVERIFY(!catalog.install(request, &error)); // CLIP Vision has only its required primary.
     QCOMPARE(ModelCatalog::categoryName(ModelCategory::IpAdapter), QString("ip_adapter"));
     QCOMPARE(*ModelCatalog::categoryFromName("ip_adapter"), ModelCategory::IpAdapter);
+}
+
+void ServiceTest::installsAndPersistsPromptEnhancer()
+{
+    TestHttpServer server("enhancer weights"); QVERIFY(server.start());
+    QTemporaryDir directory;
+    ModelCatalog catalog(directory.path(), true);
+    QSignalSpy finished(&catalog, &ModelCatalog::installFinished);
+    ModelInstallRequest request;
+    request.installId = "enhancer"; request.category = ModelCategory::PromptEnhancer;
+    request.url = server.url("enhancer.gguf");
+    request.recommendedOptions = KiraService::Protocol::defaultPromptEnhancerOptions("LLM");
+    QString error;
+    QVERIFY2(catalog.install(request, &error), qPrintable(error));
+    QTRY_COMPARE(finished.count(), 1);
+    const auto installed = catalog.models(ModelCategory::PromptEnhancer);
+    QCOMPARE(installed.size(), 1);
+    const auto id = installed.first().id;
+    QCOMPARE(installed.first().filePath, directory.filePath("prompt-enhancer/enhancer.gguf"));
+    const auto t5 = KiraService::Protocol::defaultPromptEnhancerOptions("T5");
+    QVERIFY(catalog.configure(id, t5, &error, true));
+    ModelCatalog restored(directory.path(), true);
+    QCOMPARE(restored.modelById(id)->recommendedOptions, t5);
+    QVERIFY(restored.modelById(id)->explicitContent);
+    request.companionUrl = server.url("vision.gguf");
+    QVERIFY(!catalog.install(request, &error));
+    QVERIFY(catalog.remove(id, &error));
+    QVERIFY(restored.models(ModelCategory::PromptEnhancer).isEmpty());
 }
 
 void ServiceTest::installsPhotoMaker()

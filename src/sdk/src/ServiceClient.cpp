@@ -19,6 +19,7 @@ KiraService::ModelCategory categoryFromName(const QString &name)
     if (name == QStringLiteral("edition")) return KiraService::ModelCategory::Edition;
     if (name == "clip_vision") return KiraService::ModelCategory::ClipVision;
     if (name == "photomaker") return KiraService::ModelCategory::PhotoMaker;
+    if (name == "prompt-enhancer") return KiraService::ModelCategory::PromptEnhancer;
     return KiraService::ModelCategory::Unknown;
 }
 
@@ -32,6 +33,7 @@ QString categoryName(KiraService::ModelCategory category)
     if (category == KiraService::ModelCategory::IpAdapter) return QStringLiteral("ip-adapter");
     if (category == KiraService::ModelCategory::ClipVision) return QStringLiteral("clip_vision");
     if (category == KiraService::ModelCategory::PhotoMaker) return QStringLiteral("photomaker");
+    if (category == KiraService::ModelCategory::PromptEnhancer) return QStringLiteral("prompt-enhancer");
     return {};
 }
 

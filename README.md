@@ -2,6 +2,15 @@
 
 Kira Service is the standalone backend for Kira applications. It owns installed models and their recommended options, single HTTPS model installations, the `sd-cli` image queue, and the versioned WebSocket API. Client applications select opaque installed-model IDs and submit jobs; they do not manage service files.
 
+The Manager also supports a **Prompt Enhancer** catalogue (`prompt-enhancer`),
+stored under `models/prompt-enhancer/`. Choose subtype **T5**, **LLM** (initial),
+or **VLM** to configure the relevant recommended options. Changing subtype resets
+its options to the subtype defaults. T5 sampling controls appear only when
+sampling is enabled. Primary `.gguf`, `.safetensors`, and `.ckpt` files are accepted;
+companions are not supported in this slice. Installation, configuration and
+deletion use the existing atomic workflows. This category does not execute LLM
+or T5 inference yet; see [the option contract](docs/protocol-v3.md).
+
 ## Build
 
 The manager requires Kira UI Framework 0.2, Qt SVG, and LinguistTools in

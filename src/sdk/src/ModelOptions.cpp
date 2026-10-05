@@ -8,6 +8,32 @@ QStringList modelSchedulers()
 {
     return {QString(), "discrete", "karras", "exponential", "ays", "sgm_uniform", "simple"};
 }
+QJsonObject defaultPromptEnhancerOptions(const QString &subtype, bool sampling)
+{
+    if (subtype != "T5" && subtype != "LLM" && subtype != "VLM") return {};
+    QJsonObject options{{"subtype", subtype}, {"doSample", subtype == "T5" ? sampling : true}};
+    if (subtype == "T5") {
+        options.insert("maxInputTokens", 256);
+        options.insert("maxOutputTokens", 80);
+        options.insert("numBeams", 2);
+        options.insert("repetitionPenalty", 2.0);
+        options.insert("noRepeatNgramSize", 3);
+        options.insert("instructionPrompt", "Enhance this prompt (no lora):");
+    } else {
+        options.insert("contextLength", 4096);
+        options.insert("maxOutputTokens", 256);
+        options.insert("repetitionPenalty", 1.1);
+        options.insert("systemPrompt", "");
+        if (subtype == "VLM") options.insert("visionInputEnabled", true);
+    }
+    if (subtype != "T5" || sampling) {
+        options.insert("temperature", 0.2);
+        options.insert("topP", 0.9);
+        options.insert("topK", 20);
+    }
+    return options;
+}
+
 QJsonObject defaultModelOptions(const QString &category)
 {
     if (category == "image-generation" || category == "edition")
@@ -23,6 +49,8 @@ QJsonObject defaultModelOptions(const QString &category)
         return {{"image_size", 224}, {"normalize_input", true}};
     if (category == "photomaker")
         return {{"style_strength", 20}};
+    if (category == "prompt-enhancer")
+        return defaultPromptEnhancerOptions("LLM");
     return {};
 }
 bool validateModelOptions(const QString &category, const QJsonObject &options, QString *error)
@@ -33,7 +61,9 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
             *error = QStringLiteral("Invalid recommended options for this model category");
         return false;
     };
-    const auto defaults = defaultModelOptions(category);
+    const auto defaults = category == "prompt-enhancer"
+        ? defaultPromptEnhancerOptions(options.value("subtype").toString(), options.value("doSample").toBool())
+        : defaultModelOptions(category);
     if (defaults.isEmpty() || options.keys() != defaults.keys())
         return fail();
     const auto number = [&options](const QString &key, double low, double high, bool integer = false)
@@ -43,7 +73,25 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
         return value.isDouble() && std::isfinite(n) && n >= low && n <= high &&
                (!integer || std::floor(n) == n);
     };
-    if (category == "image-generation" || category == "edition")
+    if (category == "prompt-enhancer") {
+        const auto subtype = options.value("subtype").toString();
+        if (!options.value("doSample").isBool() || !number("maxOutputTokens", 1, 131072, true)
+            || !number("repetitionPenalty", 0.01, 10)) return fail();
+        if (subtype == "T5") {
+            if (!number("maxInputTokens", 1, 131072, true) || !number("numBeams", 1, 64, true)
+                || !number("noRepeatNgramSize", 0, 128, true)
+                || !options.value("instructionPrompt").isString()) return fail();
+        } else {
+            if (!number("contextLength", 256, 131072, true)
+                || options.value("maxOutputTokens").toInt() > options.value("contextLength").toInt()
+                || !options.value("systemPrompt").isString()
+                || (subtype == "VLM" && !options.value("visionInputEnabled").isBool())) return fail();
+        }
+        if (subtype != "T5" || options.value("doSample").toBool())
+            if (!number("temperature", 0, 2) || !number("topP", 0.01, 1)
+                || !number("topK", 0, 10000, true)) return fail();
+    }
+    else if (category == "image-generation" || category == "edition")
     {
         const int width = options.value("width").toInt();
         const int clip = options.value("clipSkip").toInt();

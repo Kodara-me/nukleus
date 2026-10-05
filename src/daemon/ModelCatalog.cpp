@@ -37,6 +37,7 @@ QStringList extensionsFor(ModelCategory category)
     case ModelCategory::PhotoMaker:
         return {QStringLiteral("safetensors")};
     case ModelCategory::ImageGeneration:
+    case ModelCategory::PromptEnhancer:
     case ModelCategory::Edition:
         return {QStringLiteral("safetensors"), QStringLiteral("ckpt"), QStringLiteral("gguf")};
     case ModelCategory::ClipVision:
@@ -113,7 +114,7 @@ ModelCatalog::~ModelCatalog() = default;
 
 QList<ModelCategory> ModelCatalog::categories()
 {
-    return {ModelCategory::ImageGeneration, ModelCategory::Edition, ModelCategory::Upscaler, ModelCategory::LlmChat, ModelCategory::IpAdapter, ModelCategory::ClipVision, ModelCategory::PhotoMaker};
+    return {ModelCategory::ImageGeneration, ModelCategory::Edition, ModelCategory::Upscaler, ModelCategory::LlmChat, ModelCategory::IpAdapter, ModelCategory::ClipVision, ModelCategory::PhotoMaker, ModelCategory::PromptEnhancer};
 }
 
 QString ModelCatalog::categoryName(ModelCategory category)
@@ -126,6 +127,7 @@ QString ModelCatalog::categoryName(ModelCategory category)
     case ModelCategory::IpAdapter: return QStringLiteral("ip_adapter");
     case ModelCategory::ClipVision: return QStringLiteral("clip_vision");
     case ModelCategory::PhotoMaker: return QStringLiteral("photomaker");
+    case ModelCategory::PromptEnhancer: return QStringLiteral("prompt-enhancer");
     }
     return {};
 }
@@ -139,6 +141,7 @@ QString ModelCatalog::companionRole(ModelCategory category)
     case ModelCategory::Edition: return QStringLiteral("vae");
     case ModelCategory::Upscaler:
     case ModelCategory::PhotoMaker:
+    case ModelCategory::PromptEnhancer:
     case ModelCategory::ClipVision: return {};
     }
     return {};
@@ -415,6 +418,7 @@ QString ModelCatalog::directoryPath(ModelCategory category) const
     case ModelCategory::IpAdapter: return QDir(root).filePath(QStringLiteral("ip-adapter"));
     case ModelCategory::ClipVision: return QDir(root).filePath(QStringLiteral("clip_vision"));
     case ModelCategory::PhotoMaker: return QDir(root).filePath(QStringLiteral("photomaker"));
+    case ModelCategory::PromptEnhancer: return QDir(root).filePath(QStringLiteral("prompt-enhancer"));
     }
     return {};
 }

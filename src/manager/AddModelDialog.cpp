@@ -87,7 +87,8 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
                                                            {tr("LLM"), "llm-chat"},
                                                            {tr("IP-Adapter"), "ip_adapter"},
                                                            {tr("CLIP Vision"), "clip_vision"},
-                                                           {tr("PhotoMaker"), "photomaker"}})
+                                                           {tr("PhotoMaker"), "photomaker"},
+                                                           {tr("Prompt Enhancer"), "prompt-enhancer"}})
         m_category->addItem(item.first, item.second);
     if (!category.isEmpty())
         m_category->setCurrentIndex(m_category->findData(category == "ip-adapter" ? "ip_adapter" : category));
@@ -203,7 +204,7 @@ void AddModelDialog::updateCategory()
 {
     const QString category = m_category->currentData().toString();
     m_companion->clear();
-    const bool supports = category != "upscaler" && category != "clip_vision" && category != "photomaker";
+    const bool supports = category != "upscaler" && category != "clip_vision" && category != "photomaker" && category != "prompt-enhancer";
     m_companion->setVisible(supports);
     m_companionLabel->setVisible(supports);
     m_companionLabel->setText(category == "llm-chat"     ? tr("Optional mmproj URL:")

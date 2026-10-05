@@ -29,7 +29,8 @@ const QList<QPair<QString, QString>> categories{{"edition", "Edition"},
                                                 {"image-generation", "Image generation"},
                                                 {"upscaler", "Upscaler"},
                                                 {"ip_adapter", "IP-Adapter"}, {"clip_vision", "CLIP Vision"},
-                                                {"photomaker", "PhotoMaker"}};
+                                                {"photomaker", "PhotoMaker"},
+                                                {"prompt-enhancer", "Prompt Enhancer"}};
 QString sizeText(qint64 bytes) { return QObject::tr("%1 MiB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1); }
 } // namespace
 ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *client)

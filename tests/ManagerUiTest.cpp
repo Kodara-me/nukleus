@@ -59,6 +59,43 @@ class ManagerUiTest final : public QObject
                                                      {"recommendedOptions", m_saved}}}}}}}});
     }
   private slots:
+    void promptEnhancerSubtypeControlsAndDefaults()
+    {
+        using namespace KiraService::Protocol;
+        ModelOptionsWidget widget;
+        widget.setOptions("prompt-enhancer");
+        QCOMPARE(widget.options(), defaultPromptEnhancerOptions("LLM"));
+        widget.findChild<QCheckBox*>("doSample")->setChecked(false);
+        QVERIFY(widget.findChild<QWidget*>("temperature")->isHidden());
+        QVERIFY(widget.isValid());
+        widget.findChild<QPlainTextEdit*>("systemPrompt")->setPlainText("Return only the improved prompt.");
+        QCOMPARE(widget.options().value("systemPrompt").toString(), QString("Return only the improved prompt."));
+        widget.findChild<QComboBox*>("subtype")->setCurrentIndex(0);
+        QTRY_COMPARE(widget.options(), defaultPromptEnhancerOptions("T5"));
+        QVERIFY(widget.isValid());
+        QVERIFY(!widget.findChild<QWidget*>("temperature"));
+        QVERIFY(!widget.findChild<QWidget*>("contextLength"));
+        widget.findChild<QSpinBox*>("maxInputTokens")->setValue(512);
+        widget.findChild<QCheckBox*>("doSample")->setChecked(true);
+        QTRY_VERIFY(widget.findChild<QWidget*>("temperature"));
+        QCOMPARE(widget.options().value("maxInputTokens").toInt(), 512);
+        QVERIFY(widget.isValid());
+        widget.findChild<QCheckBox*>("doSample")->setChecked(false);
+        QTRY_VERIFY(!widget.findChild<QWidget*>("temperature"));
+        QVERIFY(widget.isValid());
+        widget.findChild<QComboBox*>("subtype")->setCurrentIndex(2);
+        QTRY_COMPARE(widget.options(), defaultPromptEnhancerOptions("VLM"));
+        QVERIFY(widget.findChild<QCheckBox*>("visionInputEnabled")->isChecked());
+        QVERIFY(!widget.findChild<QWidget*>("instructionPrompt"));
+        widget.findChild<QComboBox*>("subtype")->setCurrentIndex(1);
+        QTRY_COMPARE(widget.options(), defaultPromptEnhancerOptions("LLM"));
+        QVERIFY(!widget.findChild<QWidget*>("visionInputEnabled"));
+        widget.findChild<QComboBox*>("subtype")->setCurrentIndex(0);
+        widget.setOptions("upscaler");
+        QCoreApplication::processEvents();
+        QCOMPARE(widget.options(), defaultModelOptions("upscaler"));
+    }
+
     void savesConnectionOnlyAfterAuthentication()
     {
         m_requiredToken = "test-key";
@@ -349,7 +386,7 @@ class ManagerUiTest final : public QObject
         QVERIFY(tree);
         QCOMPARE(tree->model()->rowCount(), 1);
         auto root = tree->model()->index(0, 0);
-        QCOMPARE(tree->model()->rowCount(root), 7);
+        QCOMPARE(tree->model()->rowCount(root), 8);
         auto branch = tree->model()->index(2, 0, root);
         auto model = tree->model()->index(0, 0, branch);
         tree->setCurrentIndex(model);

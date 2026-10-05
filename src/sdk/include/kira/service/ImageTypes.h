@@ -20,7 +20,8 @@ enum class ModelCategory
     Unknown,
     Edition,
     ClipVision,
-    PhotoMaker
+    PhotoMaker,
+    PromptEnhancer
 };
 
 struct ModelInfo

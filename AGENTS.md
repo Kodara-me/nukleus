@@ -25,6 +25,14 @@
 
 ## Manager UI and recommended options
 
+- Prompt Enhancer uses category `prompt-enhancer`, SDK/daemon PromptEnhancer enums
+  and models/prompt-enhancer storage. Accept primary GGUF/safetensors/ckpt, no
+  companions. Store subtype in recommendedOptions; Protocol owns T5/LLM/VLM
+  defaults and strict validation. LLM is initial; changing subtype resets defaults.
+  T5 doSample toggles temperature/topP/topK and preserves other draft fields.
+  Manager shares its add/edit options form. This slice provides catalogue and
+  configuration only, with no inference backend or enhancement capability.
+
 - Link only the manager/UI tests to KiraUi::Widgets 0.2. Default to the sibling
   checkout, allow KIRA_UI_SOURCE_DIR, and fall back to an installed package.
   Keep daemon and SDK independent of the visual framework.

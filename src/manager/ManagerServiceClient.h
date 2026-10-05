@@ -103,6 +103,7 @@ private:
     QList<ManagedModelInfo> m_editionModels;
     QList<ManagedModelInfo> m_upscaleModels;
     QList<ManagedModelInfo> m_llmChatModels;
+    QList<ManagedModelInfo> m_promptEnhancerModels;
     QList<ManagedModelInfo> m_ipAdapterModels;
     QList<ManagedModelInfo> m_clipVisionModels;
     QList<ManagedModelInfo> m_photoMakerModels;

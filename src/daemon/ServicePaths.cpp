@@ -55,6 +55,12 @@ QString ServicePaths::photoMakerModelsPath()
     return root.isEmpty() ? QString() : QDir(root).filePath(QStringLiteral("photomaker"));
 }
 
+QString ServicePaths::promptEnhancerModelsPath()
+{
+    const QString root = modelsPath();
+    return root.isEmpty() ? QString() : QDir(root).filePath(QStringLiteral("prompt-enhancer"));
+}
+
 bool ServicePaths::migrateLegacyModels(QString *errorMessage)
 {
     const QString legacy = legacyModelsPath();
@@ -83,7 +89,7 @@ bool ServicePaths::ensureModelDirectories(QString *errorMessage)
         if (errorMessage) *errorMessage = QObject::tr("Service data directory is unavailable");
         return false;
     }
-    const std::array<QString, 7> paths = {root, modelsPath(), upscaleModelsPath(), chatModelsPath(), ipAdapterModelsPath(), clipVisionModelsPath(), photoMakerModelsPath()};
+    const std::array<QString, 8> paths = {root, modelsPath(), upscaleModelsPath(), chatModelsPath(), ipAdapterModelsPath(), clipVisionModelsPath(), photoMakerModelsPath(), promptEnhancerModelsPath()};
     for (const QString &path : paths) {
         if (!QDir().mkpath(path)) {
             if (errorMessage) *errorMessage = QObject::tr("Could not create %1").arg(path);

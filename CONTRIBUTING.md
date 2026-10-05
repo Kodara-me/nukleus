@@ -1,5 +1,11 @@
 # Contributing to Kira Service
 
+Prompt Enhancer models use the `prompt-enhancer` category and managed
+`models/prompt-enhancer/` storage. The shared Manager form configures subtype
+T5/LLM/VLM recommendations; subtype changes reset defaults. Protocol validation,
+catalogue persistence and Manager UI tests cover this configuration-only slice.
+No llama.cpp/T5 runtime dependency is introduced yet.
+
 Kira Service is a C++20 Qt 6 project. Build dependencies are CMake, Ninja, a C++20 compiler, and Qt 6.2+ Network, WebSockets, and Widgets, SVG, and LinguistTools development packages, plus Kira UI Framework 0.2. `sd-cli` is required on a machine that performs image work.
 
 ```sh

@@ -17,7 +17,8 @@ enum class ModelCategory
     IpAdapter,
     Edition,
     ClipVision,
-    PhotoMaker
+    PhotoMaker,
+    PromptEnhancer
 };
 
 struct ModelInfo

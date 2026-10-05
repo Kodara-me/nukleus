@@ -12,6 +12,7 @@ public:
     static QString ipAdapterModelsPath();
     static QString clipVisionModelsPath();
     static QString photoMakerModelsPath();
+    static QString promptEnhancerModelsPath();
     static QString legacyModelsPath();
     static bool migrateLegacyModels(QString *errorMessage = nullptr);
     static bool ensureModelDirectories(QString *errorMessage = nullptr);

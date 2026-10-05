@@ -10,7 +10,7 @@ The version-3 authentication message is required for every client. Loopback peer
 
 The service replies with `authenticated` and `capabilities`. `models.list` returns
 `image-generation`, `edition`, `upscaler`, `llm-chat`, `ip_adapter`,
-`clip_vision` and `photomaker`. `ip-adapter` remains an accepted category alias;
+`clip_vision`, `photomaker` and `prompt-enhancer`. `ip-adapter` remains an accepted category alias;
 existing opaque `ip-adapter:` IDs and the storage directory are preserved.
 Each model contains `id`, `name`, `fileName` and `bytes`; a model with a
 companion also includes the category-relative `companionFileName` and
@@ -91,6 +91,27 @@ when provided, the object must contain exactly the category's complete fields:
 | ip_adapter (legacy ip-adapter alias) | `strength`: number 0–2, default 1.0 |
 | clip_vision | `image_size`: integer 1–4096, default 224; `normalize_input`: boolean, default true |
 | photomaker | `style_strength`: integer 0–100, default 20 |
+| prompt-enhancer | `subtype`: T5, LLM or VLM; subtype-specific fields below |
+
+Prompt Enhancer stores `subtype` within `recommendedOptions` and defaults to LLM
+when recommendations are initialized. Options are complete, validated objects;
+unknown, irrelevant, missing or incorrectly typed fields are rejected.
+
+| Subtype | Default options besides subtype |
+| --- | --- |
+| T5 | `maxInputTokens`: 256; `maxOutputTokens`: 80; `numBeams`: 2; `repetitionPenalty`: 2.0; `noRepeatNgramSize`: 3; `doSample`: false; `instructionPrompt`: "Enhance this prompt (no lora):" |
+| LLM | `contextLength`: 4096; `maxOutputTokens`: 256; `temperature`: 0.2; `topP`: 0.9; `topK`: 20; `repetitionPenalty`: 1.1; `doSample`: true; `systemPrompt`: empty string |
+| VLM | LLM fields plus `visionInputEnabled`: true |
+
+T5 with `doSample: true` additionally accepts temperature/topP/topK, initialized
+to 0.2/0.9/20; these fields are absent when sampling is disabled. LLM/VLM retain
+their sampling fields when doSample is false, but the Manager hides them.
+Token counts are integers 1–131072,
+contextLength is 256–131072, LLM/VLM output cannot exceed context, numBeams is
+1–64, noRepeatNgramSize is 0–128, topK is 0–10000, temperature is 0–2, topP is
+0.01–1, and repetitionPenalty is 0.01–10. Prompt fields are strings, sampling and
+vision flags are booleans. The Manager resets defaults on subtype changes.
+No enhancement operation or execution capability is added in this slice.
 
 IP-Adapter options contain only `strength`. Clients such as Canvas explicitly
 select the adapter and CLIP Vision models. Recommendations do not implicitly

@@ -129,7 +129,7 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
                 QString size;
             };
             QList<ModelRow> rows;
-            for (const QString &category : {QStringLiteral("image-generation"), QStringLiteral("edition"), QStringLiteral("upscaler"), QStringLiteral("llm-chat"), QStringLiteral("ip_adapter"), QStringLiteral("clip_vision"), QStringLiteral("photomaker")}) {
+            for (const QString &category : {QStringLiteral("image-generation"), QStringLiteral("edition"), QStringLiteral("upscaler"), QStringLiteral("llm-chat"), QStringLiteral("ip_adapter"), QStringLiteral("clip_vision"), QStringLiteral("photomaker"), QStringLiteral("prompt-enhancer")}) {
                 const QList<ManagedModelInfo> models = client.models(category);
                 if (models.isEmpty()) {
                     rows.append({category, QStringLiteral("(none)"), QStringLiteral("-"), QStringLiteral("-"), QStringLiteral("-")});

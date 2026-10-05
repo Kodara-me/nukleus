@@ -6,6 +6,8 @@
 #include <QLabel>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <KiraUi/PlainTextEdit.h>
+#include <QTimer>
 #include <kira/service/ModelOptions.h>
 
 ModelOptionsWidget::ModelOptionsWidget(QWidget *parent) : QWidget(parent), m_form(new QFormLayout(this))
@@ -93,6 +95,69 @@ void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &
         integer("contextLength", tr("Context length:"), 256, 131072);
         integer("maxTokens", tr("Maximum tokens:"), 1, 131072);
     }
+    else if (category == "prompt-enhancer")
+    {
+        choices("subtype", tr("Subtype:"), {"T5", "LLM", "VLM"});
+        const auto subtype = values.value("subtype").toString();
+        if (subtype == "T5") {
+            integer("maxInputTokens", tr("Maximum input tokens:"), 1, 131072);
+            integer("numBeams", tr("Beams:"), 1, 64);
+            integer("noRepeatNgramSize", tr("No-repeat n-gram size:"), 0, 128);
+        } else {
+            integer("contextLength", tr("Context length:"), 256, 131072);
+        }
+        integer("maxOutputTokens", tr("Maximum output tokens:"), 1, 131072);
+        decimal("repetitionPenalty", tr("Repetition penalty:"), 0.01, 10, 2);
+        boolean("doSample", tr("Sampling:"));
+        if (subtype != "T5" || values.value("doSample").toBool()) {
+            decimal("temperature", tr("Temperature:"), 0, 2, 2);
+            decimal("topP", tr("Top-p:"), 0.01, 1, 2);
+            integer("topK", tr("Top-k:"), 0, 10000);
+        }
+        if (subtype == "VLM") boolean("visionInputEnabled", tr("Vision input enabled:"));
+        const QString key = subtype == "T5" ? "instructionPrompt" : "systemPrompt";
+        auto* prompt = new KiraUi::PlainTextEdit(this);
+        prompt->setPlainText(values.value(key).toString());
+        prompt->setFixedHeight(prompt->heightForLines(3));
+        add(key, subtype == "T5" ? tr("Instruction prompt:") : tr("System prompt:"), prompt);
+        connect(prompt, &QPlainTextEdit::textChanged, this, &ModelOptionsWidget::optionsChanged);
+        // Rebuild after the emitting control's signal completes: removeRow deletes controls.
+        auto* subtypeField = qobject_cast<QComboBox*>(m_fields.value("subtype"));
+        connect(subtypeField, &QComboBox::currentIndexChanged,
+            this, [this, subtypeField] {
+                const auto subtype = options().value("subtype").toString();
+                const bool explicitContent = this->explicitContent();
+                QTimer::singleShot(0, subtypeField, [this, subtype, explicitContent] {
+                    setOptions("prompt-enhancer", KiraService::Protocol::defaultPromptEnhancerOptions(subtype), explicitContent);
+                    emit optionsChanged();
+                });
+            });
+        if (subtype != "T5") {
+            const auto samplingVisibility = [this](bool enabled) {
+                for (const auto& key : {"temperature", "topP", "topK"}) {
+                    auto* field = m_fields.value(key);
+                    m_form->labelForField(field)->setVisible(enabled);
+                    field->setVisible(enabled);
+                }
+            };
+            samplingVisibility(values.value("doSample").toBool());
+            connect(qobject_cast<QCheckBox*>(m_fields.value("doSample")), &QCheckBox::toggled,
+                this, samplingVisibility);
+        } else {
+            auto* samplingField = qobject_cast<QCheckBox*>(m_fields.value("doSample"));
+            connect(samplingField, &QCheckBox::toggled,
+                this, [this, samplingField](bool sampling) {
+                    auto values = KiraService::Protocol::defaultPromptEnhancerOptions("T5", sampling);
+                    const auto current = options();
+                    for (const auto& key : current.keys()) if (values.contains(key)) values.insert(key, current.value(key));
+                    const bool explicitContent = this->explicitContent();
+                    QTimer::singleShot(0, samplingField, [this, values, explicitContent] {
+                        setOptions("prompt-enhancer", values, explicitContent);
+                        emit optionsChanged();
+                    });
+                });
+        }
+    }
     else if (category == "upscaler")
     {
         auto *tiles = new QComboBox(this);
@@ -138,6 +203,8 @@ QJsonObject ModelOptionsWidget::options() const
             else
                 values.insert(it.key(), QJsonValue::fromVariant(combo->currentData()));
         }
+        else if (auto* prompt = qobject_cast<QPlainTextEdit*>(it.value()))
+            values.insert(it.key(), prompt->toPlainText());
     }
     return values;
 }
