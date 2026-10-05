@@ -150,7 +150,7 @@ void ServiceClient::requestModels()
 }
 
 QString ServiceClient::installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl, const QJsonObject &recommendedOptions, const QJsonObject &companionUrls,
-    const QString &modelType, const QString &existingModelId, std::optional<bool> explicitContent)
+    const QString &modelType, const QString &existingModelId, std::optional<bool> explicitContent, std::optional<QString> displayName)
 {
     const QString categoryValue = categoryName(category);
     if (!m_authenticated || categoryValue.isEmpty() || (existingModelId.isEmpty() && (!url.isValid() || url.isEmpty()))) return {};
@@ -171,6 +171,7 @@ QString ServiceClient::installModel(ModelCategory category, const QUrl &url, con
     if (modelType != "checkpoint" || !existingModelId.isEmpty()) message.insert("modelType", modelType);
     if (!existingModelId.isEmpty()) message.insert("id", existingModelId);
     if (explicitContent) message.insert("explicitContent", *explicitContent);
+    if (displayName) message.insert("displayName", displayName->trimmed());
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     emit installsChanged();
     return installId;
@@ -184,10 +185,11 @@ bool ServiceClient::configureModelStyles(const QString &id, const QList<PromptSt
     return true;
 }
 
-bool ServiceClient::configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent)
+bool ServiceClient::configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent, std::optional<QString> displayName)
 {
     if (!m_authenticated || id.isEmpty()) return false;
     QJsonObject message{{"type", "models.configure"}, {"id", id}, {"recommendedOptions", options}};
+    if (displayName) message.insert("displayName", displayName->trimmed());
     if (explicitContent) message.insert("explicitContent", *explicitContent);
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     return true;
@@ -274,6 +276,26 @@ QString ServiceClient::submitUpscale(const ImageUpscaleRequest &request)
                   request.sourceImageData);
 }
 
+bool ServiceClient::canEnhancePrompt(const QString& modelId) const
+{
+    return m_authenticated && m_capabilities.promptEnhancement
+        && containsModel(modelId, ModelCategory::PromptEnhancer);
+}
+
+QString ServiceClient::enhancePrompt(const PromptEnhancementRequest& request)
+{
+    if (!canEnhancePrompt(request.modelId)) return {};
+    const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    PendingJob job;
+    job.promptEnhancement = true;
+    m_pendingJobs.insert(jobId, job);
+    QJsonObject options{{"modelId", request.modelId}, {"prompt", request.prompt}};
+    if (!request.parameters.isEmpty()) options.insert("parameters", request.parameters);
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"type", "submit"}, {"jobId", jobId}, {"operation", "prompt.enhance"}, {"options", options}}).toJson(QJsonDocument::Compact)));
+    return jobId;
+}
+
 QString ServiceClient::exportPhotoMakerIdentity(const QByteArray &sourceImageData)
 {
     if (!m_authenticated || !m_capabilities.photoMakerIdentityExport || sourceImageData.isEmpty()) return {};
@@ -329,7 +351,7 @@ void ServiceClient::handleTextMessage(const QString &message)
     if (type == QStringLiteral("capabilities")) {
         const QJsonArray operations = object.value(QStringLiteral("operations")).toArray();
         updateCapabilities({operations.contains(QStringLiteral("image.generate")), operations.contains(QStringLiteral("image.upscale")), operations.contains(QStringLiteral("image.edit")), object.value("ipAdapter").toBool(false),
-            operations.contains("photomaker.export"), object.value("photoMaker").toBool(false)});
+            operations.contains("photomaker.export"), object.value("photoMaker").toBool(false), operations.contains("prompt.enhance")});
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
         return;
@@ -349,7 +371,7 @@ void ServiceClient::handleTextMessage(const QString &message)
                                  model.value(QStringLiteral("companionFileName")).toString(),
                                  model.value(QStringLiteral("companionRole")).toString(), model.value("recommendedOptions").toObject(),
                     model.value("companionFiles").toObject(), model.value("modelType").toString("checkpoint"), model.value("explicitContent").toBool(false),
-                    Protocol::promptStylesFromJson(model.value("styles")).value_or(QList<PromptStyle>{})});
+                    Protocol::promptStylesFromJson(model.value("styles")).value_or(QList<PromptStyle>{}), model.value("displayName").toString().trimmed()});
             }
         }
         m_modelListAvailable = true;
@@ -448,6 +470,17 @@ void ServiceClient::handleTextMessage(const QString &message)
     } else if (type == QStringLiteral("running")) {
         emit jobStateChanged(jobId, JobState::Running, -1);
     } else if (type == QStringLiteral("result")) {
+        if (m_pendingJobs.value(jobId).promptEnhancement) {
+            if (object.value("operation") != "prompt.enhance" || !object.value("prompt").isString()
+                || object.value("prompt").toString().trimmed().isEmpty()) {
+                failJob(jobId, "invalid-result", tr("The service returned an invalid enhanced prompt"));
+                return;
+            }
+            m_pendingJobs.remove(jobId);
+            emit jobStateChanged(jobId, JobState::Completed, -1);
+            emit promptEnhancementFinished({jobId, true, object.value("prompt").toString(), {}, {}});
+            return;
+        }
         m_pendingJobs[jobId].mimeType = object.value(QStringLiteral("mimeType")).toString();
         m_resultJobs.enqueue(jobId);
     }
@@ -468,7 +501,8 @@ void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
     if (m_capabilities.imageGeneration == capabilities.imageGeneration && m_capabilities.imageUpscale == capabilities.imageUpscale && m_capabilities.imageEdit == capabilities.imageEdit
         && m_capabilities.ipAdapter == capabilities.ipAdapter
         && m_capabilities.photoMaker == capabilities.photoMaker
-        && m_capabilities.photoMakerIdentityExport == capabilities.photoMakerIdentityExport) return;
+        && m_capabilities.photoMakerIdentityExport == capabilities.photoMakerIdentityExport
+        && m_capabilities.promptEnhancement == capabilities.promptEnhancement) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
 }
@@ -505,7 +539,8 @@ void ServiceClient::failJob(const QString &jobId, const QString &errorCode, cons
     const PendingJob job = m_pendingJobs.take(jobId);
     m_resultJobs.removeAll(jobId);
     emit jobStateChanged(jobId, JobState::Failed, -1);
-    if (job.identityExport) emit photoMakerIdentityExportFinished({jobId, false, {}, errorCode, message});
+    if (job.promptEnhancement) emit promptEnhancementFinished({jobId, false, {}, errorCode, message});
+    else if (job.identityExport) emit photoMakerIdentityExportFinished({jobId, false, {}, errorCode, message});
     else emit imageJobFinished({jobId, job.operation, false, {}, job.mimeType, errorCode, message});
 }
 

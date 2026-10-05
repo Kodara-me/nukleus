@@ -117,6 +117,30 @@ KiraServiceDaemon::KiraServiceDaemon(KiraServiceConfiguration configuration, QOb
                    ? std::make_unique<ModelCatalog>()
                    : std::make_unique<ModelCatalog>(m_configuration.modelRootPath, false))
 {
+    m_promptTimeout.setSingleShot(true);
+    m_promptTimeout.setInterval(m_configuration.promptEnhancementTimeoutMs);
+    connect(&m_promptTimeout, &QTimer::timeout, this, [this] {
+        m_promptTimedOut = true;
+        m_promptProcess.kill();
+    });
+    connect(&m_promptProcess, &QProcess::readyReadStandardError, this, [this] {
+        m_promptError = (m_promptError + m_promptProcess.readAllStandardError()).right(4096);
+    });
+    connect(&m_promptProcess, &QProcess::readyReadStandardOutput, this, [this] {
+        const auto bytes = m_promptProcess.readAllStandardOutput();
+        if (m_promptOutput.size() + bytes.size() > 1024 * 1024) {
+            m_promptOutputExceeded = true;
+            m_promptProcess.kill();
+        } else m_promptOutput += bytes;
+    });
+    connect(&m_promptProcess, &QProcess::started, this, [this] { m_promptProcess.closeWriteChannel(); });
+    connect(&m_promptProcess, &QProcess::finished, this, &KiraServiceDaemon::handlePromptEnhancementFinished);
+    connect(&m_promptProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) {
+            m_promptError = m_promptProcess.errorString().toUtf8();
+            handlePromptEnhancementFinished(-1, QProcess::CrashExit);
+        }
+    });
     m_photoMakerTimeout.setSingleShot(true);
     m_photoMakerTimeout.setInterval(10 * 60 * 1000);
     connect(&m_photoMakerTimeout, &QTimer::timeout, this, [this] {
@@ -150,6 +174,7 @@ KiraServiceDaemon::KiraServiceDaemon(KiraServiceConfiguration configuration, QOb
         QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
                                 {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
         modelObject.insert("explicitContent", model.explicitContent);
+        modelObject.insert("displayName", model.displayName);
         if (!model.recommendedOptions.isEmpty()) modelObject.insert("recommendedOptions", model.recommendedOptions);
         modelObject.insert("companionFiles", model.companionFiles);
         modelObject.insert("modelType", model.modelType);
@@ -176,6 +201,9 @@ KiraServiceDaemon::~KiraServiceDaemon()
     // Closing the server while the client bookkeeping is still alive prevents
     // disconnect callbacks from accessing members already being destroyed.
     m_servers.clear();
+    m_promptProcess.disconnect(this);
+    m_promptProcess.kill();
+    m_promptProcess.waitForFinished(3000);
     m_photoMakerProcess.disconnect(this);
     m_photoMakerProcess.kill();
     m_photoMakerProcess.waitForFinished(3000);
@@ -303,13 +331,15 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     const bool edit = operationName == QStringLiteral("image.edit");
     const bool upscale = operationName == QStringLiteral("image.upscale");
     const bool identityExport = operationName == QStringLiteral("photomaker.export");
+    const bool promptEnhance = operationName == QStringLiteral("prompt.enhance");
     QJsonObject options = message.value(QStringLiteral("options")).toObject();
     const QString jobId = message.value(QStringLiteral("jobId")).toString();
     bool duplicateId = jobForId(jobId) != nullptr;
     for (const auto &pending : m_pendingUploads) {
         duplicateId = duplicateId || pending->id == jobId;
     }
-    if ((!generate && !upscale && !edit && !identityExport) || jobId.isEmpty() || duplicateId) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid job request"), jobId); return; }
+    if ((!generate && !upscale && !edit && !identityExport && !promptEnhance) || jobId.isEmpty() || duplicateId) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid job request"), jobId); return; }
+    if (promptEnhance) { submitPromptEnhancement(socket, message); return; }
     if (identityExport) {
         if (!isPhotoMakerExportReady()) {
             sendError(socket, "photomaker-unavailable", tr("PhotoMaker identity extraction is not configured"), jobId);
@@ -475,6 +505,7 @@ void KiraServiceDaemon::listModels(QWebSocket *socket) const
             QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
                                     {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
             modelObject.insert("explicitContent", model.explicitContent);
+            modelObject.insert("displayName", model.displayName);
             if (category == ModelCategory::ImageGeneration)
                 modelObject.insert("styles", KiraService::Protocol::promptStylesToJson(model.styles));
             if (!model.recommendedOptions.isEmpty()) modelObject.insert("recommendedOptions", model.recommendedOptions);
@@ -509,6 +540,12 @@ void KiraServiceDaemon::installModel(QWebSocket *socket, const QJsonObject &mess
     if (message.contains(QStringLiteral("companionUrl"))) companionUrl = QUrl(message.value(QStringLiteral("companionUrl")).toString());
     ModelInstallRequest request;
     request.installId = installId;
+    if (message.contains("displayName")) {
+        if (!message.value("displayName").isString()) {
+            send(socket, {{"type", "error"}, {"code", "invalid-model-install"}, {"installId", installId}, {"message", tr("Display name must be a string")}}); return;
+        }
+        request.displayName = message.value("displayName").toString();
+    }
     request.category = *category;
     request.allowLocalFiles = socket->peerAddress().isLoopback();
     request.url = QUrl(message.value("url").toString());
@@ -562,19 +599,25 @@ void KiraServiceDaemon::configureModel(QWebSocket *socket, const QJsonObject &me
 {
     const QString id = message.value("id").toString();
     QString error;
+    if (message.contains("displayName") && !message.value("displayName").isString()) {
+        send(socket, {{"type", "error"}, {"code", "invalid-model-configure"}, {"id", id}, {"message", tr("Display name must be a string")}}); return;
+    }
+    const std::optional<QString> displayName = message.contains("displayName")
+        ? std::optional<QString>(message.value("displayName").toString()) : std::nullopt;
     if (message.contains("explicitContent") && !message.value("explicitContent").isBool()) {
         send(socket, {{"type", "error"}, {"code", "invalid-model-configure"}, {"id", id},
             {"message", tr("Explicit content must be a boolean")}}); return;
     }
     const std::optional<bool> explicitContent = message.contains("explicitContent")
         ? std::optional<bool>(message.value("explicitContent").toBool()) : std::nullopt;
-    if (!message.value("recommendedOptions").isObject() || !m_models->configure(id, message.value("recommendedOptions").toObject(), &error, explicitContent)) {
+    if (!message.value("recommendedOptions").isObject() || !m_models->configure(id, message.value("recommendedOptions").toObject(), &error, explicitContent, displayName)) {
         send(socket, {{"type", "error"}, {"code", "invalid-model-configure"}, {"id", id}, {"message", error.isEmpty() ? tr("Recommended options must be an object") : error}});
         return;
     }
     const auto model = *m_models->modelById(id);
     QJsonObject value{{"id", model.id}, {"name", model.name}, {"fileName", model.fileName}, {"bytes", model.fileSize}, {"recommendedOptions", model.recommendedOptions}};
     value.insert("explicitContent", model.explicitContent);
+    value.insert("displayName", model.displayName);
     value.insert("companionFiles", model.companionFiles);
     value.insert("modelType", model.modelType);
     if (!model.companionFileName.isEmpty()) {
@@ -720,7 +763,9 @@ void KiraServiceDaemon::startNextJob()
     m_activeJob = m_queue.dequeue();
     if (m_activeJob->client.isNull()) { m_activeJob.reset(); startNextJob(); return; }
     send(m_activeJob->client, {{QStringLiteral("type"), QStringLiteral("running")}, {QStringLiteral("jobId"), m_activeJob->id}});
-    if (m_activeJob->operation == Operation::PhotoMakerExport) {
+    if (m_activeJob->operation == Operation::PromptEnhance) {
+        startPromptEnhancement();
+    } else if (m_activeJob->operation == Operation::PhotoMakerExport) {
         m_activeJob->outputPath = m_activeJob->directory->filePath("id_embeds.bin");
         QFile wrapper(":/photomaker/photomaker-export.py");
         if (!wrapper.open(QIODevice::ReadOnly)) {
@@ -807,7 +852,8 @@ void KiraServiceDaemon::cancelJobsFor(QWebSocket *socket)
     while (!m_queue.isEmpty()) { const auto job = m_queue.dequeue(); if (job->client != socket) kept.enqueue(job); }
     m_queue = std::move(kept);
     if (m_activeJob && m_activeJob->client == socket) {
-        if (m_activeJob->operation == Operation::PhotoMakerExport) m_photoMakerProcess.kill();
+        if (m_activeJob->operation == Operation::PromptEnhance) m_promptProcess.kill();
+        else if (m_activeJob->operation == Operation::PhotoMakerExport) m_photoMakerProcess.kill();
         else if (m_sdRunner) m_sdRunner->cancel();
     }
     broadcastQueuePositions();
@@ -820,7 +866,7 @@ void KiraServiceDaemon::broadcastQueuePositions()
 
 void KiraServiceDaemon::sendCapabilities(QWebSocket *socket) const
 {
-    const QString state = isImageReady() || isPhotoMakerExportReady() ? QStringLiteral("ready") : QStringLiteral("unavailable");
+    const QString state = isImageReady() || isPhotoMakerExportReady() || isPromptEnhancementReady() ? QStringLiteral("ready") : QStringLiteral("unavailable");
     QJsonArray operations;
     if (isImageReady()) {
         operations.append(QStringLiteral("image.generate"));
@@ -828,7 +874,126 @@ void KiraServiceDaemon::sendCapabilities(QWebSocket *socket) const
         operations.append(QStringLiteral("image.edit"));
     }
     if (isPhotoMakerExportReady()) operations.append("photomaker.export");
+    if (isPromptEnhancementReady()) operations.append("prompt.enhance");
     send(socket, {{QStringLiteral("type"), QStringLiteral("capabilities")}, {QStringLiteral("state"), state}, {QStringLiteral("operations"), operations}, {"ipAdapter", isImageReady()}, {"photoMaker", isImageReady()}});
+}
+
+bool KiraServiceDaemon::isPromptEnhancementReady() const
+{
+    return !m_configuration.llamaCompletion.isEmpty()
+        && !QStandardPaths::findExecutable(m_configuration.llamaCompletion).isEmpty();
+}
+
+void KiraServiceDaemon::submitPromptEnhancement(QWebSocket* socket, const QJsonObject& message)
+{
+    const auto id = message.value("jobId").toString();
+    const auto request = message.value("options").toObject();
+    if (!message.value("options").isObject() || !request.value("modelId").isString()
+        || !request.value("prompt").isString()
+        || request.value("prompt").toString().toUtf8().size() > 65536
+        || (request.contains("parameters") && !request.value("parameters").isObject())) {
+        sendError(socket, "invalid-request", tr("Prompt enhancement requires a model and a prompt of at most 64 KiB"), id);
+        return;
+    }
+    for (const auto& key : request.keys()) if (key != "modelId" && key != "prompt" && key != "parameters") {
+        sendError(socket, "invalid-request", tr("Unsupported prompt enhancement field"), id); return;
+    }
+    const auto model = m_models->model(ModelCategory::PromptEnhancer, request.value("modelId").toString());
+    if (!model) { sendError(socket, "model-unavailable", tr("The requested Prompt Enhancer model is unavailable"), id); return; }
+    auto parameters = model->recommendedOptions.isEmpty()
+        ? KiraService::Protocol::defaultPromptEnhancerOptions("LLM") : model->recommendedOptions;
+    if (parameters.value("subtype") != "LLM") {
+        sendError(socket, "prompt-enhancer-subtype-unsupported", tr("Only LLM prompt enhancement is supported; T5 and VLM are not implemented"), id); return;
+    }
+    const auto overrides = request.value("parameters").toObject();
+    for (const auto& key : overrides.keys()) {
+        if (key == "subtype" || !parameters.contains(key)) {
+            sendError(socket, "invalid-request", tr("Unsupported Prompt Enhancer parameter"), id); return;
+        }
+        parameters.insert(key, overrides.value(key));
+    }
+    if (!KiraService::Protocol::validateModelOptions("prompt-enhancer", parameters)
+        || parameters.value("systemPrompt").toString().toUtf8().size() > 65536) {
+        sendError(socket, "invalid-request", tr("Invalid Prompt Enhancer parameters"), id); return;
+    }
+    if (QFileInfo(model->filePath).suffix().toLower() != "gguf") {
+        sendError(socket, "prompt-enhancer-format-unsupported", tr("llama-completion requires a compatible GGUF model"), id); return;
+    }
+    if (!isPromptEnhancementReady()) {
+        sendError(socket, "backend-not-ready", tr("llama-completion is unavailable"), id); return;
+    }
+    if (m_pendingUploads.contains(socket) || m_queue.size() >= MaximumQueuedJobs) {
+        sendError(socket, "queue-full", tr("An upload is pending or the service queue is full"), id); return;
+    }
+    auto job = std::make_shared<Job>();
+    job->id = id;
+    job->operation = Operation::PromptEnhance;
+    job->client = socket;
+    job->modelPath = model->filePath;
+    job->options = parameters;
+    job->options.insert("prompt", request.value("prompt"));
+    enqueue(job);
+}
+
+void KiraServiceDaemon::startPromptEnhancement()
+{
+    const auto job = m_activeJob;
+    const auto parameters = job->options;
+    const QString promptPath = job->directory->filePath("prompt.txt");
+    const QString systemPath = job->directory->filePath("system.txt");
+    const auto write = [](const QString& path, const QString& text) {
+        QFile file(path);
+        const auto bytes = text.toUtf8();
+        return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
+    };
+    QString system = parameters.value("systemPrompt").toString();
+    if (system.trimmed().isEmpty())
+        system = QStringLiteral("Enhance the user's image-generation prompt. Return only the enhanced prompt, without explanations, headings, quotation marks or reasoning.");
+    const auto input = parameters.value("prompt").toString();
+    if (!job->directory->isValid() || !write(promptPath, input.trimmed().isEmpty()
+        ? QStringLiteral("Generate a new description according to the system instructions.") : input) || !write(systemPath, system)) {
+        sendError(job->client, "storage-error", tr("Could not prepare prompt enhancement"), job->id);
+        m_activeJob.reset(); startNextJob(); return;
+    }
+    QStringList arguments{"--model", job->modelPath, "--file", promptPath, "--system-prompt-file", systemPath,
+        "--single-turn", "--conversation", "--jinja", "--no-display-prompt", "--simple-io", "--color", "off",
+        "--reasoning", "off", "--no-context-shift", "--ctx-size", QString::number(parameters.value("contextLength").toInt()),
+        "--n-predict", QString::number(parameters.value("maxOutputTokens").toInt()),
+        "--repeat-penalty", QString::number(parameters.value("repetitionPenalty").toDouble(), 'g', 17),
+        "--repeat-last-n", QString::number(parameters.value("contextLength").toInt()),
+        "--samplers", "penalties;top_k;top_p;temperature", "--temp",
+        parameters.value("doSample").toBool() ? QString::number(parameters.value("temperature").toDouble(), 'g', 17) : QStringLiteral("0"),
+        "--top-p", QString::number(parameters.value("topP").toDouble(), 'g', 17),
+        "--top-k", QString::number(parameters.value("topK").toInt())};
+    m_promptOutput.clear(); m_promptError.clear();
+    m_promptTimedOut = false; m_promptOutputExceeded = false;
+    m_promptTimeout.start();
+    m_promptProcess.start(m_configuration.llamaCompletion, arguments);
+}
+
+void KiraServiceDaemon::handlePromptEnhancementFinished(int exitCode, QProcess::ExitStatus status)
+{
+    if (!m_activeJob || m_activeJob->operation != Operation::PromptEnhance) return;
+    m_promptTimeout.stop();
+    const auto job = m_activeJob;
+    m_promptError = (m_promptError + m_promptProcess.readAllStandardError()).right(4096);
+    const auto remaining = m_promptProcess.readAllStandardOutput();
+    if (m_promptOutput.size() + remaining.size() > 1024 * 1024) m_promptOutputExceeded = true;
+    else m_promptOutput += remaining;
+    QString prompt = QString::fromUtf8(m_promptOutput).trimmed();
+    const QString endMarker = QStringLiteral("[end of text]");
+    if (prompt.endsWith(endMarker)) prompt.chop(endMarker.size());
+    prompt = prompt.trimmed();
+    if (status != QProcess::NormalExit || exitCode != 0 || m_promptTimedOut || m_promptOutputExceeded || prompt.isEmpty()) {
+        const QString code = m_promptTimedOut ? "prompt-enhancement-timeout" : m_promptOutputExceeded
+            ? "prompt-enhancement-output-too-large" : prompt.isEmpty() && exitCode == 0
+                ? "prompt-enhancement-empty-result" : "prompt-enhancement-failed";
+        QString detail = tr("Prompt enhancement failed (exit code %1)").arg(exitCode);
+        if (!m_promptError.trimmed().isEmpty()) detail += QLatin1Char('\n') + QString::fromUtf8(m_promptError).trimmed();
+        sendError(job->client, code, detail, job->id);
+    } else send(job->client, {{"type", "result"}, {"jobId", job->id}, {"operation", "prompt.enhance"}, {"prompt", prompt}});
+    m_promptOutput.clear(); m_promptError.clear();
+    m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
 }
 
 bool KiraServiceDaemon::isPhotoMakerExportReady() const

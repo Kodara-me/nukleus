@@ -33,6 +33,7 @@ class AddModelDialog final : public KiraUi::Dialog
     ManagerServiceClient *m_client;
     QComboBox *m_category;
     QLineEdit *m_url;
+    QLineEdit *m_displayName;
     QLineEdit *m_companion;
     QLineEdit *m_textEncoder;
     QLineEdit *m_mmproj;

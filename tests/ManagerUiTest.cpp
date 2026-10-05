@@ -271,12 +271,14 @@ class ManagerUiTest final : public QObject
         dialog.findChild<QPushButton*>("modelUrlBrowse")->click();
         QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, disabled);
         QCOMPARE(QUrl(dialog.findChild<QLineEdit*>("modelUrl")->text()).toLocalFile(), path);
+        dialog.findChild<QLineEdit*>("modelDisplayName")->setText("  My model  ");
         auto* start = dialog.findChild<QPushButton*>("startDownload");
         QVERIFY(start->isEnabled());
         m_messages.clear();
         start->click();
         QTRY_VERIFY(!m_messages.isEmpty());
         const QUrl transferUrl(m_messages.last().value("url").toString());
+        QCOMPARE(m_messages.last().value("displayName").toString(), QString("My model"));
         QCOMPARE(transferUrl.host(), QString("127.0.0.1"));
         QCOMPARE(transferUrl.fileName(), QString("downloaded.gguf"));
         QNetworkAccessManager network;
@@ -395,6 +397,9 @@ class ManagerUiTest final : public QObject
         tree->setCurrentIndex(tree->model()->index(0, 0, model));
         QVERIFY(form->isVisible());
         auto *steps = form->findChild<QSpinBox *>("steps");
+        auto* displayName = window.findChild<QLineEdit*>("modelDisplayName");
+        QVERIFY(displayName);
+        displayName->setText("Portrait model");
         steps->setValue(42);
         auto* explicitContent = form->findChild<QCheckBox*>("explicitContent");
         QVERIFY(explicitContent);
@@ -406,6 +411,7 @@ class ManagerUiTest final : public QObject
         QVERIFY(!save->isEnabled());
         QTRY_VERIFY(!m_messages.isEmpty() && m_messages.last().value("type") == "models.configure");
         QCOMPARE(m_messages.last().value("recommendedOptions").toObject().value("steps").toInt(), 42);
+        QCOMPARE(m_messages.last().value("displayName").toString(), QString("Portrait model"));
         QVERIFY(m_messages.last().value("explicitContent").toBool());
         send({{"type", "error"}, {"id", "image-generation:test.gguf"}, {"message", "Write failed"}});
         QTRY_VERIFY(save->isEnabled());

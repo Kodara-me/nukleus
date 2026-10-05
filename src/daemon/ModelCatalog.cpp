@@ -189,10 +189,11 @@ QList<ModelInfo> ModelCatalog::models(ModelCategory category) const
                 ? KiraService::Protocol::promptStylesFromJson(entry.toObject().value("styles")).value_or(QList<KiraService::PromptStyle>{})
                 : KiraService::Protocol::starterPromptStyles();
         }
+        const auto displayName = entry.toObject().value("displayName").toString().trimmed();
         models.append({idCategory + QLatin1Char(':') + fileName,
-                       fileInfo.completeBaseName(), fileName, fileInfo.size(), fileInfo.absoluteFilePath(),
+                       displayName.isEmpty() ? fileName : displayName, fileName, fileInfo.size(), fileInfo.absoluteFilePath(),
                        companionFileName, companionFileName.isEmpty() ? QString() : companionRole(category),
-                       entry.toObject().value("recommendedOptions").toObject(), files, type, entry.toObject().value("explicitContent").toBool(false), styles});
+                       entry.toObject().value("recommendedOptions").toObject(), files, type, entry.toObject().value("explicitContent").toBool(false), styles, displayName});
     }
     std::sort(models.begin(), models.end(), [](const ModelInfo &left, const ModelInfo &right) {
         return QString::compare(left.fileName, right.fileName, Qt::CaseInsensitive) < 0;
@@ -251,6 +252,7 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
     const auto fail = [&](const QString &message) { if (errorMessage) *errorMessage = message; return false; };
     if (isInstalling()) return fail(tr("Another model installation is in progress"));
     if (request.installId.isEmpty()) return fail(tr("An installation ID is required"));
+    if (request.displayName && request.displayName->size() > 256) return fail(tr("Display name must contain at most 256 characters"));
     if (request.modelType != "checkpoint" && request.modelType != "diffusion"
         && !(request.modelType.isEmpty() && !request.existingModelId.isEmpty())) return fail(tr("Invalid model type"));
     const bool image = request.category == ModelCategory::ImageGeneration || request.category == ModelCategory::Edition;
@@ -286,7 +288,11 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
         job->fileName = fileNameForUrl(url);
         if (!acceptsFileName(request.category, job->fileName)) return fail(tr("The URL filename is not supported for this model category"));
         job->finalPath = QDir(directoryPath(request.category)).filePath(job->fileName);
-        if (QFileInfo::exists(job->finalPath)) return fail(tr("A model with this filename is already installed"));
+        const QFileInfo original(job->fileName);
+        for (int suffix = 2; QFileInfo::exists(job->finalPath) || QFileInfo::exists(job->finalPath + ".part") || metadata->contains(job->fileName); ++suffix) {
+            job->fileName = QStringLiteral("%1-%2.%3").arg(original.completeBaseName()).arg(suffix).arg(original.suffix());
+            job->finalPath = QDir(directoryPath(request.category)).filePath(job->fileName);
+        }
         job->files.append({"primary", url, job->fileName, job->finalPath, job->finalPath + ".part"});
     }
     QJsonObject urls = request.companionUrls;
@@ -334,18 +340,20 @@ void ModelCatalog::cancel(const QString &installId)
     emit installCanceled(installId);
 }
 
-bool ModelCatalog::configure(const QString &id, const QJsonObject &options, QString *error, std::optional<bool> explicitContent)
+bool ModelCatalog::configure(const QString &id, const QJsonObject &options, QString *error, std::optional<bool> explicitContent, std::optional<QString> displayName)
 {
     const auto info = modelById(id);
     if (!info) { if (error) *error = tr("The requested model is not installed"); return false; }
     const auto category = *categoryFromName(id.section(':', 0, 0));
     if (!KiraService::Protocol::validateModelOptions(categoryName(category), options, error)) return false;
+    if (displayName && displayName->size() > 256) { if (error) *error = tr("Display name must contain at most 256 characters"); return false; }
     auto metadata = readMetadata(category);
     if (!metadata) { if (error) *error = tr("Could not read model metadata"); return false; }
     QJsonObject entry = metadata->value(info->fileName).toObject();
     if (!info->companionFileName.isEmpty()) entry.insert("companionFileName", info->companionFileName);
     entry.insert("recommendedOptions", options);
     if (explicitContent) entry.insert("explicitContent", *explicitContent);
+    if (displayName) entry.insert("displayName", displayName->trimmed());
     metadata->insert(info->fileName, entry);
     if (!writeMetadata(category, *metadata)) { if (error) *error = tr("Could not save model metadata"); return false; }
     return true;
@@ -574,6 +582,7 @@ void ModelCatalog::completeInstall()
     entry.insert("modelType", m_activeInstall->request.modelType);
     if (m_activeInstall->request.recommendedOptions) entry.insert("recommendedOptions", *m_activeInstall->request.recommendedOptions);
     if (m_activeInstall->request.explicitContent) entry.insert("explicitContent", *m_activeInstall->request.explicitContent);
+    if (m_activeInstall->request.displayName) entry.insert("displayName", m_activeInstall->request.displayName->trimmed());
     metadata->insert(m_activeInstall->fileName, entry);
     if (!writeMetadata(category, *metadata)) { failActiveInstall(tr("Could not save model metadata")); return; }
     for (const auto &file : m_activeInstall->files) QFile::remove(file.partPath);

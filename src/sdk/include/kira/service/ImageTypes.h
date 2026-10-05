@@ -38,6 +38,8 @@ struct ModelInfo
     QString modelType = QStringLiteral("checkpoint");
     bool explicitContent = false;
     QList<PromptStyle> styles;
+    QString displayName;
+    QString displayLabel() const { return displayName.trimmed().isEmpty() ? fileName : displayName.trimmed(); }
 };
 
 enum class ModelInstallState
@@ -123,6 +125,23 @@ struct ServiceCapabilities
     bool ipAdapter = false;
     bool photoMakerIdentityExport = false;
     bool photoMaker = false;
+    bool promptEnhancement = false;
+};
+
+struct PromptEnhancementRequest
+{
+    QString modelId;
+    QString prompt;
+    QJsonObject parameters; // Optional overrides of the selected model's LLM options.
+};
+
+struct PromptEnhancementResult
+{
+    QString jobId;
+    bool succeeded = false;
+    QString prompt;
+    QString errorCode;
+    QString message;
 };
 
 struct PhotoMakerIdentityResult
@@ -158,6 +177,8 @@ Q_DECLARE_METATYPE(KiraService::ModelInstall)
 Q_DECLARE_METATYPE(KiraService::ImageGenerationRequest)
 Q_DECLARE_METATYPE(KiraService::ImageUpscaleRequest)
 Q_DECLARE_METATYPE(KiraService::ImageJobResult)
+Q_DECLARE_METATYPE(KiraService::PromptEnhancementRequest)
+Q_DECLARE_METATYPE(KiraService::PromptEnhancementResult)
 Q_DECLARE_METATYPE(KiraService::PhotoMakerIdentityResult)
 Q_DECLARE_METATYPE(KiraService::ServiceCapabilities)
 Q_DECLARE_METATYPE(KiraService::ServiceConnectionState)

@@ -8,8 +8,20 @@ or **VLM** to configure the relevant recommended options. Changing subtype reset
 its options to the subtype defaults. T5 sampling controls appear only when
 sampling is enabled. Primary `.gguf`, `.safetensors`, and `.ckpt` files are accepted;
 companions are not supported in this slice. Installation, configuration and
-deletion use the existing atomic workflows. This category does not execute LLM
-or T5 inference yet; see [the option contract](docs/protocol-v3.md).
+deletion use the existing atomic workflows. `prompt.enhance` executes LLM GGUF
+models using a fresh `llama-completion` process per job, without `llama-server`.
+T5 and VLM execution are explicitly rejected for now; see
+[the option contract](docs/protocol-v3.md).
+
+Install llama.cpp's `llama-completion` executable on the service host to enable
+this capability. It must be on the daemon's PATH; alternatively set
+`KIRA_LLAMA_COMPLETION` to its absolute path in the service environment.
+
+Model installation preserves existing files: filename collisions receive a
+numeric suffix before the extension. Manager's add and configuration forms
+accept an optional display name. Model labels use that name when set, otherwise
+the full installed filename; opaque IDs remain unchanged when renaming a label.
+CLI add/attach also accepts `--display-name "My model"`.
 
 ## Build
 

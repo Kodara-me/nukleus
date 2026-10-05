@@ -25,13 +25,23 @@
 
 ## Manager UI and recommended options
 
+Model install/configure accepts optional displayName (trimmed, at most 256
+characters). Omission preserves it; an empty value clears it. Catalogue name
+resolves displayName or the full installed filename. Manager and Canvas use
+displayName then filename for labels, retaining opaque IDs as selection keys.
+Primary filename collisions receive a numeric suffix before the extension;
+never overwrite weights and keep companions scoped to the final primary name.
+
 - Prompt Enhancer uses category `prompt-enhancer`, SDK/daemon PromptEnhancer enums
   and models/prompt-enhancer storage. Accept primary GGUF/safetensors/ckpt, no
   companions. Store subtype in recommendedOptions; Protocol owns T5/LLM/VLM
   defaults and strict validation. LLM is initial; changing subtype resets defaults.
   T5 doSample toggles temperature/topP/topK and preserves other draft fields.
-  Manager shares its add/edit options form. This slice provides catalogue and
-  configuration only, with no inference backend or enhancement capability.
+  Manager shares its add/edit options form. `prompt.enhance` uses the shared FIFO
+  queue and a per-job `llama-completion` subprocess for LLM GGUF models only.
+  Resolve opaque IDs internally, snapshot saved options plus validated overrides,
+  and return only prompt text. Reject T5/VLM execution explicitly. The optional
+  executable is configured with KIRA_LLAMA_COMPLETION; never launch llama-server.
 
 - Link only the manager/UI tests to KiraUi::Widgets 0.2. Default to the sibling
   checkout, allow KIRA_UI_SOURCE_DIR, and fall back to an installed package.

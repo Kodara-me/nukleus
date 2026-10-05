@@ -1,4 +1,5 @@
 #include "ManageModelsWindow.h"
+#include <QLineEdit>
 #include "AddModelDialog.h"
 #include "ManagerServiceClient.h"
 #include "ModelOptionsWidget.h"
@@ -92,6 +93,14 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     m_details->setWordWrap(true);
     m_details->setTextFormat(Qt::PlainText);
     contentLayout->addWidget(m_details);
+    auto* displayNameLabel = new QLabel(tr("Display name (optional):"), content);
+    contentLayout->addWidget(displayNameLabel);
+    m_displayName = new QLineEdit(content);
+    m_displayName->setObjectName("modelDisplayName");
+    m_displayName->setMaxLength(256);
+    m_displayName->setPlaceholderText(tr("Filename when empty"));
+    displayNameLabel->setBuddy(m_displayName);
+    contentLayout->addWidget(m_displayName);
     m_options = new ModelOptionsWidget(content);
     m_options->hide();
     contentLayout->addWidget(m_options);
@@ -114,10 +123,17 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
             [this]
             {
                 m_dirty = m_options->options() != m_originalOptions
-                    || m_options->explicitContent() != m_originalExplicitContent;
+                    || m_options->explicitContent() != m_originalExplicitContent
+                    || m_displayName->text().trimmed() != m_originalDisplayName;
                 updateActions();
             });
     connect(m_add, &QPushButton::clicked, this, &ManageModelsWindow::addModel);
+    connect(m_displayName, &QLineEdit::textChanged, this, [this] {
+        m_dirty = m_options->options() != m_originalOptions
+            || m_options->explicitContent() != m_originalExplicitContent
+            || m_displayName->text().trimmed() != m_originalDisplayName;
+        updateActions();
+    });
     connect(m_attach, &QPushButton::clicked, this, &ManageModelsWindow::attachFiles);
     connect(m_styles, &QPushButton::clicked, this, &ManageModelsWindow::editStyles);
     connect(m_delete, &QPushButton::clicked, this, &ManageModelsWindow::deleteSelectedModel);
@@ -155,6 +171,7 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
                     return;
                 m_originalOptions = options;
                 m_originalExplicitContent = explicitContent;
+                m_originalDisplayName = m_displayName->text().trimmed();
                 m_dirty = false;
                 m_saving = false;
                 m_status->setText(tr("Recommended options saved."));
@@ -201,7 +218,7 @@ void ManageModelsWindow::populateModels()
         root->appendRow(branch);
         for (const auto &model : m_client->models(category.first))
         {
-            auto *item = new QStandardItem(model.name);
+            auto *item = new QStandardItem(model.displayLabel());
             item->setEditable(false);
             item->setIcon(KiraUi::IconProvider::icon(KiraUi::Icon::File));
             item->setData(model.id, Qt::UserRole + 1);
@@ -241,6 +258,10 @@ void ManageModelsWindow::showSelection(const QString &id)
     m_selectedId = id;
     m_dirty = false;
     m_originalOptions = {};
+    m_originalDisplayName.clear();
+    const QSignalBlocker displayNameBlocker(m_displayName);
+    m_displayName->clear();
+    m_displayName->setEnabled(false);
     m_options->hide();
     m_details->setText(tr("Select a model to view its recommended options."));
     for (const auto &category : categories)
@@ -250,11 +271,14 @@ void ManageModelsWindow::showSelection(const QString &id)
                 continue;
             m_originalOptions = model.recommendedOptions;
             m_originalExplicitContent = model.explicitContent;
+            m_originalDisplayName = model.displayName;
+            m_displayName->setText(model.displayName);
+            m_displayName->setEnabled(true);
             m_options->setOptions(category.first, model.recommendedOptions, model.explicitContent);
             m_options->show();
             m_details->setText(
                 tr("%1\n%2 · %3\n%4")
-                    .arg(model.name, model.fileName, sizeText(model.fileSize),
+                    .arg(model.displayLabel(), model.fileName, sizeText(model.fileSize),
                          model.recommendedOptions.isEmpty()
                              ? tr("No saved recommendations. Save to attach the proposed values.")
                              : tr("Recommended options")));
@@ -307,6 +331,7 @@ void ManageModelsWindow::updateActions()
     m_styles->setEnabled(m_client->isAuthenticated() && m_client->modelListAvailable() && !m_saving && generationSelected);
     m_tree->setEnabled(!m_saving);
     m_options->setEnabled(m_client->isAuthenticated() && !m_saving);
+    m_displayName->setEnabled(m_client->isAuthenticated() && !m_saving && !m_selectedId.isEmpty());
     m_add->setEnabled(m_client->isAuthenticated() && !m_saving);
     m_attach->setEnabled(m_client->isAuthenticated() && !m_saving &&
         (m_selectedId.startsWith("image-generation:") || m_selectedId.startsWith("edition:") || m_selectedId.startsWith("ip-adapter:")
@@ -321,7 +346,7 @@ void ManageModelsWindow::saveOptions()
 {
     if (!m_options->isValid())
         return;
-    if (m_client->configureModel(m_selectedId, m_options->options(), m_options->explicitContent()))
+    if (m_client->configureModel(m_selectedId, m_options->options(), m_options->explicitContent(), m_displayName->text()))
     {
         m_saving = true;
         m_status->setText(tr("Saving recommended options…"));

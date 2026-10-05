@@ -63,6 +63,7 @@ class ServiceTest final : public QObject
 private slots:
     void persistsPromptStyles();
     void installsAndPersistsPromptEnhancer();
+    void enhancesPromptThroughSdk();
     void configuresStylesOverProtocol();
     void generatesWithValidatedOptionsAndVae();
     void validatesRecommendedOptions();
@@ -1105,7 +1106,9 @@ void ServiceTest::installsClipVision()
     const auto model = catalog.modelById(id); QVERIFY(model);
     QCOMPARE(model->filePath, directory.filePath("clip_vision/clip_vision_h.safetensors"));
     QCOMPARE(model->recommendedOptions, *request.recommendedOptions);
-    QVERIFY(!catalog.install(request, &error)); // Never overwrite installed weights.
+    QVERIFY2(catalog.install(request, &error), qPrintable(error));
+    QTRY_COMPARE(finished.count(), 2);
+    QVERIFY(catalog.modelById("clip_vision:clip_vision_h-2.safetensors"));
     QVERIFY(catalog.configure(id, {{"image_size", 336}, {"normalize_input", false}}, &error));
     ModelCatalog restored(directory.path(), true);
     QCOMPARE(restored.modelById(id)->recommendedOptions, QJsonObject({{"image_size", 336}, {"normalize_input", false}}));
@@ -1115,6 +1118,126 @@ void ServiceTest::installsClipVision()
     QVERIFY(!catalog.install(request, &error)); // CLIP Vision has only its required primary.
     QCOMPARE(ModelCatalog::categoryName(ModelCategory::IpAdapter), QString("ip_adapter"));
     QCOMPARE(*ModelCatalog::categoryFromName("ip_adapter"), ModelCategory::IpAdapter);
+}
+
+void ServiceTest::enhancesPromptThroughSdk()
+{
+    using namespace KiraService::Protocol;
+    QTemporaryDir directory;
+    QVERIFY(QDir(directory.path()).mkpath("prompt-enhancer"));
+    for (const auto& name : {"llm.gguf", "t5.gguf", "vlm.gguf", "wrong.safetensors"}) {
+        QFile model(directory.filePath(QString("prompt-enhancer/%1").arg(name)));
+        QVERIFY(model.open(QIODevice::WriteOnly)); model.write("fixture");
+    }
+    ModelCatalog catalog(directory.path(), false);
+    auto parameters = defaultPromptEnhancerOptions("LLM");
+    parameters.insert("systemPrompt", "Keep the description in French.");
+    QVERIFY(catalog.configure("prompt-enhancer:llm.gguf", parameters));
+    QVERIFY(catalog.configure("prompt-enhancer:t5.gguf", defaultPromptEnhancerOptions("T5")));
+    QVERIFY(catalog.configure("prompt-enhancer:vlm.gguf", defaultPromptEnhancerOptions("VLM")));
+    const auto executablePath = directory.filePath("completion");
+    QFile executable(executablePath);
+    QVERIFY(executable.open(QIODevice::WriteOnly));
+    executable.write(
+        "#!/bin/sh\nroot=$(dirname \"$0\")\nprintf '%s\\n' \"$@\" > \"$root/args\"\n"
+        "previous=\nfor argument in \"$@\"; do\n"
+        "if [ \"$previous\" = --file ]; then cat \"$argument\" > \"$root/input\"; fi\n"
+        "if [ \"$previous\" = --system-prompt-file ]; then cat \"$argument\" > \"$root/system\"; fi\n"
+        "if [ \"$previous\" = --repeat-last-n ] && [ \"$argument\" -lt 0 ]; then exit 1; fi\n"
+        "previous=\"$argument\"\ndone\n"
+        "if [ -f \"$root/wait\" ]; then exec sleep 30; fi\n"
+        "if [ -f \"$root/fail\" ]; then printf 'backend failure' >&2; exit 9; fi\n"
+        "if [ -f \"$root/empty\" ]; then exit 0; fi\n"
+        "if [ -f \"$root/large\" ]; then head -c 1048577 /dev/zero; exit 0; fi\n"
+        "printf 'warning on stderr\\n' >&2\nprintf '  portrait détaillé\\n [end of text]\\n'\n");
+    executable.close();
+    QVERIFY(executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    KiraServiceConfiguration configuration;
+    configuration.port = 0; configuration.modelRootPath = directory.path();
+    configuration.llamaCompletion = executablePath;
+    configuration.promptEnhancementTimeoutMs = 400;
+    KiraServiceDaemon daemon(configuration); QString error;
+    QVERIFY2(daemon.start(&error), qPrintable(error));
+    KiraService::ServiceClient client;
+    client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
+    QSignalSpy finished(&client, &KiraService::ServiceClient::promptEnhancementFinished);
+    QSignalSpy imageFinished(&client, &KiraService::ServiceClient::imageJobFinished);
+    client.connectToService();
+    QTRY_VERIFY(client.canEnhancePrompt("prompt-enhancer:llm.gguf"));
+    QVERIFY(client.enhancePrompt({"missing", "person", {}}).isEmpty());
+    QVERIFY(!client.enhancePrompt({"prompt-enhancer:llm.gguf", "  ", {}}).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::PromptEnhancementResult>(finished.takeFirst().at(0)).succeeded);
+    QFile emptyInput(directory.filePath("input"));
+    QVERIFY(emptyInput.open(QIODevice::ReadOnly));
+    QVERIFY(emptyInput.readAll().contains("Generate a new description"));
+    const QString prompt = "une personne\navec des cheveux bouclés; $(false)";
+    auto id = client.enhancePrompt({"prompt-enhancer:llm.gguf", prompt, {{"maxOutputTokens", 80}, {"doSample", false}}});
+    QVERIFY(!id.isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    auto result = qvariant_cast<KiraService::PromptEnhancementResult>(finished.takeFirst().at(0));
+    QVERIFY2(result.succeeded, qPrintable(result.message));
+    QCOMPARE(result.jobId, id); QCOMPARE(result.prompt, QString("portrait détaillé"));
+    QCOMPARE(imageFinished.count(), 0);
+    const auto read = [&](const QString& name) {
+        QFile file(directory.filePath(name)); if (!file.open(QIODevice::ReadOnly)) return QByteArray(); return file.readAll();
+    };
+    const auto arguments = read("args");
+    QVERIFY(arguments.contains("--ctx-size\n4096\n"));
+    QVERIFY(arguments.contains("--repeat-last-n\n4096\n"));
+    QVERIFY(arguments.contains("--n-predict\n80\n"));
+    QVERIFY(arguments.contains("--temp\n0\n"));
+    QVERIFY(arguments.contains("--top-k\n20\n"));
+    QVERIFY(arguments.contains("--single-turn\n"));
+    QVERIFY(arguments.contains("--no-display-prompt\n"));
+    QCOMPARE(QString::fromUtf8(read("input")), prompt);
+    QVERIFY(read("system").contains("Keep the description in French."));
+    QCOMPARE(read("system"), QByteArray("Keep the description in French."));
+    const auto expectFailure = [&](const KiraService::PromptEnhancementRequest& request, const QString& code) {
+        QVERIFY(!client.enhancePrompt(request).isEmpty());
+        QTRY_COMPARE(finished.count(), 1);
+        const auto failure = qvariant_cast<KiraService::PromptEnhancementResult>(finished.takeFirst().at(0));
+        QVERIFY(!failure.succeeded); QCOMPARE(failure.errorCode, code); QVERIFY(failure.prompt.isEmpty());
+    };
+    expectFailure({"prompt-enhancer:t5.gguf", "person", {}}, "prompt-enhancer-subtype-unsupported");
+    expectFailure({"prompt-enhancer:vlm.gguf", "person", {}}, "prompt-enhancer-subtype-unsupported");
+    expectFailure({"prompt-enhancer:wrong.safetensors", "person", {}}, "prompt-enhancer-format-unsupported");
+    expectFailure({"prompt-enhancer:llm.gguf", "person", {{"subtype", "T5"}}}, "invalid-request");
+    expectFailure({"prompt-enhancer:llm.gguf", "person", {{"temperature", "hot"}}}, "invalid-request");
+    const auto marker = [&](const QString& name) { QFile file(directory.filePath(name)); return file.open(QIODevice::WriteOnly); };
+    QVERIFY(marker("fail"));
+    expectFailure({"prompt-enhancer:llm.gguf", "person", {}}, "prompt-enhancement-failed");
+    QVERIFY(QFile::remove(directory.filePath("fail")));
+    QVERIFY(marker("empty"));
+    expectFailure({"prompt-enhancer:llm.gguf", "person", {}}, "prompt-enhancement-empty-result");
+    QVERIFY(QFile::remove(directory.filePath("empty")));
+    QVERIFY(marker("large"));
+    expectFailure({"prompt-enhancer:llm.gguf", "person", {}}, "prompt-enhancement-output-too-large");
+    QVERIFY(QFile::remove(directory.filePath("large")));
+    QVERIFY(marker("wait"));
+    expectFailure({"prompt-enhancer:llm.gguf", "person", {}}, "prompt-enhancement-timeout");
+    QVERIFY(QFile::remove(directory.filePath("wait")));
+    QVERIFY(!client.enhancePrompt({"prompt-enhancer:llm.gguf", "retry", {}}).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::PromptEnhancementResult>(finished.takeFirst().at(0)).succeeded);
+    // Disconnect cancels active and queued work and releases the shared queue.
+    QVERIFY(marker("wait"));
+    QVERIFY(QFile::remove(directory.filePath("args")));
+    QVERIFY(!client.enhancePrompt({"prompt-enhancer:llm.gguf", "active", {}}).isEmpty());
+    QVERIFY(!client.enhancePrompt({"prompt-enhancer:llm.gguf", "queued", {}}).isEmpty());
+    QTRY_VERIFY(QFileInfo::exists(directory.filePath("args")));
+    client.disconnectFromService();
+    QTRY_COMPARE(finished.count(), 2);
+    for (const auto& notification : finished) {
+        QVERIFY(!qvariant_cast<KiraService::PromptEnhancementResult>(notification.at(0)).succeeded);
+    }
+    finished.clear();
+    QVERIFY(QFile::remove(directory.filePath("wait")));
+    client.connectToService();
+    QTRY_VERIFY(client.canEnhancePrompt("prompt-enhancer:llm.gguf"));
+    QVERIFY(!client.enhancePrompt({"prompt-enhancer:llm.gguf", "after reconnect", {}}).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::PromptEnhancementResult>(finished.takeFirst().at(0)).succeeded);
 }
 
 void ServiceTest::installsAndPersistsPromptEnhancer()
@@ -1162,7 +1285,9 @@ void ServiceTest::installsPhotoMaker()
     const auto model = catalog.modelById(id); QVERIFY(model);
     QCOMPARE(model->filePath, directory.filePath("photomaker/photomaker-v2.safetensors"));
     QCOMPARE(model->recommendedOptions, *request.recommendedOptions);
-    QVERIFY(!catalog.install(request, &error));
+    QVERIFY2(catalog.install(request, &error), qPrintable(error));
+    QTRY_COMPARE(finished.count(), 2);
+    QVERIFY(catalog.modelById("photomaker:photomaker-v2-2.safetensors"));
     QVERIFY(catalog.configure(id, {{"style_strength", 100}}, &error));
     ModelCatalog restored(directory.path(), true);
     QCOMPARE(restored.modelById(id)->recommendedOptions, QJsonObject({{"style_strength", 100}}));
@@ -1653,7 +1778,22 @@ void ServiceTest::importsLocalModelWithoutChangingSources()
     QCOMPARE(catalog.modelById(id)->companionFiles.size(), 2);
     QVERIFY(QFileInfo::exists(storage.filePath(model->companionFiles.value("llm").toString())));
     request.installId = "duplicate-import";
-    QVERIFY(!catalog.install(request, &error));
+    request.displayName = "  My second model  ";
+    QVERIFY2(catalog.install(request, &error), qPrintable(error));
+    QTRY_COMPARE(completed.count(), 3);
+    const auto duplicate = catalog.modelById("image-generation:local model-2.gguf");
+    QVERIFY(duplicate);
+    QCOMPARE(duplicate->name, QString("My second model"));
+    QCOMPARE(duplicate->displayName, QString("My second model"));
+    QVERIFY(duplicate->companionFiles.value("llm").toString().contains("local model-2.gguf/"));
+    QCOMPARE(catalog.modelById(id)->fileName, QString("local model.gguf"));
+    ModelCatalog restoredNames(storage.path(), true);
+    QCOMPARE(restoredNames.modelById(duplicate->id)->displayName, duplicate->displayName);
+    const auto options = KiraService::Protocol::defaultModelOptions("image-generation");
+    QVERIFY(catalog.configure(duplicate->id, options, &error, {}, QString()));
+    QCOMPARE(catalog.modelById(duplicate->id)->name, QString("local model-2.gguf"));
+    QVERIFY(catalog.configure(duplicate->id, options, &error, {}, QString("Renamed model")));
+    QCOMPARE(catalog.modelById(duplicate->id)->name, QString("Renamed model"));
     KiraServiceConfiguration configuration;
     configuration.port = 0;
     configuration.modelRootPath = storage.path();

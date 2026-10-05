@@ -46,6 +46,12 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     auto *content = new QWidget(body);
     auto *form = new QFormLayout(content);
     form->setContentsMargins(0, 0, 0, 0);
+    m_displayName = new QLineEdit(content);
+    m_displayName->setObjectName("modelDisplayName");
+    m_displayName->setMaxLength(256);
+    m_displayName->setPlaceholderText(tr("Filename when empty"));
+    if (m_existingModelId.isEmpty()) form->addRow(tr("Display name (optional):"), m_displayName);
+    else m_displayName->hide();
     const auto sourceRow = [this, content](QLineEdit* field) {
         auto* row = new QWidget(content);
         auto* layout = new QHBoxLayout(row);
@@ -227,6 +233,7 @@ void AddModelDialog::updateActions()
     const bool busy = m_busy || !m_pendingRemoval.isEmpty();
     m_category->setEnabled(!busy && m_existingModelId.isEmpty());
     m_url->setEnabled(!busy);
+    m_displayName->setEnabled(!busy);
     m_companion->setEnabled(!busy && !m_attachedFiles.contains(roleFor(m_companion)));
     m_clipL->setEnabled(!busy && !m_attachedFiles.contains("clip-l"));
     m_clipG->setEnabled(!busy && !m_attachedFiles.contains("clip-g"));
@@ -267,7 +274,8 @@ void AddModelDialog::startInstall()
     m_installId = m_client->installModel(m_category->currentData().toString(), QUrl(m_url->text().trimmed()),
         QUrl(m_companion->text().trimmed()), m_existingModelId.isEmpty() ? m_options->options() : QJsonObject{},
         files, m_modelType->isHidden() ? QString("checkpoint") : m_modelType->currentData().toString(), m_existingModelId,
-        m_existingModelId.isEmpty() ? std::optional<bool>(m_options->explicitContent()) : std::nullopt);
+        m_existingModelId.isEmpty() ? std::optional<bool>(m_options->explicitContent()) : std::nullopt,
+        m_existingModelId.isEmpty() ? std::optional<QString>(m_displayName->text()) : std::nullopt);
     if (m_installId.isEmpty())
     {
         m_busy = false;

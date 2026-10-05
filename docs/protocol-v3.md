@@ -25,7 +25,18 @@ For example:
 {"type":"models.install","installId":"adapter-1","category":"ip_adapter","url":"https://huggingface.co/h94/IP-Adapter/resolve/main/models/ip-adapter_sd15.safetensors","recommendedOptions":{"strength":1.0}}
 ```
 
+`models.install` and `models.configure` accept optional string `displayName`
+(at most 256 characters, trimmed). Omission preserves an existing name; empty
+or whitespace-only clears it. Catalogue and completion objects include
+`displayName`; `name` is the display name when present, otherwise the full
+installed `fileName`. Clients use displayName then fileName for model labels.
+Display-name edits retain IDs, files and recommendations. New primary imports
+or downloads with a filename collision receive an unused name such as
+`model-2.gguf`, with companions scoped to that final primary name. Publication
+still never overwrites an existing file.
+
 Model administrators may delete an installed model by its opaque ID:
+
 
 ```json
 {"type":"models.delete","id":"upscaler:model.gguf"}
@@ -34,6 +45,42 @@ Model administrators may delete an installed model by its opaque ID:
 The service replies with `models.delete.completed` or an `error` containing the model `id`. Deletion is rejected while the model is referenced by active, queued, or pending-upload work. Filesystem paths are never accepted or returned.
 
 Image work uses `submit` with `image.generate`, `image.upscale`, or `image.edit`; each request must include a matching installed `modelId`. Upscale is fixed at 2×. Input and result image data are binary WebSocket messages; filesystem paths are never part of the protocol.
+
+## Prompt enhancement (additive v3 extension)
+
+When `llama-completion` is available, capabilities include `prompt.enhance`.
+The SDK exposes `canEnhancePrompt`, `enhancePrompt` and
+`promptEnhancementFinished`, with a dedicated text result and no image payload.
+
+```json
+{"type":"submit","operation":"prompt.enhance","jobId":"enhance-1","options":{"modelId":"prompt-enhancer:model.gguf","prompt":"portrait of a person","parameters":{"maxOutputTokens":128}}}
+```
+
+Select an installed Prompt Enhancer by opaque ID. Only LLM subtype with GGUF
+weights executes in this slice; T5/VLM return
+`prompt-enhancer-subtype-unsupported`, and other weight formats return
+`prompt-enhancer-format-unsupported`. `parameters` is optional and overrides
+saved recommended options (or LLM defaults when absent). It cannot override
+`subtype`; unknown fields and invalid values are rejected before queuing.
+Prompt and system prompt each have a 65,536-byte UTF-8 limit. An empty or
+whitespace-only prompt is accepted and becomes a request to generate a new
+description according to the system instructions. A supplied `systemPrompt`
+override applies to this job only; saved model options are unchanged.
+
+Jobs share the image FIFO queue and normal accepted/state/error lifecycle.
+Each execution loads the model in a fresh `llama-completion` subprocess and
+releases it on completion or cancellation. The configured system prompt is
+used as-is; only an empty system prompt receives the generic enhancement
+instructions. This preserves task-specific restrictions supplied by clients.
+`doSample: false` selects greedy decoding through temperature zero.
+The process has a ten-minute timeout and a 1 MiB output limit. An empty result,
+backend failure or timeout returns an error and releases the queue.
+
+Success is a single JSON message, with no binary transfer:
+
+```json
+{"type":"result","operation":"prompt.enhance","jobId":"enhance-1","prompt":"a detailed portrait of a person"}
+```
 
 ## Per-model prompt styles (additive v3 extension)
 

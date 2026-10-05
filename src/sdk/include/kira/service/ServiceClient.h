@@ -29,8 +29,8 @@ public:
     QList<ModelInstall> installs() const;
     void requestModels();
     QString installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl = {}, const QJsonObject &recommendedOptions = {}, const QJsonObject &companionUrls = {},
-        const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {}, std::optional<bool> explicitContent = {});
-    bool configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent = {});
+        const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {}, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {});
+    bool configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {});
     bool configureModelStyles(const QString &id, const QList<PromptStyle> &styles);
     bool cancelInstall(const QString &installId);
     bool deleteModel(const QString &id);
@@ -39,6 +39,8 @@ public:
     QString submitGeneration(const ImageGenerationRequest &request);
     QString submitUpscale(const ImageUpscaleRequest &request);
     QString exportPhotoMakerIdentity(const QByteArray &sourceImageData);
+    bool canEnhancePrompt(const QString& modelId) const;
+    QString enhancePrompt(const PromptEnhancementRequest& request);
 signals:
     void serviceStateChanged(KiraService::ServiceConnectionState state, const QString &code, const QString &detail);
     void capabilitiesChanged(const KiraService::ServiceCapabilities &capabilities);
@@ -54,6 +56,7 @@ signals:
     void generationProgressChanged(const QString &jobId, const KiraService::GenerationProgress &progress);
     void imageJobFinished(const KiraService::ImageJobResult &result);
     void photoMakerIdentityExportFinished(const KiraService::PhotoMakerIdentityResult &result);
+    void promptEnhancementFinished(const KiraService::PromptEnhancementResult& result);
 private:
     struct PendingJob
     {
@@ -63,6 +66,7 @@ private:
         QString mimeType;
         bool identityExport = false;
         QByteArray photoMakerIdentityData;
+        bool promptEnhancement = false;
     };
     QString submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData, const QByteArray &ipAdapterImageData = {}, const QByteArray &photoMakerIdentityData = {});
     void authenticate();

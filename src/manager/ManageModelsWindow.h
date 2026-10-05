@@ -5,6 +5,7 @@
 class ManagerServiceClient;
 class ModelOptionsWidget;
 class QLabel;
+class QLineEdit;
 class QPushButton;
 class QStandardItemModel;
 class QSplitter;
@@ -42,6 +43,8 @@ class ManageModelsWindow final : public KiraUi::MainWindow
     ManagerServiceClient *m_client;
     QLabel *m_status;
     QLabel *m_details;
+    QLineEdit *m_displayName;
+    QString m_originalDisplayName;
     KiraUi::TreeView *m_tree;
     QStandardItemModel *m_treeModel;
     QSplitter *m_splitter;

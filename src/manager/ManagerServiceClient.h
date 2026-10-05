@@ -26,6 +26,8 @@ struct ManagedModelInfo
     QString modelType = QStringLiteral("checkpoint");
     bool explicitContent = false;
     QList<KiraService::PromptStyle> styles;
+    QString displayName;
+    QString displayLabel() const { return displayName.trimmed().isEmpty() ? fileName : displayName.trimmed(); }
 };
 
 enum class ManagedInstallState { Requesting, Accepted, Queued, Downloading, Verifying, Completed, Failed, Canceled };
@@ -63,8 +65,8 @@ public:
     QList<ManagedInstall> installs() const;
     void requestModels();
     QString installModel(const QString &category, const QUrl &url, const QUrl &companionUrl = {}, const QJsonObject &recommendedOptions = {}, const QJsonObject &companionUrls = {},
-        const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {}, std::optional<bool> explicitContent = {});
-    bool configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent = {});
+        const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {}, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {});
+    bool configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {});
     bool configureModelStyles(const QString &id, const QList<KiraService::PromptStyle> &styles);
     bool cancelInstall(const QString &installId);
     bool deleteModel(const QString &id);

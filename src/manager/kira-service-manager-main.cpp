@@ -140,13 +140,13 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
                     if (!model.companionFileName.isEmpty()) files.insert(model.companionRole, model.companionFileName);
                     QStringList names;
                     for (auto it = files.begin(); it != files.end(); ++it) names.append(it.key() + ":" + it.value().toString());
-                    rows.append({category, model.id, model.fileName, names.isEmpty() ? QString("-") : names.join(", "), sizeText(model.fileSize)});
+                    rows.append({category, model.id, model.displayLabel(), names.isEmpty() ? QString("-") : names.join(", "), sizeText(model.fileSize)});
                 }
             }
 
             int categoryWidth = QStringLiteral("Category").size();
             int idWidth = QStringLiteral("ID").size();
-            int fileNameWidth = QStringLiteral("Filename").size();
+            int fileNameWidth = QStringLiteral("Name").size();
             int companionWidth = QStringLiteral("Companion").size();
             int sizeWidth = QStringLiteral("Size").size();
             for (const ModelRow &row : rows) {
@@ -160,7 +160,7 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
             QTextStream output(stdout);
             output << QStringLiteral("Category").leftJustified(categoryWidth) << "  "
                    << QStringLiteral("ID").leftJustified(idWidth) << "  "
-                   << QStringLiteral("Filename").leftJustified(fileNameWidth) << "  "
+                   << QStringLiteral("Name").leftJustified(fileNameWidth) << "  "
                    << QStringLiteral("Companion").leftJustified(companionWidth) << "  "
                    << QStringLiteral("Size").rightJustified(sizeWidth) << '\n';
             output << QString(categoryWidth, '-') << "  "
@@ -189,7 +189,8 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
             const auto companion = QUrl(!image && parser.isSet("mmproj") ? parser.value("mmproj") : parser.isSet("vae") ? parser.value("vae") : parser.value("companion-lora"));
             installId = client.installModel(category, command == "attach" ? QUrl{} : QUrl(argument),
                 companion, {}, files, command == "attach" && !parser.isSet("model-type") ? QString() : parser.value("model-type"),
-                command == "attach" ? argument : QString());
+                command == "attach" ? argument : QString(), {},
+                parser.isSet("display-name") ? std::optional<QString>(parser.value("display-name")) : std::nullopt);
             if (installId.isEmpty()) finish(1, QStringLiteral("Could not start model installation."));
         });
         QObject::connect(&client, &ManagerServiceClient::installsChanged, &loop, [&] {
@@ -236,6 +237,7 @@ int main(int argc, char *argv[])
     parser.addHelpOption();
     parser.addOption({QStringLiteral("gui"), QStringLiteral("Start the graphical manager.")});
     parser.addOption({QStringLiteral("category"), QStringLiteral("Model category for add."), QStringLiteral("category")});
+    parser.addOption({"display-name", "Optional model display name for add/attach.", "name"});
     parser.addOption({QStringLiteral("companion-lora"), QStringLiteral("Optional auxiliary LoRA URL for an IP-Adapter add/attach."), QStringLiteral("url")});
     parser.addOption({QStringLiteral("mmproj"), QStringLiteral("Optional mmproj URL for LLM add or image add/attach."), QStringLiteral("url")});
     parser.addOption({QStringLiteral("vae"), QStringLiteral("Optional VAE URL for an Edition or Image-generation add/attach."), QStringLiteral("url")});
@@ -249,6 +251,7 @@ int main(int argc, char *argv[])
     parser.process(*application);
 
     if (guiRequested) {
+        if (parser.isSet("display-name")) { QTextStream(stderr) << "--gui cannot be combined with --display-name.\n"; return 2; }
         if (!parser.positionalArguments().isEmpty() || parser.isSet(QStringLiteral("category")) || parser.isSet(QStringLiteral("companion-lora")) || parser.isSet(QStringLiteral("mmproj")) || parser.isSet(QStringLiteral("vae")) || parser.isSet(QStringLiteral("yes")) || parser.isSet("clip-l") || parser.isSet("clip-g") || parser.isSet("text-encoder") || parser.isSet("model-type")) {
             QTextStream(stderr) << "--gui cannot be combined with a CLI command.\n";
             return 2;
