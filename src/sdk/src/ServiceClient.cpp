@@ -304,11 +304,19 @@ QString ServiceClient::submitFaceParsing(const ImageUpscaleRequest& request)
 
 QString ServiceClient::submitInpaint(const ImageGenerationRequest& request, const QByteArray& maskImageData)
 {
+    if (!request.photoMakerIdentityPackageData.isEmpty()) {
+        if (!request.photoMakerIdentityData.isEmpty() || !request.photoMakerReferenceImageData.isEmpty()
+            || !request.photoMakerReferenceImages.isEmpty()) return {};
+        PhotoMakerIdentityPackage identity;
+        if (!unpackPhotoMakerIdentity(request.photoMakerIdentityPackageData, identity)) return {};
+        auto unpacked = request;
+        unpacked.photoMakerIdentityPackageData.clear();
+        unpacked.photoMakerIdentityData = identity.embeddings;
+        unpacked.photoMakerReferenceImages = identity.references;
+        return submitInpaint(unpacked, maskImageData);
+    }
     if (request.baseImageData.isEmpty() || maskImageData.isEmpty() || request.prompt.trimmed().isEmpty()
-        || !request.styleId.isEmpty() || !request.photoMakerModelId.isEmpty()
-        || !request.photoMakerIdentityPackageData.isEmpty() || !request.photoMakerIdentityData.isEmpty()
-        || !request.photoMakerReferenceImageData.isEmpty() || !request.photoMakerReferenceImages.isEmpty()
-        || request.photoMakerStyleStrength) return {};
+        || !request.styleId.isEmpty()) return {};
     QJsonObject options{{"modelId", request.modelId}, {"hasInput", true}, {"hasMask", true},
         {"prompt", request.prompt}, {"negativePrompt", request.negativePrompt},
         {"width", request.width}, {"height", request.height}, {"steps", request.steps},
@@ -316,7 +324,28 @@ QString ServiceClient::submitInpaint(const ImageGenerationRequest& request, cons
         {"sampler", request.sampler}, {"scheduler", request.scheduler},
         {"baseImageStrength", request.baseImageStrength}};
     addIpAdapterOptions(options, request);
-    return submit(ImageOperation::Inpaint, options, request.baseImageData, request.ipAdapterImageData, {}, {}, maskImageData);
+    const bool photoMaker = !request.photoMakerModelId.isEmpty() || !request.photoMakerIdentityData.isEmpty()
+        || !request.photoMakerReferenceImages.isEmpty() || !request.photoMakerReferenceImageData.isEmpty()
+        || request.photoMakerStyleStrength.has_value();
+    QList<QByteArray> references;
+    if (photoMaker) {
+        references = request.photoMakerReferenceImages.isEmpty()
+            ? QList<QByteArray>{request.photoMakerReferenceImageData} : request.photoMakerReferenceImages;
+        if (!m_capabilities.photoMaker || request.photoMakerIdentityData.isEmpty()
+            || !containsModel(request.photoMakerModelId, ModelCategory::PhotoMaker)
+            || references.isEmpty() || references.size() > 4
+            || std::any_of(references.cbegin(), references.cend(), [](const auto& image) { return image.isEmpty(); })
+            || (!request.photoMakerReferenceImages.isEmpty() && !request.photoMakerReferenceImageData.isEmpty())
+            || !request.ipAdapterImageData.isEmpty() || !request.ipAdapterModelId.isEmpty()
+            || !request.clipVisionModelId.isEmpty() || request.ipAdapterStrength
+            || (request.photoMakerStyleStrength && (*request.photoMakerStyleStrength < 0 || *request.photoMakerStyleStrength > 100))) return {};
+        options.insert("photoMakerModelId", request.photoMakerModelId);
+        options.insert("hasPhotoMakerIdentity", true);
+        options.insert("referenceCount", references.size());
+        if (request.photoMakerStyleStrength) options.insert("photoMakerStyleStrength", *request.photoMakerStyleStrength);
+    }
+    return submit(ImageOperation::Inpaint, options, request.baseImageData, request.ipAdapterImageData,
+        request.photoMakerIdentityData, references, maskImageData);
 }
 
 bool ServiceClient::canEnhancePrompt(const QString& modelId) const

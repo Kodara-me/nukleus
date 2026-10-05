@@ -82,6 +82,7 @@ struct KiraServiceDaemon::Submission
     bool waitingIpAdapterImage = false;
     QString photoMakerPath;
     bool waitingPhotoMakerIdentity = false;
+    bool waitingPhotoMakerReferences = false;
     QByteArray photoMakerIdentityData;
     QByteArray inputData;
     QList<QByteArray> referenceImages;
@@ -114,6 +115,7 @@ struct KiraServiceDaemon::Job
     QString outputPath;
     QString photoMakerPath;
     QString photoMakerIdentityPath;
+    QString photoMakerImagesDirectory;
 };
 
 KiraServiceDaemon::KiraServiceDaemon(KiraServiceConfiguration configuration, QObject *parent)
@@ -475,7 +477,7 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         if (!validNumber(options, "referenceCount", 1, 4, true, false)) {
             sendError(socket, "invalid-request", tr("Invalid PhotoMaker reference count"), jobId); return;
         }
-        if (!generate || hasAdapterOptions || options.value("hasInput").toBool()
+        if ((!generate && !inpaint) || hasAdapterOptions || (generate && options.value("hasInput").toBool())
             || !options.value("photoMakerModelId").isString()
             || !options.value("hasPhotoMakerIdentity").isBool() || !options.value("hasPhotoMakerIdentity").toBool()
             || !validNumber(options, "photoMakerStyleStrength", 0, 100, true, false)) {
@@ -551,7 +553,7 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     if (needsInput || hasAdapterOptions || hasPhotoMaker) {
         m_pendingUploads.insert(socket, submission);
         send(socket, {{QStringLiteral("type"), QStringLiteral("upload-required")}, {QStringLiteral("jobId"), jobId},
-            {"inputRole", hasPhotoMaker ? "photomaker-reference" : submission->waitingIpAdapterImage ? "ip-adapter" : "source"}});
+            {"inputRole", hasPhotoMaker && !inpaint ? "photomaker-reference" : submission->waitingIpAdapterImage ? "ip-adapter" : "source"}});
         return;
     }
     auto job = std::make_shared<Job>();
@@ -775,7 +777,8 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
         sendError(socket, QStringLiteral("invalid-image"), tr("Image upload is empty or too large"), submission->id);
         return;
     }
-    if (submission->operation == Operation::Inpaint && !submission->waitingIpAdapterImage) {
+    if (submission->operation == Operation::Inpaint && !submission->waitingIpAdapterImage
+        && !submission->waitingPhotoMakerReferences && !submission->waitingPhotoMakerIdentity) {
         const auto validPng = [&](const QByteArray& bytes) {
             return bytes.size() >= 33 && bytes.startsWith(QByteArray::fromHex("89504e470d0a1a0a"))
                 && bytes.mid(12, 4) == "IHDR"
@@ -794,10 +797,18 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
             return;
         }
         submission->maskImageData = data;
+        if (!submission->photoMakerPath.isEmpty()) {
+            submission->waitingPhotoMakerReferences = true;
+            send(socket, {{"type", "upload-required"}, {"jobId", submission->id},
+                {"inputRole", "photomaker-reference"}, {"referenceIndex", 0}});
+            return;
+        }
     }
     else if (submission->waitingPhotoMakerIdentity) submission->photoMakerIdentityData = data;
     else if (submission->operation == Operation::PhotoMakerExport || !submission->photoMakerPath.isEmpty()) {
         qsizetype total = data.size();
+        if (submission->operation == Operation::Inpaint)
+            total += submission->inputData.size() + submission->maskImageData.size();
         for (const auto& image : submission->referenceImages) total += image.size();
         if (total > m_configuration.maximumImageBytes
             || (submission->referenceCount > 1 && !data.startsWith(QByteArray::fromHex("89504e470d0a1a0a")))) {
@@ -810,7 +821,8 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
                 {"inputRole", "photomaker-reference"}, {"referenceIndex", submission->referenceImages.size()}});
             return;
         }
-        submission->inputData = submission->referenceImages.first();
+        if (submission->operation != Operation::Inpaint)
+            submission->inputData = submission->referenceImages.first();
     }
     else if (submission->waitingIpAdapterImage) {
         if (submission->operation == Operation::Inpaint
@@ -831,6 +843,16 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
         submission->waitingIpAdapterImage = true;
         send(socket, {{"type", "upload-required"}, {"jobId", submission->id}, {"inputRole", "ip-adapter"}});
         return;
+    }
+    if (submission->operation == Operation::Inpaint) {
+        qsizetype total = submission->inputData.size() + submission->maskImageData.size()
+            + submission->ipAdapterImageData.size() + submission->photoMakerIdentityData.size();
+        for (const auto& reference : submission->referenceImages) total += reference.size();
+        if (total > m_configuration.maximumImageBytes) {
+            m_pendingUploads.remove(socket);
+            sendError(socket, "invalid-image", tr("The combined inpainting upload is too large"), submission->id);
+            return;
+        }
     }
     m_pendingUploads.remove(socket);
     if (m_queue.size() >= MaximumQueuedJobs) {
@@ -861,16 +883,24 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
         QFile file(path);
         return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
     };
+    const bool photoMakerInpaint = job->operation == Operation::Inpaint && !job->photoMakerPath.isEmpty();
+    if (photoMakerInpaint && !QDir().mkpath(job->directory->filePath("identity"))) {
+        sendError(socket, "storage-error", tr("Could not create identity storage"), job->id); return;
+    }
+    job->photoMakerImagesDirectory = photoMakerInpaint ? job->directory->filePath("identity") : job->directory->path();
     if (!saveImage(submission->inputData, "input.png", job->inputPath)
         || !saveImage(submission->maskImageData, "mask.png", job->maskPath)
         || !saveImage(submission->ipAdapterImageData, "ip-adapter.png", job->ipAdapterImagePath)
-        || !saveImage(submission->photoMakerIdentityData, "id_embeds.bin", job->photoMakerIdentityPath)) {
+        || !saveImage(submission->photoMakerIdentityData, photoMakerInpaint ? "identity/id_embeds.bin" : "id_embeds.bin", job->photoMakerIdentityPath)) {
         sendError(socket, QStringLiteral("storage-error"), tr("Could not save image upload"), job->id);
         return;
     }
-    for (int i = 1; i < submission->referenceImages.size(); ++i) {
+    for (int i = photoMakerInpaint ? 0 : 1; i < submission->referenceImages.size(); ++i) {
         QString path;
-        if (!saveImage(submission->referenceImages[i], QStringLiteral("reference-%1.png").arg(i + 1), path)) {
+        const auto name = photoMakerInpaint
+            ? QStringLiteral("identity/reference-%1.png").arg(i + 1)
+            : QStringLiteral("reference-%1.png").arg(i + 1);
+        if (!saveImage(submission->referenceImages[i], name, path)) {
             sendError(socket, "storage-error", tr("Could not save reference image"), job->id); return;
         }
     }
@@ -941,7 +971,8 @@ void KiraServiceDaemon::startNextJob()
         request.photoMakerPath = m_activeJob->photoMakerPath;
         request.photoMakerIdentityPath = m_activeJob->photoMakerIdentityPath;
         request.maskImagePath = m_activeJob->maskPath;
-        request.photoMakerImagesDirectory = m_activeJob->directory->path();
+        request.photoMakerImagesDirectory = m_activeJob->photoMakerImagesDirectory.isEmpty()
+            ? m_activeJob->directory->path() : m_activeJob->photoMakerImagesDirectory;
         request.photoMakerStyleStrength = o.value("photoMakerStyleStrength").toInt(20);
         if (m_activeJob->operation == Operation::Edit) request.referenceImagePath = m_activeJob->inputPath;
         else if (o.value(QStringLiteral("hasInput")).toBool()) request.baseImagePath = m_activeJob->inputPath;

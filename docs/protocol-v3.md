@@ -28,7 +28,7 @@ roles as Image generation. It uses separate `models/inpaint/` storage and opaque
 Require an installed Inpaint model, a nonblank prompt, explicit width/height
 integers 64–4096 and both upload flags set to true. Other generation parameters
 use the existing validation/defaults; absent strength defaults to 0.99. Reject
-PhotoMaker conditioning and nonempty style IDs. Allow existing IP-Adapter fields
+nonempty style IDs. Allow either PhotoMaker conditioning or existing IP-Adapter fields
 and validation (both opaque model IDs, hasIpAdapterImage and strength 0–2).
 Do not apply saved
 recommendations automatically. Canvas composes selected style prefixes locally.
@@ -54,6 +54,20 @@ image-job lifecycle, with `operation: image.inpaint`. The SDK exposes
 The mask uses white for replacement, black for preservation and gray for partial
 blending. Canvas resizes output to source dimensions if necessary and blends
 through the snapshotted mask to preserve unselected pixels exactly.
+
+PhotoMaker inpainting accepts `photoMakerModelId`, `hasPhotoMakerIdentity: true`,
+optional `referenceCount` (1–4, default 1) and `photoMakerStyleStrength` (0–100).
+Reject simultaneous IP-Adapter fields. After source and mask, request portraits
+via `inputRole: photomaker-reference` / zero-based `referenceIndex`, then request
+`inputRole: photomaker-identity` for the opaque embedding bytes.
+Queue only after every upload and bound all input bytes together.
+
+The SDK's `submitInpaint` accepts `photoMakerIdentityPackageData` and unpacks it
+in memory, preserving the legacy paired/reference fields. Stage all portraits and
+`id_embeds.bin` inside a separate identity directory. Invoke `--photo-maker`,
+`--pm-id-images-dir`, `--pm-id-embed-path` and `--pm-style-strength`; source and
+mask still use `--init-img` and `--mask`. The returned image uses the same result
+lifecycle and Canvas mask blending. No identity extraction occurs.
 
 Model administrators send `models.install` with a client-generated `installId`, explicit category, and HTTPS model-file URL. Optional `companionUrl` is an auxiliary LoRA for `ip_adapter`, mmproj for `llm-chat`, or VAE for `image-generation` and `edition`; it is rejected for `upscaler` and `clip_vision`. mmproj requires a `.gguf` filename; VAE and LoRA accept `.safetensors`, `.ckpt`, or `.gguf`. SHA-256 is no longer checked or accepted by the SDK/manager; legacy protocol `sha256` fields are ignored. The service stages both downloads and commits the primary, companion, and relationship metadata together, so a failed or canceled pair leaves no usable catalog entry. A restart preserves the relationship; deletion removes both files. Listings and install completion expose the companion filename and role, never absolute paths. Image-generation VAE companions are resolved internally and passed to sd-cli with --vae; image LLM text encoders and mmproj use --llm and --llm_vision respectively; LLM-chat mmproj does not alter image invocation. IP-Adapter auxiliary LoRA is consumed when the adapter is explicitly selected (see below). The service emits `models.install.accepted`, `models.install.progress`, `models.install.completed`, or an `error` containing that `installId`.
 
@@ -582,7 +596,8 @@ sizes are rejected. The crop and opaque embeddings have a combined 64 MiB limit.
 The legacy `photoMakerReferenceImageData` / `photoMakerIdentityData` pair is still
 accepted, but cannot be supplied together with a package. Missing capability, model
 or bytes prevents submission. PhotoMaker cannot be combined with IP-Adapter,
-image-to-image input, editing or upscaling in this slice.
+image-to-image input in image.generate, editing or upscaling. PhotoMaker with a
+source and mask is supported separately through image.inpaint as described above.
 
 The service protects both selected models during upload, queueing and execution,
 saves private temporary input files and passes `--photo-maker`,

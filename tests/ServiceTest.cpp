@@ -4,6 +4,7 @@
 #include <kira/service/ServiceProtocol.h>
 #include <kira/service/ModelOptions.h>
 #include <kira/service/ServiceClient.h>
+#include <kira/service/PhotoMakerIdentity.h>
 
 #include <QDir>
 #include <QScopeGuard>
@@ -109,6 +110,7 @@ void ServiceTest::inpaintsThroughSdk()
     QVERIFY(QDir().mkpath(directory.filePath("models/inpaint")));
     QVERIFY(QDir().mkpath(directory.filePath("models/clip_vision")));
     QVERIFY(QDir().mkpath(directory.filePath("models/ip-adapter")));
+    QVERIFY(QDir().mkpath(directory.filePath("models/photomaker")));
     const auto write = [&](const QString& name, const QByteArray& bytes) {
         QFile file(directory.filePath(name));
         return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
@@ -119,6 +121,7 @@ void ServiceTest::inpaintsThroughSdk()
     QVERIFY(write("models/inpaint/inpaint.safetensors", "weights"));
     QVERIFY(write("models/clip_vision/vision.safetensors", "vision weights"));
     QVERIFY(write("models/ip-adapter/adapter.safetensors", "adapter weights"));
+    QVERIFY(write("models/photomaker/photomaker-v2.safetensors", "photomaker weights"));
     const auto root = directory.path().toUtf8();
     QVERIFY(write("sd-cli", "#!/bin/sh\n"
         "if [ \"$1\" = --help ]; then exit 0; fi\n"
@@ -128,6 +131,11 @@ void ServiceTest::inpaintsThroughSdk()
         "if [ \"$previous\" = --init-img ]; then cp \"$argument\" '" + root + "/source.png'; fi\n"
         "if [ \"$previous\" = --mask ]; then cp \"$argument\" '" + root + "/mask.png'; fi\n"
         "if [ \"$previous\" = --ip-adapter-image ]; then cp \"$argument\" '" + root + "/reference.png'; fi\n"
+        "if [ \"$previous\" = --pm-id-embed-path ]; then cp \"$argument\" '" + root + "/embeddings.bin'; fi\n"
+        "if [ \"$previous\" = --pm-id-images-dir ]; then\n"
+        "  cp \"$argument/reference-1.png\" '" + root + "/pm-reference-1.png'\n"
+        "  cp \"$argument/reference-2.png\" '" + root + "/pm-reference-2.png'\n"
+        "  if [ -f \"$argument/input.png\" ]; then exit 2; fi\nfi\n"
         "if [ \"$previous\" = --output ]; then cp '" + root + "/fixture.png' \"$argument\"; fi\n"
         "previous=\"$argument\"\ndone\n"));
     QVERIFY(QFile::setPermissions(directory.filePath("sd-cli"), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
@@ -213,6 +221,38 @@ void ServiceTest::inpaintsThroughSdk()
     QVERIFY(adapterArguments.contains("--ip-adapter-image"));
     QCOMPARE(adapterArguments.value(adapterArguments.indexOf("--ip-adapter-strength") + 1).toDouble(), 0.8);
     request.clipVisionModelId = "missing";
+    QVERIFY(client.submitInpaint(request, png).isEmpty());
+    request.clipVisionModelId.clear();
+    request.ipAdapterModelId.clear();
+    request.ipAdapterImageData.clear();
+    request.ipAdapterStrength.reset();
+    request.photoMakerModelId = "photomaker:photomaker-v2.safetensors";
+    request.photoMakerStyleStrength = 10;
+    request.prompt = "woman img, preserve pose and lighting";
+    KiraService::PhotoMakerIdentityPackage identity;
+    identity.references = {reference, reference};
+    identity.embeddings = QByteArray("\0opaque embeddings\0", 19);
+    request.photoMakerIdentityPackageData = KiraService::packPhotoMakerIdentity(identity);
+    QVERIFY(!request.photoMakerIdentityPackageData.isEmpty());
+    QVERIFY(!client.submitInpaint(request, png).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    const auto photoMakerResult = qvariant_cast<KiraService::ImageJobResult>(finished.takeFirst().at(0));
+    QVERIFY2(photoMakerResult.succeeded, qPrintable(photoMakerResult.message));
+    QCOMPARE(read("source.png"), png);
+    QCOMPARE(read("mask.png"), png);
+    QCOMPARE(read("pm-reference-1.png"), reference);
+    QCOMPARE(read("pm-reference-2.png"), reference);
+    QCOMPARE(read("embeddings.bin"), identity.embeddings);
+    const auto photoMakerArguments = QString::fromUtf8(read("args")).split('\n');
+    QCOMPARE(photoMakerArguments.value(photoMakerArguments.indexOf("--photo-maker") + 1),
+        directory.filePath("models/photomaker/photomaker-v2.safetensors"));
+    QCOMPARE(photoMakerArguments.value(photoMakerArguments.indexOf("--pm-style-strength") + 1), QString("10"));
+    QVERIFY(photoMakerArguments.value(photoMakerArguments.indexOf("--pm-id-images-dir") + 1).endsWith("/identity"));
+    QVERIFY(photoMakerArguments.value(photoMakerArguments.indexOf("--pm-id-embed-path") + 1).endsWith("/identity/id_embeds.bin"));
+    QVERIFY(!photoMakerArguments.contains("--ip-adapter"));
+    request.clipVisionModelId = "clip_vision:vision.safetensors";
+    request.ipAdapterModelId = "ip-adapter:adapter.safetensors";
+    request.ipAdapterImageData = reference;
     QVERIFY(client.submitInpaint(request, png).isEmpty());
 #endif
 }

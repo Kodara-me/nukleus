@@ -14,6 +14,13 @@ default CLIP Vision and IP-Adapter models as well. Canvas uploads the first
 accepted package portrait as an independent third image, with IP-Adapter strength
 0.8. Use a compatible encoder/adapter pair for the installed SDXL inpaint model.
 
+The separate **Inpaint PhotoMaker** button follows the same two-stage workflow,
+using the saved default PhotoMaker model instead of CLIP Vision/IP-Adapter.
+It uploads all package portraits and embeddings, stages them under a private
+`identity/` job directory, and sets PhotoMaker style strength to 10.
+The source image and mask stay outside that directory. This uses existing
+embeddings and does not invoke the extraction Python environment.
+
 Canvas submits source-resolution PNGs, the default Inpaint model's recommended
 Steps/CFG/sampler/scheduler/Clip Skip values and strength 0.99. It composes any
 selected style prefixes locally. Service validates the upload dimensions, stages

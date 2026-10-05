@@ -19,6 +19,14 @@ Resolve the opaque CLIP Vision/IP-Adapter model IDs and pass the reference throu
 `--clip_vision`, `--ip-adapter`, `--ip-adapter-image` and
 `--ip-adapter-strength`. Canvas uses the accepted package's first PNG and 0.8.
 
+PhotoMaker is an alternative inpainting conditioning mode. Use its model ID,
+packaged embeddings and every packaged portrait via SDK `submitInpaint`;
+PhotoMaker and IP-Adapter inputs cannot be combined. Upload source and mask first,
+then the ordered references and opaque embeddings. The Service stages identity
+files separately and passes `--photo-maker`, `--pm-id-images-dir`,
+`--pm-id-embed-path` and `--pm-style-strength`. Canvas's PhotoMaker button uses
+style strength 10 and a class word followed by `img`. Reuse requires no extraction.
+
 The **Face parsing** category (`face-parsing`, stored under
 `models/face-parsing/`) accepts one `.onnx` file and no companions. The Manager
 supports installation, configuration and deletion through the existing atomic
@@ -332,7 +340,8 @@ through `submitGeneration`: select a compatible SDXL `modelId` and
 are required by sd-cli; renaming the local `.bin` is harmless. The service uploads
 both inputs, queues generation and returns a normal image result. Reusing existing
 embeddings does not require the extraction Python environment. PhotoMaker cannot
-be combined with IP-Adapter or image-to-image input in this slice. Canvas generation
+be combined with IP-Adapter or unmasked image-to-image input. Masked PhotoMaker
+inpainting uses the separate image.inpaint operation. Canvas generation
 integration remains separate work. See the [protocol](docs/protocol-v3.md#photomaker-v2-generation).
 See [upstream PhotoMaker documentation](https://github.com/leejet/stable-diffusion.cpp/blob/master/docs/photo_maker.md).
 

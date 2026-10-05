@@ -32,13 +32,22 @@ with explicit generation options. Require dimensions 64–4096 matching the PNG
 headers and a combined upload within maximumImageBytes. Use the shared FIFO,
 model protection and temporary job storage; invoke sd-cli through QProcess with
 --init-img, --mask and --strength (0.99 when absent). Preserve companion/modelType
-handling. Do not apply saved recommendations automatically or accept PhotoMaker
-or styleId conditioning for this operation. Allow existing IP-Adapter fields;
+handling. Do not apply saved recommendations automatically or accept styleId
+conditioning for this operation. Allow either PhotoMaker or existing IP-Adapter fields;
 after source and mask, request the separate ip-adapter upload, with independent
 dimensions. Bound all three uploads together and protect all selected models.
 Use existing --clip_vision/--ip-adapter/--ip-adapter-image/--ip-adapter-strength
 arguments and companion handling. Return a normal image job
 result; Canvas owns mask blending and history. Keep existing categories unchanged.
+
+PhotoMaker inpainting uploads source, mask, then one to four portrait PNGs and
+id_embeds.bin, using existing referenceCount and photomaker upload roles. Resolve
+the opaque PhotoMaker model ID; reject combining PhotoMaker and IP-Adapter.
+Bound all input bytes together. Stage portraits/embeddings under a separate
+private identity directory so source and mask are never identity references.
+Pass --photo-maker, --pm-id-images-dir, --pm-id-embed-path and explicit style
+strength; Canvas uses 10. Preserve all pending/queued/active model protection.
+No extraction/Python subprocess is needed to reuse packaged embeddings.
 
 Face parsing uses category `face-parsing` and models/face-parsing storage.
 Accept one ONNX primary and no companions. Protocol owns strict mask recommendation
@@ -216,7 +225,8 @@ photomaker-reference image followed by photomaker-identity opaque embedding byte
 The matching reference image remains required by sd-cli, even with existing embeddings.
 SDK fields are photoMakerModelId, photoMakerReferenceImageData, photoMakerIdentityData
 and optional photoMakerStyleStrength (integer 0–100, default 20). Do not combine
-with editing, upscaling, image-to-image or IP-Adapter. Protect both models throughout
+with editing, upscaling, unmasked image-to-image or IP-Adapter. Masked inpainting
+uses the separate image.inpaint contract above. Protect both models throughout
 the lifecycle and clean temporary files. Use --photo-maker, --pm-id-embed-path,
 --pm-id-images-dir and --pm-style-strength; report backend conditioning disablement
 as failure. Prompts require a class word followed by img; callers select compatible
