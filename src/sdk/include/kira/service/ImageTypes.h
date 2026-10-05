@@ -7,6 +7,7 @@
 #include <QUrl>
 
 #include <optional>
+#include <kira/service/PromptStyle.h>
 
 namespace KiraService
 {
@@ -35,6 +36,7 @@ struct ModelInfo
     QJsonObject companionFiles;
     QString modelType = QStringLiteral("checkpoint");
     bool explicitContent = false;
+    QList<PromptStyle> styles;
 };
 
 enum class ModelInstallState
@@ -92,6 +94,7 @@ struct ImageGenerationRequest
     QByteArray photoMakerIdentityData;
     QByteArray photoMakerReferenceImageData;
     std::optional<int> photoMakerStyleStrength;
+    QString styleId;
 };
 
 struct ImageUpscaleRequest

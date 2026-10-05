@@ -2,6 +2,8 @@
 #include "AddModelDialog.h"
 #include "ManagerServiceClient.h"
 #include "ModelOptionsWidget.h"
+#include "ModelStylesDialog.h"
+#include "ServiceConnectionDialog.h"
 #include <KiraUi/IconProvider.h>
 #include <KiraUi/Panel.h>
 #include <KiraUi/PrimaryButton.h>
@@ -39,6 +41,8 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
                       : QApplication::windowIcon());
     setFixedSize(1100, 640);
     QSettings settings;
+    m_client->setConnection(settings.value("Service/Host", m_client->host()).toString(),
+                            settings.value("Service/Token", m_client->token()).toString());
     restoreGeometry(settings.value("MainWindow/Geometry").toByteArray());
     setWindowState(Qt::WindowNoState);
     auto *body = new QWidget(this);
@@ -72,6 +76,9 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     m_attach = new QPushButton(tr("Optional files…"), library);
     m_attach->setObjectName("attachModelFiles");
     left->addWidget(m_attach);
+    m_styles = new QPushButton(tr("Styles…"), library);
+    m_styles->setObjectName("modelStyles");
+    left->addWidget(m_styles);
     auto *configuration = new KiraUi::Panel(m_splitter);
     auto *right = new QVBoxLayout(configuration);
     right->addWidget(new QLabel(tr("Model configuration"), configuration));
@@ -111,6 +118,7 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
             });
     connect(m_add, &QPushButton::clicked, this, &ManageModelsWindow::addModel);
     connect(m_attach, &QPushButton::clicked, this, &ManageModelsWindow::attachFiles);
+    connect(m_styles, &QPushButton::clicked, this, &ManageModelsWindow::editStyles);
     connect(m_delete, &QPushButton::clicked, this, &ManageModelsWindow::deleteSelectedModel);
     connect(m_save, &QPushButton::clicked, this, &ManageModelsWindow::saveOptions);
     connect(m_client, &ManagerServiceClient::modelsChanged, this, &ManageModelsWindow::populateModels);
@@ -118,6 +126,9 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
             [this](const QString &state, const QString &message)
             {
                 m_status->setText(message);
+                if (state == "connected") m_connectionPrompted = true;
+                if (state == "connection-error" || state == "authentication-failed" || state == "offline")
+                    showConnectionDialog();
                 if ((!m_client->isAuthenticated() || state == "operation-error") && m_saving)
                 {
                     m_saving = false;
@@ -158,6 +169,21 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     updateActions();
     m_client->connectToService();
 }
+void ManageModelsWindow::showConnectionDialog()
+{
+    if (m_connectionDialog || m_connectionPrompted) return;
+    m_connectionPrompted = true;
+    m_client->setAutomaticReconnect(false);
+    m_connectionDialog = new ServiceConnectionDialog(m_client, this);
+    connect(m_connectionDialog, &QDialog::finished, this, [this](int result) {
+        m_connectionDialog->deleteLater();
+        m_connectionDialog = nullptr;
+        m_client->setAutomaticReconnect(true);
+        if (result == QDialog::Rejected) m_client->connectToService();
+    });
+    m_connectionDialog->open();
+}
+
 void ManageModelsWindow::populateModels()
 {
     QSignalBlocker blocker(m_tree->selectionModel());
@@ -274,6 +300,10 @@ bool ManageModelsWindow::guardChanges(std::function<void()> continuation)
 }
 void ManageModelsWindow::updateActions()
 {
+    bool generationSelected = false;
+    for (const auto &model : m_client->models("image-generation"))
+        if (model.id == m_selectedId) generationSelected = true;
+    m_styles->setEnabled(m_client->isAuthenticated() && m_client->modelListAvailable() && !m_saving && generationSelected);
     m_tree->setEnabled(!m_saving);
     m_options->setEnabled(m_client->isAuthenticated() && !m_saving);
     m_add->setEnabled(m_client->isAuthenticated() && !m_saving);
@@ -324,6 +354,19 @@ void ManageModelsWindow::attachFiles()
             selectModel(id);
         });
         dialog.exec();
+    };
+    if (guardChanges(open)) open();
+}
+
+void ManageModelsWindow::editStyles()
+{
+    const auto open = [this] {
+        for (const auto &model : m_client->models("image-generation")) {
+            if (model.id != m_selectedId) continue;
+            ModelStylesDialog dialog(m_client, model.id, model.styles, this);
+            dialog.exec();
+            break;
+        }
     };
     if (guardChanges(open)) open();
 }

@@ -9,6 +9,7 @@
 #include <QTcpSocket>
 #include <QFile>
 #include <QFileInfo>
+#include <QHostAddress>
 #include <memory>
 
 #include <algorithm>
@@ -58,32 +59,61 @@ ManagerServiceClient::ManagerServiceClient(QObject *parent, quint16 localPort)
     });
     m_retryTimer->setSingleShot(true);
     m_retryTimer->setInterval(5000);
+    m_connectionTimeout.setSingleShot(true);
+    m_connectionTimeout.setInterval(10000);
+    connect(&m_connectionTimeout, &QTimer::timeout, this, [this] {
+        m_socket->abort();
+        emit serviceStateChanged("connection-error", tr("Service connection timed out"));
+        if (m_automaticReconnect) m_retryTimer->start();
+    });
     connect(m_socket, &QWebSocket::connected, this, &ManagerServiceClient::authenticate);
     connect(m_socket, &QWebSocket::textMessageReceived, this, &ManagerServiceClient::handleTextMessage);
     connect(m_socket, &QWebSocket::disconnected, this, [this] {
+        m_connectionTimeout.stop();
         m_authenticated = false;
         m_modelListAvailable = false;
         m_generationModels.clear(); m_editionModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_ipAdapterModels.clear(); m_clipVisionModels.clear(); m_photoMakerModels.clear();
         failActiveInstalls(tr("Service connection was closed"));
         emit modelsChanged();
-        emit serviceStateChanged(QStringLiteral("offline"), tr("Service connection was closed"));
-        if (m_automaticReconnect) m_retryTimer->start();
+        if (!m_openingConnection) {
+            emit serviceStateChanged(QStringLiteral("offline"), tr("Service connection was closed"));
+            if (m_automaticReconnect) m_retryTimer->start();
+        }
     });
     connect(m_socket, &QWebSocket::errorOccurred, this, [this](QAbstractSocket::SocketError) {
-        emit serviceStateChanged(QStringLiteral("connection-error"), tr("Could not connect to the local Kira Service: %1").arg(m_socket->errorString()));
+        m_connectionTimeout.stop();
+        emit serviceStateChanged(QStringLiteral("connection-error"), tr("Could not connect to Kira Service: %1").arg(m_socket->errorString()));
+        if (m_automaticReconnect) m_retryTimer->start();
     });
     connect(m_retryTimer, &QTimer::timeout, this, &ManagerServiceClient::connectToService);
 }
 
 void ManagerServiceClient::connectToService()
 {
+    m_retryTimer->stop();
     m_authenticated = false;
+    m_openingConnection = true;
     if (m_socket->state() != QAbstractSocket::UnconnectedState) m_socket->abort();
-    emit serviceStateChanged(QStringLiteral("connecting"), tr("Connecting to the local Kira Service…"));
-    m_socket->open(QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(m_localPort)));
+    m_openingConnection = false;
+    emit serviceStateChanged(QStringLiteral("connecting"), tr("Connecting to Kira Service…"));
+    QUrl endpoint;
+    endpoint.setScheme("ws"); endpoint.setHost(m_host); endpoint.setPort(m_localPort);
+    m_connectionTimeout.start();
+    m_socket->open(endpoint);
 }
 
-void ManagerServiceClient::setAutomaticReconnect(bool enabled) { m_automaticReconnect = enabled; }
+bool ManagerServiceClient::setConnection(const QString &host, const QString &token)
+{
+    const QString normalized = host.trimmed();
+    QHostAddress address;
+    if (normalized != "localhost" && (!address.setAddress(normalized) || address.protocol() != QAbstractSocket::IPv4Protocol)) return false;
+    m_host = normalized;
+    m_token = token;
+    return true;
+}
+QString ManagerServiceClient::host() const { return m_host; }
+QString ManagerServiceClient::token() const { return m_token; }
+void ManagerServiceClient::setAutomaticReconnect(bool enabled) { m_automaticReconnect = enabled; if (!enabled) m_retryTimer->stop(); }
 bool ManagerServiceClient::isAuthenticated() const { return m_authenticated; }
 bool ManagerServiceClient::modelListAvailable() const { return m_modelListAvailable; }
 QList<ManagedModelInfo> ManagerServiceClient::models(const QString &category) const
@@ -130,6 +160,15 @@ QString ManagerServiceClient::installModel(const QString &category, const QUrl &
     return installId;
 }
 
+bool ManagerServiceClient::configureModelStyles(const QString &id, const QList<KiraService::PromptStyle> &styles)
+{
+    if (!m_authenticated || id.isEmpty() || !KiraService::Protocol::validatePromptStyles(styles)) return false;
+    const QJsonObject message{{"type", "models.styles.configure"}, {"id", id},
+        {"styles", KiraService::Protocol::promptStylesToJson(styles)}};
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
+    return true;
+}
+
 bool ManagerServiceClient::configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent)
 {
     if (!m_authenticated || id.isEmpty()) return false;
@@ -157,14 +196,14 @@ bool ManagerServiceClient::deleteModel(const QString &id)
 void ManagerServiceClient::authenticate()
 {
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument({{QStringLiteral("type"), QStringLiteral("authenticate")},
-        {QStringLiteral("version"), KiraService::Protocol::Version}, {QStringLiteral("token"), QString()}}).toJson(QJsonDocument::Compact)));
+        {QStringLiteral("version"), KiraService::Protocol::Version}, {QStringLiteral("token"), m_token}}).toJson(QJsonDocument::Compact)));
 }
 
 void ManagerServiceClient::handleTextMessage(const QString &message)
 {
     const QJsonDocument document = QJsonDocument::fromJson(message.toUtf8()); if (!document.isObject()) return;
     const QJsonObject object = document.object(); const QString type = object.value(QStringLiteral("type")).toString();
-    if (type == QStringLiteral("authenticated")) { m_authenticated = true; requestModels(); emit serviceStateChanged(QStringLiteral("connected"), tr("Connected to service")); return; }
+    if (type == QStringLiteral("authenticated")) { m_connectionTimeout.stop(); m_authenticated = true; requestModels(); emit serviceStateChanged(QStringLiteral("connected"), tr("Connected to service")); return; }
     if (type == QStringLiteral("models.list.result")) {
         m_generationModels.clear(); m_editionModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_ipAdapterModels.clear(); m_clipVisionModels.clear(); m_photoMakerModels.clear();
         for (const QJsonValue &categoryValue : object.value(QStringLiteral("categories")).toArray()) {
@@ -184,7 +223,8 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
                     model.value(QStringLiteral("fileName")).toString(), model.value(QStringLiteral("bytes")).toVariant().toLongLong(),
                     model.value(QStringLiteral("companionFileName")).toString(),
                                  model.value(QStringLiteral("companionRole")).toString(), model.value("recommendedOptions").toObject(),
-                    model.value("companionFiles").toObject(), model.value("modelType").toString("checkpoint"), model.value("explicitContent").toBool(false)});
+                    model.value("companionFiles").toObject(), model.value("modelType").toString("checkpoint"), model.value("explicitContent").toBool(false),
+                    KiraService::Protocol::promptStylesFromJson(model.value("styles")).value_or(QList<KiraService::PromptStyle>{})});
             }
         }
         m_modelListAvailable = true; emit modelsChanged(); return;
@@ -207,6 +247,12 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
         requestModels();
         return;
     }
+    if (type == "models.styles.configure.completed") {
+        const auto styles = KiraService::Protocol::promptStylesFromJson(object.value("styles"));
+        if (styles) emit modelStylesConfigured(object.value("id").toString(), *styles);
+        return;
+    }
+    if (type == "models.styles.changed") { requestModels(); return; }
     if (type == "models.companion.delete.completed") {
         emit companionDeleted(object.value("id").toString(), object.value("role").toString());
         requestModels(); return;

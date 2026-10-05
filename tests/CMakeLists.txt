@@ -58,6 +58,10 @@ add_executable(kira-service-manager-ui-test
     ../src/manager/AddModelDialog.cpp
     ../src/manager/ManageModelsWindow.cpp
     ../src/manager/ManageModelsWindow.h
+    ../src/manager/ModelStylesDialog.cpp
+    ../src/manager/ModelStylesDialog.h
+    ../src/manager/ServiceConnectionDialog.cpp
+    ../src/manager/ServiceConnectionDialog.h
     ../src/manager/ManagerServiceClient.cpp
     ../src/manager/ManagerServiceClient.h
 )

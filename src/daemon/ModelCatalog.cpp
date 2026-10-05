@@ -180,10 +180,16 @@ QList<ModelInfo> ModelCatalog::models(ModelCategory category) const
         if (!valid || (type != "checkpoint" && type != "diffusion")) continue;
         // Retain existing opaque adapter IDs independently of the canonical category name.
         const QString idCategory = category == ModelCategory::IpAdapter ? QStringLiteral("ip-adapter") : categoryName(category);
+        QList<KiraService::PromptStyle> styles;
+        if (category == ModelCategory::ImageGeneration) {
+            styles = entry.toObject().contains("styles")
+                ? KiraService::Protocol::promptStylesFromJson(entry.toObject().value("styles")).value_or(QList<KiraService::PromptStyle>{})
+                : KiraService::Protocol::starterPromptStyles();
+        }
         models.append({idCategory + QLatin1Char(':') + fileName,
                        fileInfo.completeBaseName(), fileName, fileInfo.size(), fileInfo.absoluteFilePath(),
                        companionFileName, companionFileName.isEmpty() ? QString() : companionRole(category),
-                       entry.toObject().value("recommendedOptions").toObject(), files, type, entry.toObject().value("explicitContent").toBool(false)});
+                       entry.toObject().value("recommendedOptions").toObject(), files, type, entry.toObject().value("explicitContent").toBool(false), styles});
     }
     std::sort(models.begin(), models.end(), [](const ModelInfo &left, const ModelInfo &right) {
         return QString::compare(left.fileName, right.fileName, Qt::CaseInsensitive) < 0;
@@ -339,6 +345,22 @@ bool ModelCatalog::configure(const QString &id, const QJsonObject &options, QStr
     if (explicitContent) entry.insert("explicitContent", *explicitContent);
     metadata->insert(info->fileName, entry);
     if (!writeMetadata(category, *metadata)) { if (error) *error = tr("Could not save model metadata"); return false; }
+    return true;
+}
+
+bool ModelCatalog::configureStyles(const QString &id, const QList<KiraService::PromptStyle> &styles, QString *error)
+{
+    const auto fail = [error](const QString &message) { if (error) *error = message; return false; };
+    const auto info = model(ModelCategory::ImageGeneration, id);
+    if (!info) return fail(tr("Styles require an installed image-generation model"));
+    if (!KiraService::Protocol::validatePromptStyles(styles, error)) return false;
+    auto metadata = readMetadata(ModelCategory::ImageGeneration);
+    if (!metadata) return fail(tr("Could not read model metadata"));
+    auto entry = metadata->value(info->fileName).toObject();
+    if (!info->companionFileName.isEmpty()) entry.insert("companionFileName", info->companionFileName);
+    entry.insert("styles", KiraService::Protocol::promptStylesToJson(styles));
+    metadata->insert(info->fileName, entry);
+    if (!writeMetadata(ModelCategory::ImageGeneration, *metadata)) return fail(tr("Could not save model metadata"));
     return true;
 }
 

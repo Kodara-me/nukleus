@@ -11,7 +11,7 @@
 
 - Kira Service is a C++20 Qt 6 backend project. Keep the daemon and native manager separate executables, and keep reusable image transport code in the installable SDK under `src/sdk/`.
 - The daemon owns model storage, a single active HTTPS model installation, recommended model options, temporary jobs, and a FIFO execution queue for `sd-cli` image jobs. It never exposes service paths over WebSocket.
-- The manager is local-only: it connects to `127.0.0.1:9384`, supports GUI and `list`/`add`/`delete` CLI modes, and is installed into the invoking user's `~/.local/bin`.
+- The manager supports GUI and `list`/`add`/`delete` CLI modes and is installed into the invoking user's `~/.local/bin`. CLI remains local at `127.0.0.1:9384`. GUI uses the last authenticated Service/Host and Service/Token from QSettings, defaulting to loopback with no token. On startup connection/authentication failure or timeout, show a shared connection dialog accepting IPv4 or localhost and a masked key, building ws:// on fixed port 9384. Persist only after authentication; failure retains the draft and Cancel preserves saved settings. Do not repeatedly prompt during background reconnects. LAN connections require a configured listener/token and a trusted network. Browse remains a local-only import workflow.
 - Sources are organized under `src/daemon/`, `src/manager/`, and `src/sdk/`; the daemon and manager executable targets remain declared by `src/CMakeLists.txt`. Export `KiraService::Protocol` and `KiraService::SDK` from the SDK.
 - The daemon always listens on `127.0.0.1`; a configured LAN IPv4 address adds a second listener on the same port. Loopback authentication is tokenless; LAN authentication remains token-protected.
 - Preserve protocol v3 unless an explicit compatibility slice changes it. Canvas and other clients select opaque model IDs and submit work; Canvas may expose installation only for explicitly curated packages through the SDK, while the local manager remains the general model-management UI.
@@ -30,7 +30,7 @@
   Keep daemon and SDK independent of the visual framework.
 - Use native OS title bars and window/dialog buttons; keep the Kira content theme.
 - Apply KiraUi::Theme only in GUI mode. Use the shared MainWindow/Dialog, panels,
-  tree and controls. Preserve the local CLI and fixed loopback connection.
+  tree and controls. Preserve the local CLI; GUI may connect to an authenticated LAN service.
 - Use a landscape model tree/details splitter with a fixed, non-resizable window
   content size of 1100×640 logical pixels, excluding the native title bar. Restore
   saved position but ignore previous sizes and maximized states. Persist
@@ -171,6 +171,20 @@ the lifecycle and clean temporary files. Use --photo-maker, --pm-id-embed-path,
 --pm-id-images-dir and --pm-style-strength; report backend conditioning disablement
 as failure. Prompts require a class word followed by img; callers select compatible
 SDXL/PhotoMaker V2 weights. Reuse needs no Python extraction runtime.
+
+## Per-model prompt styles
+
+Generation models expose ordered `PromptStyle` lists through the Protocol/SDK.
+Store styles atomically beside existing metadata, preserving all other fields.
+Missing styles expose service-owned Photographic/Cinematic/Illustration starters
+without writing; a saved empty list suppresses starters. Manager **Styles…**
+edits a UUID-backed draft and waits for `models.styles.configure.completed`
+before closing; Cancel discards it. Broadcast `models.styles.changed` after Save
+so clients refresh. Only image.generate accepts a nonempty styleId. Validate the
+original nonblank prompt first, then trim/join prefixes and user text with `, `
+and validate conditioning against those composed prompts. Snapshot composition
+before uploads/queueing; never apply it again at execution. None preserves
+existing behavior. Keep v3 additive and deploy service before updated clients.
 
 ## PhotoMaker identity package contract
 

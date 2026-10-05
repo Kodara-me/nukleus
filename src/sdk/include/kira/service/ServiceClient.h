@@ -31,6 +31,7 @@ public:
     QString installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl = {}, const QJsonObject &recommendedOptions = {}, const QJsonObject &companionUrls = {},
         const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {}, std::optional<bool> explicitContent = {});
     bool configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent = {});
+    bool configureModelStyles(const QString &id, const QList<PromptStyle> &styles);
     bool cancelInstall(const QString &installId);
     bool deleteModel(const QString &id);
     bool deleteCompanion(const QString& id, const QString& role);
@@ -44,6 +45,7 @@ signals:
     void modelsChanged();
     void installsChanged();
     void modelConfigured(const QString &id, const QJsonObject &options);
+    void modelStylesConfigured(const QString &id, const QList<KiraService::PromptStyle> &styles);
     void modelDeleted(const QString &id);
     void companionDeleted(const QString& id, const QString& role);
     void modelOperationFailed(const QString &id, const QString &message);

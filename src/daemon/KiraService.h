@@ -55,6 +55,7 @@ private:
     void listModels(QWebSocket *socket) const;
     void installModel(QWebSocket *socket, const QJsonObject &message);
     void configureModel(QWebSocket *socket, const QJsonObject &message);
+    void configureModelStyles(QWebSocket *socket, const QJsonObject &message);
     void cancelInstall(QWebSocket *socket, const QJsonObject &message);
     void deleteModel(QWebSocket *socket, const QJsonObject &message);
     void deleteCompanion(QWebSocket* socket, const QJsonObject& message);

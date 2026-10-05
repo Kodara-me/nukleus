@@ -1,5 +1,7 @@
 #include "../src/manager/AddModelDialog.h"
 #include "../src/manager/ManageModelsWindow.h"
+#include "../src/manager/ModelStylesDialog.h"
+#include "../src/manager/ServiceConnectionDialog.h"
 #include "../src/manager/ManagerServiceClient.h"
 #include "../src/manager/ModelOptionsWidget.h"
 #include <KiraUi/Theme.h>
@@ -10,6 +12,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QPlainTextEdit>
 #include <QFileDialog>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -22,8 +26,10 @@
 #include <QTemporaryDir>
 #include <QWebSocket>
 #include <QWebSocketServer>
+#include <QUuid>
 #include <QtTest>
 #include <kira/service/ModelOptions.h>
+#include <algorithm>
 
 class ManagerUiTest final : public QObject
 {
@@ -33,6 +39,7 @@ class ManagerUiTest final : public QObject
     QWebSocket *m_peer = nullptr;
     QList<QJsonObject> m_messages;
     QJsonObject m_saved;
+    QString m_requiredToken;
     void send(const QJsonObject &object)
     {
         m_peer->sendTextMessage(QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact)));
@@ -52,6 +59,114 @@ class ManagerUiTest final : public QObject
                                                      {"recommendedOptions", m_saved}}}}}}}});
     }
   private slots:
+    void savesConnectionOnlyAfterAuthentication()
+    {
+        m_requiredToken = "test-key";
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        ServiceConnectionDialog dialog(&client);
+        dialog.show();
+        auto *host = dialog.findChild<QLineEdit *>("serviceHostInput");
+        auto *token = dialog.findChild<QLineEdit *>("serviceTokenInput");
+        auto *button = dialog.findChild<QPushButton *>("connectService");
+        QCOMPARE(token->echoMode(), QLineEdit::Password);
+        host->setText("ws://127.0.0.1:9384"); button->click();
+        QVERIFY(m_messages.isEmpty()); QVERIFY(!QSettings().contains("Service/Host"));
+        host->setText("127.0.0.2"); token->setText("failed-key"); button->click();
+        QTRY_VERIFY(button->isEnabled());
+        QVERIFY(dialog.isVisible()); QVERIFY(!QSettings().contains("Service/Token"));
+        host->setText("127.0.0.1"); button->click();
+        QTRY_VERIFY(!m_messages.isEmpty());
+        QTRY_VERIFY(button->isEnabled());
+        QVERIFY(dialog.isVisible()); QVERIFY(!QSettings().contains("Service/Token"));
+        host->setText(" localhost "); token->setText("test-key"); button->click();
+        QVERIFY(!QSettings().contains("Service/Token"));
+        QTRY_VERIFY(client.isAuthenticated());
+        QTRY_COMPARE(dialog.result(), int(QDialog::Accepted));
+        QCOMPARE(QSettings().value("Service/Host").toString(), QString("localhost"));
+        QCOMPARE(QSettings().value("Service/Token").toString(), QString("test-key"));
+        ManagerServiceClient restored(nullptr, m_server.serverPort());
+        ManageModelsWindow reopened(nullptr, &restored);
+        QCOMPARE(restored.host(), QString("localhost"));
+        QCOMPARE(restored.token(), QString("test-key"));
+        QTRY_VERIFY(restored.isAuthenticated());
+        reopened.close();
+        const auto auth = std::find_if(m_messages.cbegin(), m_messages.cend(), [](const auto &message) {
+            return message.value("type") == "authenticate" && message.value("token") == "test-key";
+        });
+        QVERIFY(auth != m_messages.cend());
+        QCOMPARE(auth->value("token").toString(), QString("test-key"));
+        ServiceConnectionDialog canceled(&client);
+        canceled.show();
+        canceled.findChild<QLineEdit *>("serviceHostInput")->setText("192.168.1.1");
+        canceled.findChild<QLineEdit *>("serviceTokenInput")->setText("discard");
+        canceled.findChild<QPushButton *>("cancelConnection")->click();
+        QCOMPARE(client.host(), QString("localhost"));
+        QCOMPARE(QSettings().value("Service/Token").toString(), QString("test-key"));
+    }
+    void promptsWhenStartupCannotConnect()
+    {
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        QVERIFY(client.setConnection("127.0.0.2", {}));
+        ManageModelsWindow window(nullptr, &client);
+        window.show();
+        QTRY_VERIFY(window.findChild<ServiceConnectionDialog *>());
+        auto *dialog = window.findChild<ServiceConnectionDialog *>();
+        dialog->findChild<QLineEdit *>("serviceHostInput")->setText("127.0.0.1");
+        dialog->findChild<QPushButton *>("connectService")->click();
+        QTRY_VERIFY(client.modelListAvailable());
+        QTRY_VERIFY(!window.findChild<ServiceConnectionDialog *>());
+        QCOMPARE(QSettings().value("Service/Host").toString(), QString("127.0.0.1"));
+        window.close();
+    }
+    void editsStylesAfterAcknowledgment()
+    {
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        client.connectToService();
+        QTRY_VERIFY(client.modelListAvailable());
+        const auto styles = KiraService::Protocol::starterPromptStyles();
+        ModelStylesDialog dialog(&client, "image-generation:test.gguf", styles);
+        dialog.show();
+        auto *list = dialog.findChild<QListWidget *>("stylesList");
+        auto *name = dialog.findChild<QLineEdit *>("styleName");
+        auto *positive = dialog.findChild<QPlainTextEdit *>("positivePrefix");
+        auto *save = dialog.findChild<QPushButton *>("saveStyles");
+        QCOMPARE(list->count(), 3);
+        name->setText("Renamed");
+        positive->setPlainText("line one\nline two");
+        dialog.findChild<QPushButton *>("addStyle")->click();
+        QCOMPARE(list->count(), 4);
+        QVERIFY(!save->isEnabled());
+        name->setText("Added"); positive->setPlainText("prefix");
+        list->setCurrentRow(2);
+        dialog.findChild<QPushButton *>("removeStyle")->click();
+        QCOMPARE(list->count(), 3);
+        save->click();
+        QTRY_VERIFY(m_messages.last().value("type") == "models.styles.configure");
+        const auto sent = m_messages.last().value("styles").toArray();
+        QCOMPARE(sent.first().toObject().value("id").toString(), styles.first().id);
+        QCOMPARE(sent.first().toObject().value("name").toString(), QString("Renamed"));
+        QCOMPARE(sent.first().toObject().value("positivePrefix").toString(), QString("line one\nline two"));
+        QCOMPARE(sent.last().toObject().value("name").toString(), QString("Added"));
+        QVERIFY(!QUuid(sent.last().toObject().value("id").toString()).isNull());
+        QVERIFY(dialog.isVisible()); QVERIFY(!save->isEnabled());
+        send({{"type", "error"}, {"id", "image-generation:test.gguf"}, {"message", "Retry"}});
+        QTRY_VERIFY(save->isEnabled());
+        list->setCurrentRow(0);
+        QCOMPARE(name->text(), QString("Renamed"));
+        save->click();
+        send({{"type", "models.styles.configure.completed"}, {"id", "image-generation:test.gguf"}, {"styles", sent}});
+        QTRY_VERIFY(!dialog.isVisible());
+        QCOMPARE(dialog.result(), int(QDialog::Accepted));
+        ModelStylesDialog canceled(&client, "image-generation:test.gguf", styles);
+        canceled.show();
+        const auto count = m_messages.size();
+        canceled.findChild<QLineEdit *>("styleName")->setText("Discard");
+        canceled.findChild<QPushButton *>("cancelStyles")->click();
+        QCOMPARE(m_messages.size(), count);
+        QCOMPARE(canceled.result(), int(QDialog::Rejected));
+    }
     void initTestCase()
     {
         QCoreApplication::setOrganizationName("KiraManagerTests");
@@ -70,8 +185,12 @@ class ManagerUiTest final : public QObject
                             {
                                 const auto object = QJsonDocument::fromJson(text.toUtf8()).object();
                                 m_messages.append(object);
-                                if (object.value("type") == "authenticate")
-                                    send({{"type", "authenticated"}});
+                                if (object.value("type") == "authenticate") {
+                                    if (!m_requiredToken.isEmpty() && object.value("token") != m_requiredToken) {
+                                        send({{"type", "error"}, {"code", "authentication-failed"}, {"message", "Invalid key"}});
+                                        m_peer->close();
+                                    } else send({{"type", "authenticated"}});
+                                }
                                 else if (object.value("type") == "models.list")
                                     listModels();
                                 else if (object.value("type") == "models.install")
@@ -86,6 +205,7 @@ class ManagerUiTest final : public QObject
     void init()
     {
         m_messages.clear();
+        m_requiredToken.clear();
         m_saved = KiraService::Protocol::defaultModelOptions("image-generation");
         QSettings().clear();
     }

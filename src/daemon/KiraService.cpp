@@ -9,6 +9,7 @@
 #include <QDebug>
 #include <QDir>
 #include <cmath>
+#include <algorithm>
 #include <limits>
 #include <kira/service/ModelOptions.h>
 #include <QFile>
@@ -288,6 +289,7 @@ void KiraServiceDaemon::processTextMessage(QWebSocket *socket, const QString &me
     else if (type == QStringLiteral("models.list")) listModels(socket);
     else if (type == QStringLiteral("models.install")) installModel(socket, object);
     else if (type == QStringLiteral("models.configure")) configureModel(socket, object);
+    else if (type == QStringLiteral("models.styles.configure")) configureModelStyles(socket, object);
     else if (type == QStringLiteral("models.install.cancel")) cancelInstall(socket, object);
     else if (type == QStringLiteral("models.companion.delete")) deleteCompanion(socket, object);
     else if (type == QStringLiteral("models.delete")) deleteModel(socket, object);
@@ -301,7 +303,7 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     const bool edit = operationName == QStringLiteral("image.edit");
     const bool upscale = operationName == QStringLiteral("image.upscale");
     const bool identityExport = operationName == QStringLiteral("photomaker.export");
-    const QJsonObject options = message.value(QStringLiteral("options")).toObject();
+    QJsonObject options = message.value(QStringLiteral("options")).toObject();
     const QString jobId = message.value(QStringLiteral("jobId")).toString();
     bool duplicateId = jobForId(jobId) != nullptr;
     for (const auto &pending : m_pendingUploads) {
@@ -345,6 +347,22 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         || (edit && options.value("prompt").toString().trimmed().isEmpty()))) {
         sendError(socket, QStringLiteral("invalid-request"), tr("Invalid generation options"), jobId);
         return;
+    }
+    if (options.contains("styleId") && (!options.value("styleId").isString()
+        || (!generate && !options.value("styleId").toString().isEmpty()))) {
+        sendError(socket, "invalid-request", tr("Styles are only supported for image generation"), jobId);
+        return;
+    }
+    const QString styleId = options.value("styleId").toString();
+    if (!styleId.isEmpty()) {
+        const auto style = std::find_if(model->styles.cbegin(), model->styles.cend(),
+            [&styleId](const KiraService::PromptStyle &candidate) { return candidate.id == styleId; });
+        if (style == model->styles.cend()) {
+            sendError(socket, "style-unavailable", tr("The requested style is unavailable for this model"), jobId);
+            return;
+        }
+        options.insert("prompt", KiraService::Protocol::composeStyledPrompt(style->positivePrefix, options.value("prompt").toString()));
+        options.insert("negativePrompt", KiraService::Protocol::composeStyledPrompt(style->negativePrefix, options.value("negativePrompt").toString()));
     }
     const bool hasAdapterOptions = options.contains("clipVisionModelId") || options.contains("ipAdapterModelId")
         || options.contains("hasIpAdapterImage") || options.contains("ip_adapter_strength");
@@ -457,6 +475,8 @@ void KiraServiceDaemon::listModels(QWebSocket *socket) const
             QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
                                     {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
             modelObject.insert("explicitContent", model.explicitContent);
+            if (category == ModelCategory::ImageGeneration)
+                modelObject.insert("styles", KiraService::Protocol::promptStylesToJson(model.styles));
             if (!model.recommendedOptions.isEmpty()) modelObject.insert("recommendedOptions", model.recommendedOptions);
             modelObject.insert("companionFiles", model.companionFiles);
             modelObject.insert("modelType", model.modelType);
@@ -562,6 +582,21 @@ void KiraServiceDaemon::configureModel(QWebSocket *socket, const QJsonObject &me
         value.insert("companionRole", model.companionRole);
     }
     send(socket, {{"type", "models.configure.completed"}, {"id", id}, {"model", value}});
+}
+
+void KiraServiceDaemon::configureModelStyles(QWebSocket *socket, const QJsonObject &message)
+{
+    const QString id = message.value("id").toString();
+    QString error;
+    const auto styles = KiraService::Protocol::promptStylesFromJson(message.value("styles"), &error);
+    if (!styles || !m_models->configureStyles(id, *styles, &error)) {
+        send(socket, {{"type", "error"}, {"code", "invalid-model-styles"}, {"id", id}, {"message", error}});
+        return;
+    }
+    send(socket, {{"type", "models.styles.configure.completed"}, {"id", id},
+        {"styles", KiraService::Protocol::promptStylesToJson(*styles)}});
+    for (auto it = m_authenticatedClients.cbegin(); it != m_authenticatedClients.cend(); ++it)
+        if (it.value()) send(it.key(), {{"type", "models.styles.changed"}, {"id", id}});
 }
 
 void KiraServiceDaemon::cancelInstall(QWebSocket *socket, const QJsonObject &message)

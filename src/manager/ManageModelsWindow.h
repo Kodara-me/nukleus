@@ -9,6 +9,7 @@ class QPushButton;
 class QStandardItemModel;
 class QSplitter;
 class QCloseEvent;
+class ServiceConnectionDialog;
 namespace KiraUi
 {
 class TreeView;
@@ -31,9 +32,13 @@ class ManageModelsWindow final : public KiraUi::MainWindow
     void updateActions();
     void addModel();
     void attachFiles();
+    void editStyles();
     void deleteSelectedModel();
     void saveOptions();
     bool guardChanges(std::function<void()> continuation);
+    void showConnectionDialog();
+    ServiceConnectionDialog *m_connectionDialog = nullptr;
+    bool m_connectionPrompted = false;
     ManagerServiceClient *m_client;
     QLabel *m_status;
     QLabel *m_details;
@@ -43,6 +48,7 @@ class ManageModelsWindow final : public KiraUi::MainWindow
     ModelOptionsWidget *m_options;
     QPushButton *m_add;
     QPushButton *m_attach;
+    QPushButton *m_styles;
     QPushButton *m_delete;
     QPushButton *m_save;
     QString m_selectedId;

@@ -174,6 +174,14 @@ QString ServiceClient::installModel(ModelCategory category, const QUrl &url, con
     return installId;
 }
 
+bool ServiceClient::configureModelStyles(const QString &id, const QList<PromptStyle> &styles)
+{
+    if (!m_authenticated || id.isEmpty() || !Protocol::validatePromptStyles(styles)) return false;
+    const QJsonObject message{{"type", "models.styles.configure"}, {"id", id}, {"styles", Protocol::promptStylesToJson(styles)}};
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
+    return true;
+}
+
 bool ServiceClient::configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent)
 {
     if (!m_authenticated || id.isEmpty()) return false;
@@ -222,6 +230,7 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
                               {QStringLiteral("baseImageStrength"), request.baseImageStrength},
                               {QStringLiteral("modelId"), request.modelId}};
     addIpAdapterOptions(options, request);
+    if (!request.styleId.isEmpty()) options.insert("styleId", request.styleId);
     const bool photoMaker = !request.photoMakerModelId.isEmpty() || !request.photoMakerIdentityData.isEmpty()
         || !request.photoMakerReferenceImageData.isEmpty() || request.photoMakerStyleStrength.has_value();
     if (photoMaker) {
@@ -242,6 +251,7 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
 
 QString ServiceClient::submitEdit(const ImageGenerationRequest &request)
 {
+    if (!request.styleId.isEmpty()) return {};
     if (!request.photoMakerIdentityPackageData.isEmpty()) return {};
     if (!request.photoMakerModelId.isEmpty() || !request.photoMakerIdentityData.isEmpty()
         || !request.photoMakerReferenceImageData.isEmpty() || request.photoMakerStyleStrength.has_value()) return {};
@@ -336,7 +346,8 @@ void ServiceClient::handleTextMessage(const QString &message)
                                  category,
                                  model.value(QStringLiteral("companionFileName")).toString(),
                                  model.value(QStringLiteral("companionRole")).toString(), model.value("recommendedOptions").toObject(),
-                    model.value("companionFiles").toObject(), model.value("modelType").toString("checkpoint"), model.value("explicitContent").toBool(false)});
+                    model.value("companionFiles").toObject(), model.value("modelType").toString("checkpoint"), model.value("explicitContent").toBool(false),
+                    Protocol::promptStylesFromJson(model.value("styles")).value_or(QList<PromptStyle>{})});
             }
         }
         m_modelListAvailable = true;
@@ -380,6 +391,12 @@ void ServiceClient::handleTextMessage(const QString &message)
         requestModels();
         return;
     }
+    if (type == "models.styles.configure.completed") {
+        const auto styles = Protocol::promptStylesFromJson(object.value("styles"));
+        if (styles) emit modelStylesConfigured(object.value("id").toString(), *styles);
+        return;
+    }
+    if (type == "models.styles.changed") { requestModels(); return; }
     if (type == "models.companion.delete.completed") {
         emit companionDeleted(object.value("id").toString(), object.value("role").toString());
         requestModels(); return;

@@ -38,7 +38,7 @@ headers with `cmake --install build --prefix "$HOME/.local"`, then consume it
 with `find_package(KiraServiceSdk CONFIG REQUIRED)`. The SDK supports image
 generation, fixed 2× upscaling, model discovery, progress, and binary results.
 
-`kira-service` is the daemon. `kira-service-manager --gui` opens the local
+`kira-service` is the daemon. `kira-service-manager --gui` opens the
 administrator UI with the shared dark Kira theme: a category/model tree on the
 left and editable recommended options on the right. Its window content has a fixed,
 non-resizable size of 1100 × 640 logical pixels, excluding the native title bar.
@@ -47,6 +47,21 @@ Select a model or its companion to edit recommendations, then Save to persist
 them on the service. The shared add/edit form includes **Explicit content (NSFW)**,
 unchecked by default; the service persists the flag and returns it with model listings.
 Unsaved edits prompt before leaving the model.
+
+The GUI tries its last successful service connection at startup, defaulting to
+`127.0.0.1:9384`. If connection or authentication fails, enter the server's IPv4
+address (or `localhost`) and key in the connection dialog. Enter only the host;
+the Manager builds `ws://<host>:9384`. A successful authentication saves the
+connection for next launch; failed attempts and Cancel do not change saved settings.
+Remote servers must have a reachable LAN listener and token configured; use a
+trusted LAN or VPN. Browse imports remain local-only. CLI commands still use loopback.
+
+For an image-generation model, **Styles…** edits its ordered list of named
+positive/negative prompt prefixes. Save waits for the service acknowledgment;
+Cancel discards the draft. Models without saved styles expose Photographic,
+Cinematic and Illustration starters; saving an empty list removes them.
+Canvas selects a style, and the service applies its prefixes once for generation,
+including PhotoMaker and IP-Adapter. Editing and upscaling do not use styles.
 
 Add model opens a landscape modal with HTTPS model/companion URLs on the left
 and category-specific recommendations on the right, without scrolling.

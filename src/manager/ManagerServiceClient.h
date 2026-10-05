@@ -9,6 +9,7 @@
 #include <QUrl>
 
 #include <optional>
+#include <kira/service/PromptStyle.h>
 
 class QWebSocket;
 
@@ -24,6 +25,7 @@ struct ManagedModelInfo
     QJsonObject companionFiles;
     QString modelType = QStringLiteral("checkpoint");
     bool explicitContent = false;
+    QList<KiraService::PromptStyle> styles;
 };
 
 enum class ManagedInstallState { Requesting, Accepted, Queued, Downloading, Verifying, Completed, Failed, Canceled };
@@ -51,6 +53,9 @@ public:
     explicit ManagerServiceClient(QObject *parent = nullptr, quint16 localPort = 9384);
 
     void connectToService();
+    bool setConnection(const QString &host, const QString &token);
+    QString host() const;
+    QString token() const;
     void setAutomaticReconnect(bool enabled);
     bool isAuthenticated() const;
     bool modelListAvailable() const;
@@ -60,6 +65,7 @@ public:
     QString installModel(const QString &category, const QUrl &url, const QUrl &companionUrl = {}, const QJsonObject &recommendedOptions = {}, const QJsonObject &companionUrls = {},
         const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {}, std::optional<bool> explicitContent = {});
     bool configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent = {});
+    bool configureModelStyles(const QString &id, const QList<KiraService::PromptStyle> &styles);
     bool cancelInstall(const QString &installId);
     bool deleteModel(const QString &id);
     bool deleteCompanion(const QString& id, const QString& role);
@@ -69,6 +75,7 @@ signals:
     void modelsChanged();
     void installsChanged();
     void modelConfigured(const QString &id, const QJsonObject &options, bool explicitContent);
+    void modelStylesConfigured(const QString &id, const QList<KiraService::PromptStyle> &styles);
     void modelDeleted(const QString &id);
     void companionDeleted(const QString& id, const QString& role);
     void modelOperationFailed(const QString &id, const QString &message);
@@ -83,9 +90,13 @@ private:
     void failActiveInstalls(const QString &message);
 
     const quint16 m_localPort;
+    QString m_host = QStringLiteral("127.0.0.1");
+    QString m_token;
+    QTimer m_connectionTimeout;
     QWebSocket *m_socket;
     QTimer *m_retryTimer;
     bool m_automaticReconnect = true;
+    bool m_openingConnection = false;
     bool m_authenticated = false;
     bool m_modelListAvailable = false;
     QList<ManagedModelInfo> m_generationModels;

@@ -36,6 +36,10 @@ add_executable(kira-service-manager
     manager/AddModelDialog.cpp
     manager/ManageModelsWindow.cpp
     manager/ManageModelsWindow.h
+    manager/ModelStylesDialog.cpp
+    manager/ModelStylesDialog.h
+    manager/ServiceConnectionDialog.cpp
+    manager/ServiceConnectionDialog.h
     manager/ManagerServiceClient.cpp
     manager/ManagerServiceClient.h
 )

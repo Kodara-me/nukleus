@@ -35,6 +35,44 @@ The service replies with `models.delete.completed` or an `error` containing the 
 
 Image work uses `submit` with `image.generate`, `image.upscale`, or `image.edit`; each request must include a matching installed `modelId`. Upscale is fixed at 2×. Input and result image data are binary WebSocket messages; filesystem paths are never part of the protocol.
 
+## Per-model prompt styles (additive v3 extension)
+
+Image-generation catalogue entries include an ordered `styles` array:
+
+```json
+{"styles":[{"id":"cinematic","name":"Cinematic","positivePrefix":"cinematic lighting, dramatic composition, film still","negativePrefix":""}]}
+```
+
+Shared `PromptStyle` fields are required strings. IDs and names must be nonblank;
+IDs must be unique within a model and at least one prefix must be nonblank.
+IDs remain stable on rename; Manager assigns UUIDs to new custom entries.
+Models without a saved styles field expose Photographic, Cinematic and Illustration
+starters. Reads do not write metadata; explicitly saved `[]` stays empty.
+
+Administrators replace the complete ordered list with:
+
+```json
+{"type":"models.styles.configure","id":"image-generation:model.gguf","styles":[{"id":"custom-id","name":"Custom","positivePrefix":"soft light","negativePrefix":"blur"}]}
+```
+
+Success returns `models.styles.configure.completed` with `id` and saved `styles`,
+then broadcasts `models.styles.changed` with `id` to authenticated clients.
+SDK/Manager refresh the catalogue on that notification. Invalid lists, missing
+models, other categories and storage failures return `error` with model `id`
+and code `invalid-model-styles`, without partial updates. Other metadata is retained.
+SDK/Manager expose `configureModelStyles` and `modelStylesConfigured`.
+
+`image.generate` options accept optional string `styleId`, also for PhotoMaker
+and IP-Adapter. Absent/empty means None and preserves existing prompt behavior.
+Unknown/deleted IDs return `style-unavailable`. A nonempty selection on editing
+or upscaling, or a non-string value, returns `invalid-request`; SDK submitEdit
+rejects nonempty selections locally. The original user prompt must still be nonblank.
+The service trims and joins each nonempty prefix and user prompt with `, `,
+checks existing conditioning restrictions against composed prompts and snapshots
+them before uploads/queueing. Later style changes cannot alter accepted jobs.
+Clients send original prompts and never apply prefixes. Older services omitting
+styles yield None only; deploy the service before using updated clients.
+
 ## Recommended model options (additive v3 extension)
 
 Models may contain a `recommendedOptions` object in `models.list.result`,

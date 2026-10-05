@@ -130,6 +130,7 @@ class ServiceSdkTest final : public QObject
 {
     Q_OBJECT
 private slots:
+    void validatesPromptStyles();
     void configuresAndCancelsModels();
     void preservesProtocolV3();
     void authenticatesAndDiscoversModels();
@@ -142,6 +143,34 @@ private slots:
     void submitsPhotoMakerIdentity();
     void identityPackages();
 };
+
+void ServiceSdkTest::validatesPromptStyles()
+{
+    using namespace KiraService::Protocol;
+    QString error;
+    const auto starters = starterPromptStyles();
+    QCOMPARE(promptStylesFromJson(promptStylesToJson(starters)).value(), starters);
+    QVERIFY(promptStylesFromJson(QJsonArray{})->isEmpty());
+    QVERIFY(!promptStylesFromJson(QJsonObject{}, &error));
+    QVERIFY(!promptStylesFromJson(QJsonArray{42}, &error));
+    const auto valid = promptStylesToJson(starters).first().toObject();
+    for (const auto &field : {"id", "name", "positivePrefix", "negativePrefix"}) {
+        auto invalid = valid; invalid.remove(field);
+        QVERIFY(!promptStylesFromJson(QJsonArray{invalid}, &error));
+        invalid = valid; invalid.insert(field, true);
+        QVERIFY(!promptStylesFromJson(QJsonArray{invalid}, &error));
+    }
+    for (const auto &field : {"id", "name"}) {
+        auto invalid = valid; invalid.insert(field, " ");
+        QVERIFY(!promptStylesFromJson(QJsonArray{invalid}, &error));
+    }
+    QVERIFY(!validatePromptStyles({{"id", "Name", " ", "\n"}}, &error));
+    QVERIFY(!validatePromptStyles({starters.first(), starters.first()}, &error));
+    QVERIFY(validatePromptStyles({{"id", "Name", "", "negative"}}, &error));
+    QCOMPARE(composeStyledPrompt("  prefix \n", "  prompt  "), QString("prefix, prompt"));
+    QCOMPARE(composeStyledPrompt("", "  prompt  "), QString("prompt"));
+    QCOMPARE(composeStyledPrompt("negative", ""), QString("negative"));
+}
 
 void ServiceSdkTest::identityPackages()
 {
@@ -202,6 +231,7 @@ void ServiceSdkTest::submitsPhotoMakerIdentity()
     QTRY_COMPARE(client.models(KiraService::ModelCategory::PhotoMaker).size(), 1);
     KiraService::ImageGenerationRequest request;
     request.modelId = "image-generation:test.safetensors"; request.prompt = "a woman img";
+    request.styleId = "cinematic";
     request.photoMakerModelId = "photomaker:test.safetensors";
     request.photoMakerReferenceImageData = "reference";
     request.photoMakerIdentityData = QByteArray("identity\0bytes", 14);
@@ -210,6 +240,8 @@ void ServiceSdkTest::submitsPhotoMakerIdentity()
     QVERIFY(!client.submitGeneration(request).isEmpty()); QTRY_COMPARE(results.count(), 1);
     QCOMPARE(service.uploadedImages(), QList<QByteArray>({request.photoMakerReferenceImageData, request.photoMakerIdentityData}));
     const auto options = service.messages().last().value("options").toObject();
+    QCOMPARE(options.value("styleId").toString(), request.styleId);
+    QCOMPARE(options.value("prompt").toString(), request.prompt);
     QCOMPARE(options.value("photoMakerModelId").toString(), request.photoMakerModelId);
     QCOMPARE(options.value("photoMakerStyleStrength").toInt(), 17);
     QVERIFY(!options.value("hasInput").toBool());
@@ -246,6 +278,7 @@ void ServiceSdkTest::submitsIpAdapterReferences()
     QCOMPARE(client.models(KiraService::ModelCategory::IpAdapter).size(), 1);
     KiraService::ImageGenerationRequest request;
     request.modelId = "image-generation:test.safetensors"; request.prompt = "test";
+    request.styleId = "photographic";
     request.clipVisionModelId = "clip_vision:vision.safetensors";
     request.ipAdapterModelId = "ip-adapter:test.bin";
     request.ipAdapterImageData = "adapter reference"; request.ipAdapterStrength = 0.85;
@@ -253,11 +286,15 @@ void ServiceSdkTest::submitsIpAdapterReferences()
     QVERIFY(!client.submitGeneration(request).isEmpty()); QTRY_COMPARE(results.count(), 1);
     QCOMPARE(service.uploadedImages(), QList<QByteArray>{QByteArray("adapter reference")});
     auto options = service.messages().last().value("options").toObject();
+    QCOMPARE(options.value("styleId").toString(), request.styleId);
+    QCOMPARE(options.value("prompt").toString(), request.prompt);
     QCOMPARE(options.value("clipVisionModelId").toString(), request.clipVisionModelId);
     QCOMPARE(options.value("ipAdapterModelId").toString(), request.ipAdapterModelId);
     QCOMPARE(options.value("ip_adapter_strength").toDouble(), 0.85);
     QVERIFY(!options.value("hasInput").toBool());
     request.modelId = "edition:edit.safetensors"; request.baseImageData = "editing source";
+    QVERIFY(client.submitEdit(request).isEmpty());
+    request.styleId.clear();
     QVERIFY(!client.submitEdit(request).isEmpty()); QTRY_COMPARE(results.count(), 2);
     QCOMPARE(service.uploadedImages(), QList<QByteArray>({"adapter reference", "editing source", "adapter reference"}));
     request.ipAdapterImageData.clear(); QVERIFY(client.submitEdit(request).isEmpty());
@@ -305,6 +342,7 @@ void ServiceSdkTest::authenticatesAndDiscoversModels()
     QCOMPARE(editionModels.first().companionRole, QStringLiteral("vae"));
     QCOMPARE(client.models(KiraService::ModelCategory::LlmChat).first().companionRole, QStringLiteral("mmproj"));
     QCOMPARE(client.models(KiraService::ModelCategory::ImageGeneration).first().modelType, QString("diffusion"));
+    QVERIFY(client.models(KiraService::ModelCategory::ImageGeneration).first().styles.isEmpty());
     QCOMPARE(client.models(KiraService::ModelCategory::ImageGeneration).first().companionFiles.value("clip-l").toString(), QString("companions/test.safetensors/clip-l/clip_l.safetensors"));
     QCOMPARE(client.models(KiraService::ModelCategory::ImageGeneration).first().companionFileName, QStringLiteral("companions/test.safetensors/vae.safetensors"));
     QCOMPARE(editionModels.first().id, QStringLiteral("edition:edit.safetensors"));

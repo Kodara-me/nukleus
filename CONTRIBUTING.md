@@ -8,7 +8,17 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Run the daemon with `./build/src/kira-service`. Run the local administrator UI with `./build/src/kira-service-manager --gui`, or exercise the manager CLI with `./build/src/kira-service-manager --help`. Use the root installer only for Linux systemd deployments.
+Run the daemon with `./build/src/kira-service`. Run the administrator UI with `./build/src/kira-service-manager --gui`, or exercise the manager CLI with `./build/src/kira-service-manager --help`. Use the root installer only for Linux systemd deployments.
+
+Manager GUI connection settings are local QSettings keys `Service/Host` and
+`Service/Token`. On startup it tries those settings (loopback/empty key by default)
+and opens ServiceConnectionDialog on connection/authentication failure or a
+10-second timeout. IPv4/localhost input constructs ws:// on port 9384; credentials
+are saved only after authentication. Cancel restores the previous configuration;
+background reconnects do not reopen the prompt. CLI does not load GUI settings.
+Local Browse streaming is unchanged and cannot import from a remote Manager.
+ManagerUiTest covers invalid hosts, failed attempts, authentication, persistence,
+restored settings, Cancel and startup prompting with disposable WebSocket fixtures.
 
 Image-editing models use the `edition` catalog category and `models/edition/` storage; the manager GUI, CLI, and SDK support their installation, listing, and deletion. Edition jobs use `image.edit` with uploaded source images.
 
@@ -35,6 +45,17 @@ The GUI exposes this via Optional files; the CLI exposes `attach` with
 `--model-type`, `--clip-l`, `--clip-g`, and `--vae`.
 
 ## Shared manager UI
+
+Per-model prompt styles use the framework-independent Protocol `PromptStyle`
+value type and JSON validation helpers. The Manager's **Styles…** dialog edits
+an in-memory ordered draft for one generation model; Save replaces the list
+atomically in category-local metadata and closes only after acknowledgment.
+Missing metadata exposes service-owned starters without writing files; explicit
+`[]` stays empty. Preserve companion fields and unrelated entries on writes.
+Generation resolves `styleId` and snapshots both composed prompts before uploads
+and queueing. Clients refresh on `models.styles.changed` and never apply prefixes.
+Deploy the service before updated clients. ServiceTest, ServiceSdkTest and
+ManagerUiTest use disposable models/network fixtures; do not edit live models.
 
 CMake defaults `KIRA_UI_SOURCE_DIR` to `../kira-ui-framework`. Override it with
 `-DKIRA_UI_SOURCE_DIR=/path/to/kira-ui-framework`. Without a source checkout,

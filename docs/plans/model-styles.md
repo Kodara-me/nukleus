@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: implemented
 projects: [kira-service, kira-canvas]
 ---
 
@@ -7,9 +7,9 @@ projects: [kira-service, kira-canvas]
 
 ## Status
 
-Implementation contract for future Codex work. No implementation is authorized
-by this document alone. Preserve pre-existing working-copy changes in both
-repositories.
+Implemented across Service, SDK, Manager and Canvas. Deployment remains separate;
+update the service before relying on styles in updated clients. Preserve
+pre-existing working-copy changes in both repositories.
 
 ## Goal
 

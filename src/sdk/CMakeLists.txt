@@ -7,6 +7,8 @@ find_package(Qt6 6.2 REQUIRED COMPONENTS Core Network WebSockets)
 find_package(LibArchive REQUIRED)
 
 add_library(KiraServiceProtocol STATIC
+    include/kira/service/PromptStyle.h
+    src/PromptStyle.cpp
     include/kira/service/GenerationProgress.h
     include/kira/service/ServiceProtocol.h
     include/kira/service/ModelOptions.h

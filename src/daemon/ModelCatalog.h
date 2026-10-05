@@ -4,6 +4,7 @@
 #include <QHash>
 #include <QObject>
 #include <QUrl>
+#include <kira/service/PromptStyle.h>
 
 #include <optional>
 #include <QJsonObject>
@@ -32,6 +33,7 @@ struct ModelInfo
     QJsonObject companionFiles;
     QString modelType = QStringLiteral("checkpoint");
     bool explicitContent = false;
+    QList<KiraService::PromptStyle> styles;
 };
 
 Q_DECLARE_METATYPE(ModelInfo)
@@ -87,6 +89,7 @@ public:
     void cancel(const QString &installId);
     bool isInstalling() const;
     bool configure(const QString &id, const QJsonObject &options, QString *error = nullptr, std::optional<bool> explicitContent = {});
+    bool configureStyles(const QString &id, const QList<KiraService::PromptStyle> &styles, QString *error = nullptr);
 
 signals:
     void installProgress(const ModelInstallProgress &progress);

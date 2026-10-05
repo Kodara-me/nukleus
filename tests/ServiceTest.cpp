@@ -61,6 +61,8 @@ class ServiceTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void persistsPromptStyles();
+    void configuresStylesOverProtocol();
     void generatesWithValidatedOptionsAndVae();
     void validatesRecommendedOptions();
     void persistsOptionsAndLegacyMetadata();
@@ -92,6 +94,106 @@ private slots:
     void migratesLegacyModelRoot();
     void rejectsConflictingModelRoots();
 };
+
+void ServiceTest::persistsPromptStyles()
+{
+    QTemporaryDir directory;
+    QFile model(directory.filePath("test.gguf"));
+    QVERIFY(model.open(QIODevice::WriteOnly)); model.write("weights"); model.close();
+    ModelCatalog catalog(directory.path(), false);
+    const QString id = "image-generation:test.gguf";
+    QCOMPARE(catalog.modelById(id)->styles.size(), 3);
+    QVERIFY(!QFile::exists(directory.filePath("metadata.json")));
+    QVERIFY(QDir().mkpath(directory.filePath("companions/test.gguf")));
+    QFile companion(directory.filePath("companions/test.gguf/vae.gguf"));
+    QVERIFY(companion.open(QIODevice::WriteOnly)); companion.write("vae"); companion.close();
+    QFile initialMetadata(directory.filePath("metadata.json"));
+    QVERIFY(initialMetadata.open(QIODevice::WriteOnly));
+    initialMetadata.write(QJsonDocument(QJsonObject{{"test.gguf", "companions/test.gguf/vae.gguf"}, {"untouched.gguf", "legacy"}}).toJson());
+    initialMetadata.close();
+    QString error;
+    const QList<KiraService::PromptStyle> styles{{"custom", "Custom", " light ", " blur "}};
+    QVERIFY(catalog.configureStyles(id, styles, &error));
+    ModelCatalog restarted(directory.path(), false);
+    QCOMPARE(restarted.modelById(id)->styles, styles);
+    QCOMPARE(restarted.modelById(id)->companionFileName, QString("companions/test.gguf/vae.gguf"));
+    auto invalid = styles; invalid.append(styles.first());
+    QVERIFY(!catalog.configureStyles(id, invalid, &error));
+    QCOMPARE(catalog.modelById(id)->styles, styles);
+    auto options = KiraService::Protocol::defaultModelOptions("image-generation");
+    options.insert("steps", 30);
+    QVERIFY(catalog.configure(id, options, &error, true));
+    QCOMPARE(catalog.modelById(id)->styles, styles);
+    QVERIFY(catalog.configureStyles(id, {}, &error));
+    QCOMPARE(restarted.modelById(id)->styles.size(), 0);
+    QCOMPARE(restarted.modelById(id)->recommendedOptions.value("steps").toInt(), 30);
+    QVERIFY(restarted.modelById(id)->explicitContent);
+    QFile savedMetadata(directory.filePath("metadata.json"));
+    QVERIFY(savedMetadata.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(savedMetadata.readAll()).object().value("untouched.gguf").toString(), QString("legacy"));
+    savedMetadata.close();
+#ifdef Q_OS_UNIX
+    // Block QSaveFile's temporary-file creation while keeping metadata readable.
+    const auto permissions = QFileInfo(directory.path()).permissions();
+    const auto restorePermissions = qScopeGuard([&] { QFile::setPermissions(directory.path(), permissions); });
+    QVERIFY(QFile::setPermissions(directory.path(), QFile::ReadOwner | QFile::ExeOwner));
+    QFile probe(directory.filePath("write-probe"));
+    if (!probe.open(QIODevice::WriteOnly)) {
+        QVERIFY(!catalog.configureStyles(id, styles, &error));
+        QVERIFY(error.contains("save"));
+        QVERIFY(restarted.modelById(id)->styles.isEmpty());
+        QCOMPARE(restarted.modelById(id)->companionFileName, QString("companions/test.gguf/vae.gguf"));
+    }
+    probe.close();
+    QVERIFY(QFile::setPermissions(directory.path(), permissions));
+#endif
+    QVERIFY(!catalog.configureStyles("edition:missing.gguf", styles, &error));
+    QFile metadata(directory.filePath("metadata.json"));
+    QVERIFY(metadata.open(QIODevice::WriteOnly | QIODevice::Truncate)); metadata.write("invalid"); metadata.close();
+    QVERIFY(!catalog.configureStyles(id, styles, &error));
+}
+
+void ServiceTest::configuresStylesOverProtocol()
+{
+    QTemporaryDir directory;
+    QFile model(directory.filePath("test.gguf"));
+    QVERIFY(model.open(QIODevice::WriteOnly)); model.write("model"); model.close();
+    KiraServiceConfiguration configuration;
+    configuration.port = 0; configuration.modelRootPath = directory.path();
+    KiraServiceDaemon service(configuration);
+    QString error; QVERIFY2(service.start(&error), qPrintable(error));
+    KiraService::ServiceClient owner, observer;
+    const QUrl endpoint(QString("ws://127.0.0.1:%1").arg(service.serverPort()));
+    owner.setConfiguration(endpoint, {}); observer.setConfiguration(endpoint, {});
+    owner.connectToService(); observer.connectToService();
+    QTRY_VERIFY(owner.modelListAvailable() && observer.modelListAvailable());
+    QCOMPARE(observer.models(KiraService::ModelCategory::ImageGeneration).first().styles.size(), 3);
+    QSignalSpy completed(&owner, &KiraService::ServiceClient::modelStylesConfigured);
+    QSignalSpy failed(&owner, &KiraService::ServiceClient::modelOperationFailed);
+    const QList<KiraService::PromptStyle> styles{{"custom", "Custom", "positive", ""}};
+    QVERIFY(owner.configureModelStyles("image-generation:test.gguf", styles));
+    QTRY_COMPARE(completed.size(), 1);
+    QTRY_COMPARE(observer.models(KiraService::ModelCategory::ImageGeneration).first().styles, styles);
+    QVERIFY(owner.configureModelStyles("edition:test.gguf", styles));
+    QTRY_COMPARE(failed.size(), 1);
+    QCOMPARE(observer.models(KiraService::ModelCategory::ImageGeneration).first().styles, styles);
+    QVERIFY(owner.configureModelStyles("image-generation:test.gguf", {}));
+    QTRY_COMPARE(completed.size(), 2);
+    QTRY_VERIFY(observer.models(KiraService::ModelCategory::ImageGeneration).first().styles.isEmpty());
+    const auto validStyles = KiraService::Protocol::promptStylesToJson(styles);
+    const QList<QJsonValue> invalidLists{QJsonObject{}, QJsonArray{validStyles.first(), validStyles.first()},
+        QJsonArray{QJsonObject{{"id", "invalid"}, {"name", "Invalid"}, {"positivePrefix", true}, {"negativePrefix", ""}}}};
+    auto *socket = owner.findChild<QWebSocket *>();
+    QVERIFY(socket);
+    int failureCount = failed.size();
+    for (const auto &invalid : invalidLists) {
+        socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "models.styles.configure"},
+            {"id", "image-generation:test.gguf"}, {"styles", invalid}}).toJson()));
+        ++failureCount;
+        QTRY_COMPARE(failed.size(), failureCount);
+        QVERIFY(observer.models(KiraService::ModelCategory::ImageGeneration).first().styles.isEmpty());
+    }
+}
 
 namespace
 {
@@ -335,6 +437,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     photoMakerOptions.insert("photoMakerModelId", "photomaker:identity.safetensors");
     photoMakerOptions.insert("hasPhotoMakerIdentity", true);
     photoMakerOptions.insert("photoMakerStyleStrength", 31);
+    photoMakerOptions.insert("styleId", "cinematic");
     const QByteArray identityBytes("opaque\0identity", 15);
     for (int pass = 0; pass < 2; ++pass) {
         const QString id = QString("photomaker-generate-%1").arg(pass);
@@ -350,6 +453,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
         QTRY_VERIFY(terminal(id)); QTRY_COMPARE(images.count(), 1);
         const auto args = arguments();
         QCOMPARE(args.value(args.indexOf("--photo-maker") + 1), photoMakerPath);
+        QCOMPARE(args.value(args.indexOf("--prompt") + 1), QString("cinematic lighting, dramatic composition, film still, test"));
         QCOMPARE(args.value(args.indexOf("--pm-style-strength") + 1), pass == 0 ? QString("31") : QString("20"));
         QCOMPARE(capturedImage(".identity"), identityBytes);
         QCOMPARE(capturedImage(".reference"), image);
@@ -391,6 +495,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
         QVERIFY(!uploadFor("invalid-photomaker", "photomaker-reference"));
     }
     images.clear(); messages.clear();
+    adapterOptions.insert("styleId", "cinematic");
     send("adapter-generate", adapterOptions);
     QTRY_VERIFY(uploadFor("adapter-generate", "ip-adapter"));
     // All selected weights are protected while either reference upload is pending.
@@ -410,11 +515,12 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(adapterArgs.value(adapterArgs.indexOf("--ip-adapter") + 1), adapterPath);
     QCOMPARE(adapterArgs.value(adapterArgs.indexOf("--ip-adapter-strength") + 1).toDouble(), 0.8123456789);
     QCOMPARE(adapterArgs.value(adapterArgs.indexOf("--lora-model-dir") + 1), QFileInfo(auxiliaryPath).absolutePath());
-    QCOMPARE(adapterArgs.value(adapterArgs.indexOf("--prompt") + 1), QString("test <lora:auxiliary.safetensors:1>"));
+    QCOMPARE(adapterArgs.value(adapterArgs.indexOf("--prompt") + 1), QString("cinematic lighting, dramatic composition, film still, test <lora:auxiliary.safetensors:1>"));
     QVERIFY(!adapterArgs.contains("--init-img")); QVERIFY(!adapterArgs.contains("--ref-image"));
     QCOMPARE(capturedImage(".ip"), adapterImage);
 
     images.clear(); messages.clear();
+    adapterOptions.remove("styleId");
     adapterOptions.insert("modelId", "edition:edit.gguf");
     adapterOptions.remove("ip_adapter_strength");
     socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
@@ -588,6 +694,71 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
         QTRY_COMPARE(images.count(), completed);
         args = arguments();
         QCOMPARE(args.value(args.indexOf("--cfg-scale") + 1).toDouble(), cfg);
+    }
+    // Snapshot a selected style before upload, then delete it while the job waits.
+    messages.clear();
+    send("styled-snapshot", {{"modelId", "image-generation:plain.gguf"}, {"prompt", "  subject  "},
+        {"negativePrompt", "  noise  "}, {"styleId", "photographic"}, {"hasInput", true}});
+    const auto snapshotUploadRequested = [&] {
+        for (const auto &message : messages)
+            if (message.value("jobId") == "styled-snapshot" && message.value("type") == "upload-required") return true;
+        return false;
+    };
+    QTRY_VERIFY(snapshotUploadRequested());
+    socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "models.styles.configure"},
+        {"id", "image-generation:plain.gguf"}, {"styles", QJsonArray{}}}).toJson()));
+    const auto snapshotStyleSaved = [&] {
+        for (const auto &message : messages)
+            if (message.value("type") == "models.styles.configure.completed") return true;
+        return false;
+    };
+    QTRY_VERIFY(snapshotStyleSaved());
+    socket.sendBinaryMessage(image);
+    QTRY_VERIFY(terminal("styled-snapshot"));
+    ++completed;
+    QTRY_COMPARE(images.count(), completed);
+    args = arguments();
+    QCOMPARE(args.value(args.indexOf("--prompt") + 1), QString("photorealistic, natural lighting, fine detail, subject"));
+    QCOMPARE(args.value(args.indexOf("--negative-prompt") + 1), QString("illustration, painting, cartoon, noise"));
+    messages.clear();
+    send("deleted-style", {{"modelId", "image-generation:plain.gguf"}, {"prompt", "subject"}, {"styleId", "photographic"}});
+    QTRY_VERIFY(terminal("deleted-style"));
+    QCOMPARE(messages.last().value("code").toString(), QString("style-unavailable"));
+    messages.clear();
+    send("positive-style", {{"modelId", "image-generation:model.gguf"}, {"prompt", "subject"}, {"styleId", "cinematic"}});
+    QTRY_VERIFY(terminal("positive-style"));
+    ++completed;
+    QTRY_COMPARE(images.count(), completed);
+    args = arguments();
+    QCOMPARE(args.value(args.indexOf("--prompt") + 1), QString("cinematic lighting, dramatic composition, film still, subject"));
+    QCOMPARE(args.value(args.indexOf("--negative-prompt") + 1), QString());
+    ModelCatalog styleCatalog(root, false);
+    QVERIFY(styleCatalog.configureStyles("image-generation:plain.gguf", {{"negative", "Negative", "", "  blur  "}}, &error));
+    messages.clear();
+    send("negative-style", {{"modelId", "image-generation:plain.gguf"}, {"prompt", "  subject  "}, {"styleId", "negative"}});
+    QTRY_VERIFY(terminal("negative-style"));
+    ++completed;
+    QTRY_COMPARE(images.count(), completed);
+    args = arguments();
+    QCOMPARE(args.value(args.indexOf("--prompt") + 1), QString("subject"));
+    QCOMPARE(args.value(args.indexOf("--negative-prompt") + 1), QString("blur"));
+    QVERIFY(styleCatalog.configureStyles("image-generation:plain.gguf", {{"lora", "LoRA", "<lora:custom:1>", ""}}, &error));
+    // Recreate the disposable CLIP Vision weight deleted by the lifecycle test above.
+    QFile restoredVision(visionPath);
+    QVERIFY(restoredVision.open(QIODevice::WriteOnly)); restoredVision.write("weights"); restoredVision.close();
+    auto invalidStyledAdapter = adapterOptions;
+    invalidStyledAdapter.insert("modelId", "image-generation:plain.gguf");
+    invalidStyledAdapter.insert("styleId", "lora");
+    messages.clear(); send("styled-lora", invalidStyledAdapter);
+    QTRY_VERIFY(terminal("styled-lora"));
+    QCOMPARE(messages.last().value("code").toString(), QString("invalid-request"));
+    for (const QJsonValue style : {QJsonValue(42), QJsonValue("cinematic")}) {
+        auto invalidStyled = valid;
+        invalidStyled.insert("styleId", style);
+        if (style.isString()) invalidStyled.insert("prompt", " ");
+        messages.clear(); send("invalid-style", invalidStyled);
+        QTRY_VERIFY(terminal("invalid-style"));
+        QCOMPARE(messages.last().value("code").toString(), QString("invalid-request"));
     }
     QVERIFY(executable.open(QIODevice::WriteOnly | QIODevice::Truncate));
     executable.write("#!/bin/sh\nprintf 'Klein fixture failure\\n' >&2\nexit 17\n");
