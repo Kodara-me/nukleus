@@ -83,6 +83,8 @@ struct KiraServiceDaemon::Submission
     bool waitingPhotoMakerIdentity = false;
     QByteArray photoMakerIdentityData;
     QByteArray inputData;
+    QList<QByteArray> referenceImages;
+    int referenceCount = 1;
     QByteArray ipAdapterImageData;
 };
 
@@ -349,13 +351,15 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
             sendError(socket, "queue-full", tr("An upload is pending or the service queue is full"), jobId);
             return;
         }
-        if (!message.value("options").isObject() || !options.isEmpty()) {
+        if (!message.value("options").isObject() || options.size() > (options.contains("referenceCount") ? 1 : 0)
+            || !validNumber(options, "referenceCount", 1, 4, true, false)) {
             sendError(socket, "invalid-request", tr("Identity export accepts only a source image"), jobId);
             return;
         }
         auto submission = std::make_shared<Submission>();
         submission->id = jobId;
         submission->operation = Operation::PhotoMakerExport;
+        submission->referenceCount = options.value("referenceCount").toInt(1);
         submission->client = socket;
         m_pendingUploads.insert(socket, submission);
         send(socket, {{"type", "upload-required"}, {"jobId", jobId}, {"inputRole", "source"}});
@@ -400,8 +404,14 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     std::optional<ModelInfo> ipAdapter;
     const bool hasPhotoMaker = options.contains("photoMakerModelId")
         || options.contains("hasPhotoMakerIdentity") || options.contains("photoMakerStyleStrength");
+    if (options.contains("referenceCount") && !hasPhotoMaker) {
+        sendError(socket, "invalid-request", tr("Reference count requires PhotoMaker conditioning"), jobId); return;
+    }
     std::optional<ModelInfo> photoMaker;
     if (hasPhotoMaker) {
+        if (!validNumber(options, "referenceCount", 1, 4, true, false)) {
+            sendError(socket, "invalid-request", tr("Invalid PhotoMaker reference count"), jobId); return;
+        }
         if (!generate || hasAdapterOptions || options.value("hasInput").toBool()
             || !options.value("photoMakerModelId").isString()
             || !options.value("hasPhotoMakerIdentity").isBool() || !options.value("hasPhotoMakerIdentity").toBool()
@@ -440,7 +450,10 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     submission->operation = edit ? Operation::Edit : generate ? Operation::Generate : Operation::Upscale;
     submission->options = options;
     submission->modelPath = model->filePath;
-    if (photoMaker) submission->photoMakerPath = photoMaker->filePath;
+    if (photoMaker) {
+        submission->photoMakerPath = photoMaker->filePath;
+        submission->referenceCount = options.value("referenceCount").toInt(1);
+    }
     if ((generate || edit) && model->companionRole == QStringLiteral("vae") && !model->companionFileName.isEmpty())
         submission->vaePath = QDir(QFileInfo(model->filePath).absolutePath()).filePath(model->companionFileName);
     const QDir modelDirectory(QFileInfo(model->filePath).absolutePath());
@@ -700,6 +713,22 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
         return;
     }
     if (submission->waitingPhotoMakerIdentity) submission->photoMakerIdentityData = data;
+    else if (submission->operation == Operation::PhotoMakerExport || !submission->photoMakerPath.isEmpty()) {
+        qsizetype total = data.size();
+        for (const auto& image : submission->referenceImages) total += image.size();
+        if (total > m_configuration.maximumImageBytes
+            || (submission->referenceCount > 1 && !data.startsWith(QByteArray::fromHex("89504e470d0a1a0a")))) {
+            m_pendingUploads.remove(socket);
+            sendError(socket, "invalid-image", tr("Invalid or oversized reference images"), submission->id); return;
+        }
+        submission->referenceImages.append(data);
+        if (submission->referenceImages.size() < submission->referenceCount) {
+            send(socket, {{"type", "upload-required"}, {"jobId", submission->id},
+                {"inputRole", "photomaker-reference"}, {"referenceIndex", submission->referenceImages.size()}});
+            return;
+        }
+        submission->inputData = submission->referenceImages.first();
+    }
     else if (submission->waitingIpAdapterImage) submission->ipAdapterImageData = data;
     else submission->inputData = data;
     if (!submission->photoMakerPath.isEmpty() && !submission->waitingPhotoMakerIdentity) {
@@ -745,6 +774,12 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
         || !saveImage(submission->photoMakerIdentityData, "id_embeds.bin", job->photoMakerIdentityPath)) {
         sendError(socket, QStringLiteral("storage-error"), tr("Could not save image upload"), job->id);
         return;
+    }
+    for (int i = 1; i < submission->referenceImages.size(); ++i) {
+        QString path;
+        if (!saveImage(submission->referenceImages[i], QStringLiteral("reference-%1.png").arg(i + 1), path)) {
+            sendError(socket, "storage-error", tr("Could not save reference image"), job->id); return;
+        }
     }
     enqueue(job);
 }

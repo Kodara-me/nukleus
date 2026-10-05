@@ -207,7 +207,15 @@ existing behavior. Keep v3 additive and deploy service before updated clients.
 ## PhotoMaker identity package contract
 
 The SDK's LibArchive-backed `.kiraid` helper owns the compressed ZIP format:
-reference.png, id_embeds.bin, manifest.json (type photomaker-v2, version 1).
+reference.png, optional reference-2.png through reference-4.png, id_embeds.bin,
+manifest.json (type photomaker-v2, version 1). The optional ordered references
+list, identityPrompt, hairPrompt and integer seed are metadata; legacy packages
+remain readable. SDK generation sends every packaged reference, without applying
+packaged prompts or seed. Additive protocol-v3 referenceCount (1–4, default 1)
+supports generation and extraction; sequential upload-required messages identify
+additional references by zero-based referenceIndex. Stage every PNG in the job
+directory for the official extractor and --pm-id-images-dir. Extraction must find
+exactly one face per reference; fail rather than silently omit a reference.
 Generation accepts photoMakerIdentityPackageData and unpacks it in memory before
 uploading existing protocol-v3 roles. Reject malformed, oversized and ambiguous
 package-plus-paired inputs; preserve legacy paired requests. Extraction continues

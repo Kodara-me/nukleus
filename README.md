@@ -1,5 +1,11 @@
 # Kira Service
 
+PhotoMaker identity packages support one to four ordered PNG references plus
+optional face/hair descriptions and seed metadata. Extraction and generation use
+all references; metadata prompts/seed are not applied to generation. Existing
+single-reference packages remain supported. Deploy the updated service before
+clients that submit multiple references.
+
 Kira Service is the standalone backend for Kira applications. It owns installed models and their recommended options, single HTTPS model installations, the `sd-cli` image queue, and the versioned WebSocket API. Client applications select opaque installed-model IDs and submit jobs; they do not manage service files.
 
 The Manager also supports a **Prompt Enhancer** catalogue (`prompt-enhancer`),

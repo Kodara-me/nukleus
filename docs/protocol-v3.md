@@ -409,6 +409,17 @@ and IP-Adapter FaceID pipelines remain outside this implementation.
 
 ## PhotoMaker V2 identity export
 
+PhotoMaker export and generation accept optional `referenceCount` (integer 1–4,
+default 1). Export options contain only this field. After the initial upload,
+the server requests remaining PNGs with `inputRole: photomaker-reference` and
+zero-based `referenceIndex`; generation then requests `photomaker-identity`.
+The aggregate reference size must fit the configured image-upload limit. Every
+reference is staged for extraction/generation; export requires one detected face
+per image. Package manifest version 1 optionally lists `references` in order
+(`reference.png`, `reference-2.png` through `reference-4.png`) and stores
+`identityPrompt`, `hairPrompt`, and `seed`. These fields do not modify generation
+prompts or seed. Legacy archives without these fields remain valid.
+
 `models.list` additionally returns `photomaker`. Its required primary filename
 ends in `.safetensors`; companions are rejected. Install/configure use the usual
 atomic model workflow and `recommendedOptions: {"style_strength":20}`.
@@ -425,11 +436,11 @@ The SDK exposes `ServiceCapabilities.photoMakerIdentityExport`.
 {"type":"upload-required","jobId":"identity-job","inputRole":"source"}
 ```
 
-The client sends one binary message containing the source image (full or cropped).
+The client sends a binary message for each requested source image (full or cropped).
 No model, prompts or generation options are accepted. The source must contain
 exactly one detectable face. Uploads follow the existing image-size limit.
 Normal queued/queue-position/running events use the same FIFO as image jobs.
-The server creates temporary storage, saves the image, executes the official
+The server creates temporary storage, saves all images, executes the official
 PhotoMaker V2 extractor and returns:
 
 ```json

@@ -7,6 +7,7 @@
 #include <QSet>
 #include <QUuid>
 #include <QWebSocket>
+#include <algorithm>
 
 namespace
 {
@@ -213,10 +214,13 @@ bool ServiceClient::deleteModel(const QString &id)
 QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
 {
     if (!request.photoMakerIdentityPackageData.isEmpty()) {
-        if (!request.photoMakerIdentityData.isEmpty() || !request.photoMakerReferenceImageData.isEmpty()) return {};
+        if (!request.photoMakerIdentityData.isEmpty() || !request.photoMakerReferenceImageData.isEmpty()
+            || !request.photoMakerReferenceImages.isEmpty()) return {};
         auto unpacked = request;
-        if (!unpackPhotoMakerIdentity(request.photoMakerIdentityPackageData,
-                unpacked.photoMakerReferenceImageData, unpacked.photoMakerIdentityData)) return {};
+        PhotoMakerIdentityPackage identity;
+        if (!unpackPhotoMakerIdentity(request.photoMakerIdentityPackageData, identity)) return {};
+        unpacked.photoMakerReferenceImages = identity.references;
+        unpacked.photoMakerIdentityData = identity.embeddings;
         unpacked.photoMakerIdentityPackageData.clear();
         return submitGeneration(unpacked);
     }
@@ -236,21 +240,26 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
     addIpAdapterOptions(options, request);
     if (!request.styleId.isEmpty()) options.insert("styleId", request.styleId);
     const bool photoMaker = !request.photoMakerModelId.isEmpty() || !request.photoMakerIdentityData.isEmpty()
-        || !request.photoMakerReferenceImageData.isEmpty() || request.photoMakerStyleStrength.has_value();
+        || !request.photoMakerReferenceImageData.isEmpty() || !request.photoMakerReferenceImages.isEmpty() || request.photoMakerStyleStrength.has_value();
+    const auto references = request.photoMakerReferenceImages.isEmpty()
+        ? QList<QByteArray>{request.photoMakerReferenceImageData} : request.photoMakerReferenceImages;
     if (photoMaker) {
         if (!m_capabilities.photoMaker || !request.baseImageData.isEmpty()
             || !request.ipAdapterModelId.isEmpty() || !request.clipVisionModelId.isEmpty()
             || !request.ipAdapterImageData.isEmpty() || request.ipAdapterStrength.has_value()
-            || request.photoMakerIdentityData.isEmpty() || request.photoMakerReferenceImageData.isEmpty()
+            || request.photoMakerIdentityData.isEmpty() || references.isEmpty() || references.size() > 4
+            || std::any_of(references.cbegin(), references.cend(), [](const QByteArray& image) { return image.isEmpty(); })
+            || (!request.photoMakerReferenceImages.isEmpty() && !request.photoMakerReferenceImageData.isEmpty())
             || !containsModel(request.photoMakerModelId, ModelCategory::PhotoMaker)
             || (request.photoMakerStyleStrength && (*request.photoMakerStyleStrength < 0 || *request.photoMakerStyleStrength > 100))) return {};
         options.insert("photoMakerModelId", request.photoMakerModelId);
         options.insert("hasPhotoMakerIdentity", true);
+        if (references.size() > 1) options.insert("referenceCount", references.size());
         if (request.photoMakerStyleStrength) options.insert("photoMakerStyleStrength", *request.photoMakerStyleStrength);
     }
     return submit(ImageOperation::Generate, options,
-        photoMaker ? request.photoMakerReferenceImageData : request.baseImageData,
-        request.ipAdapterImageData, request.photoMakerIdentityData);
+        photoMaker ? references.first() : request.baseImageData,
+        request.ipAdapterImageData, request.photoMakerIdentityData, photoMaker ? references : QList<QByteArray>{});
 }
 
 QString ServiceClient::submitEdit(const ImageGenerationRequest &request)
@@ -258,7 +267,8 @@ QString ServiceClient::submitEdit(const ImageGenerationRequest &request)
     if (!request.styleId.isEmpty()) return {};
     if (!request.photoMakerIdentityPackageData.isEmpty()) return {};
     if (!request.photoMakerModelId.isEmpty() || !request.photoMakerIdentityData.isEmpty()
-        || !request.photoMakerReferenceImageData.isEmpty() || request.photoMakerStyleStrength.has_value()) return {};
+        || !request.photoMakerReferenceImageData.isEmpty() || !request.photoMakerReferenceImages.isEmpty()
+        || request.photoMakerStyleStrength.has_value()) return {};
     if (request.baseImageData.isEmpty() || request.prompt.trimmed().isEmpty()) return {};
     QJsonObject options{{"modelId", request.modelId}, {"hasInput", true}, {"prompt", request.prompt},
          {"width", request.width}, {"height", request.height}, {"steps", request.steps},
@@ -298,19 +308,26 @@ QString ServiceClient::enhancePrompt(const PromptEnhancementRequest& request)
 
 QString ServiceClient::exportPhotoMakerIdentity(const QByteArray &sourceImageData)
 {
-    if (!m_authenticated || !m_capabilities.photoMakerIdentityExport || sourceImageData.isEmpty()) return {};
+    return exportPhotoMakerIdentityImages(QList<QByteArray>{sourceImageData});
+}
+
+QString ServiceClient::exportPhotoMakerIdentityImages(const QList<QByteArray>& sourceImages)
+{
+    if (!m_authenticated || !m_capabilities.photoMakerIdentityExport || sourceImages.isEmpty() || sourceImages.size() > 4
+        || std::any_of(sourceImages.cbegin(), sourceImages.cend(), [](const QByteArray& image) { return image.isEmpty(); })) return {};
     const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     PendingJob job;
-    job.inputData = sourceImageData;
+    job.inputData = sourceImages.first();
+    job.referenceImages = sourceImages;
     job.identityExport = true;
     m_pendingJobs.insert(jobId, job);
     const QJsonObject message{{"type", "submit"}, {"jobId", jobId}, {"operation", "photomaker.export"},
-        {"options", QJsonObject{}}};
+        {"options", sourceImages.size() == 1 ? QJsonObject{} : QJsonObject{{"referenceCount", sourceImages.size()}}}};
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     return jobId;
 }
 
-QString ServiceClient::submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData, const QByteArray &ipAdapterImageData, const QByteArray &photoMakerIdentityData)
+QString ServiceClient::submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData, const QByteArray &ipAdapterImageData, const QByteArray &photoMakerIdentityData, const QList<QByteArray>& references)
 {
     if (!canSubmit(operation, options.value(QStringLiteral("modelId")).toString())) return {};
     const bool adapterRequested = options.contains("clipVisionModelId") || options.contains("ipAdapterModelId")
@@ -319,7 +336,13 @@ QString ServiceClient::submit(ImageOperation operation, const QJsonObject &optio
         || !containsModel(options.value("clipVisionModelId").toString(), ModelCategory::ClipVision)
         || !containsModel(options.value("ipAdapterModelId").toString(), ModelCategory::IpAdapter))) return {};
     const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    m_pendingJobs.insert(jobId, PendingJob{operation, inputData, ipAdapterImageData, {}, false, photoMakerIdentityData});
+    PendingJob job;
+    job.operation = operation;
+    job.inputData = inputData;
+    job.ipAdapterImageData = ipAdapterImageData;
+    job.photoMakerIdentityData = photoMakerIdentityData;
+    job.referenceImages = references;
+    m_pendingJobs.insert(jobId, job);
     const QJsonObject message{{QStringLiteral("type"), QStringLiteral("submit")},
                               {QStringLiteral("jobId"), jobId},
                               {QStringLiteral("operation"), operationName(operation)},
@@ -457,6 +480,15 @@ void ServiceClient::handleTextMessage(const QString &message)
         emit jobStateChanged(jobId, JobState::Uploading, -1);
         const auto &job = m_pendingJobs.value(jobId);
         const auto role = object.value("inputRole").toString();
+        if (object.contains("referenceIndex")) {
+            const int index = object.value("referenceIndex").toInt(-1);
+            if (index < 0 || index >= job.referenceImages.size()) {
+                failJob(jobId, "invalid-reference-index", "The service requested an invalid reference image.");
+                return;
+            }
+            m_socket->sendBinaryMessage(job.referenceImages[index]);
+            return;
+        }
         m_socket->sendBinaryMessage(role == "photomaker-identity" ? job.photoMakerIdentityData
             : role == "ip-adapter" ? job.ipAdapterImageData : job.inputData);
     } else if (type == QStringLiteral("progress")) {

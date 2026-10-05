@@ -242,7 +242,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
                      "\"$@\"; do\n if [ \"$previous\" = --output ]; then cp \"$KIRA_TEST_IMAGE\" "
                      "\"$argument\"; fi\n if [ \"$previous\" = --ip-adapter-image ]; then cp \"$argument\" \"$KIRA_TEST_ARGS.ip\"; fi\n"
                      " if [ \"$previous\" = --pm-id-embed-path ]; then cp \"$argument\" \"$KIRA_TEST_ARGS.identity\"; fi\n"
-                     " if [ \"$previous\" = --pm-id-images-dir ]; then cp \"$argument/input.png\" \"$KIRA_TEST_ARGS.reference\"; fi\n"
+                     " if [ \"$previous\" = --pm-id-images-dir ]; then cp \"$argument/input.png\" \"$KIRA_TEST_ARGS.reference\"; for n in 2 3 4; do if [ -f \"$argument/reference-$n.png\" ]; then cp \"$argument/reference-$n.png\" \"$KIRA_TEST_ARGS.reference-$n\"; fi; done; fi\n"
                      " if [ \"$previous\" = --ref-image ]; then cp \"$argument\" \"$KIRA_TEST_ARGS.source\"; fi\n previous=\"$argument\"\ndone\nexit 0\n");
     executable.close();
     QVERIFY(executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
@@ -443,6 +443,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     const QByteArray identityBytes("opaque\0identity", 15);
     for (int pass = 0; pass < 2; ++pass) {
         const QString id = QString("photomaker-generate-%1").arg(pass);
+        if (pass == 1) photoMakerOptions.insert("referenceCount", 4);
         images.clear(); messages.clear();
         send(id, photoMakerOptions);
         QTRY_VERIFY(uploadFor(id, "photomaker-reference"));
@@ -450,6 +451,13 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
             {"id", "photomaker:identity.safetensors"}}).toJson()));
         QTRY_COMPARE(messages.last().value("code").toString(), QString("model-in-use"));
         socket.sendBinaryMessage(image);
+        if (pass == 1) {
+            for (int i = 1; i < 4; ++i) {
+                QTRY_VERIFY(messages.last().value("inputRole") == "photomaker-reference"
+                    && messages.last().value("referenceIndex").toInt(-1) == i);
+                socket.sendBinaryMessage(image + QByteArray::number(i));
+            }
+        }
         QTRY_VERIFY(uploadFor(id, "photomaker-identity"));
         socket.sendBinaryMessage(identityBytes);
         QTRY_VERIFY(terminal(id)); QTRY_COMPARE(images.count(), 1);
@@ -459,10 +467,15 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
         QCOMPARE(args.value(args.indexOf("--pm-style-strength") + 1), pass == 0 ? QString("31") : QString("20"));
         QCOMPARE(capturedImage(".identity"), identityBytes);
         QCOMPARE(capturedImage(".reference"), image);
+        if (pass == 1) {
+            for (int i = 1; i < 4; ++i)
+                QCOMPARE(capturedImage(QStringLiteral(".reference-%1").arg(i + 1)), image + QByteArray::number(i));
+        }
         QVERIFY(!args.contains("--init-img")); QVERIFY(!args.contains("--ip-adapter"));
         QVERIFY(!QFileInfo::exists(args.value(args.indexOf("--pm-id-embed-path") + 1)));
         photoMakerOptions.remove("photoMakerStyleStrength");
     }
+    photoMakerOptions.remove("referenceCount");
     images.clear(); messages.clear();
     qputenv("KIRA_TEST_PM_FAIL", "1");
     send("photomaker-disabled", photoMakerOptions);
@@ -1312,7 +1325,10 @@ void ServiceTest::exportsPhotoMakerIdentity()
     QVERIFY(write("insightface/app.py",
         "class FaceAnalysis:\n"
         "    def get(self, image, max_num=0):\n"
-        "        return [{}] * (2 if image == b'multiple' else 0 if image == b'none' else 1)\n"));
+        "        if image == b'retry':\n"
+        "            self.attempts = getattr(self, 'attempts', 0) + 1\n"
+        "            return [] if self.attempts == 1 else [{}]\n"
+        "        return [{}] * (2 if image == b'multiple' else 0 if image == b'none' or image.endswith(b'missingface') else 1)\n"));
     // Exercise the bundled guard around the official subclass/get and runpy entry point.
     // Replace heavyweight inference only; no model download or GPU is used in this test.
     QVERIFY(write("face_detect.py", R"PY(
@@ -1323,7 +1339,11 @@ class FaceAnalysis2(FaceAnalysis):
         return super().get(img, max_num)
 directory = pathlib.Path(sys.argv[1])
 pathlib.Path(__file__ + ".log").write_text(str(directory))
-assert [path.name for path in directory.iterdir()] == ["input.png"]
+names = sorted(path.name for path in directory.iterdir())
+assert names == ["input.png"] or names == ["input.png", "reference-2.png", "reference-3.png", "reference-4.png"]
+if len(names) == 4:
+    for name in names:
+        assert (directory / name).read_bytes().startswith(bytes.fromhex("89504e470d0a1a0a"))
 image = (directory / "input.png").read_bytes()
 if image == b"failure":
     raise RuntimeError("fixture extraction failure")
@@ -1331,7 +1351,12 @@ if image == b"missing":
     sys.exit(0)
 if image == b"slow":
     time.sleep(60)
-faces = FaceAnalysis2().get(image)
+detector = FaceAnalysis2()
+faces = detector.get(image)
+if image == b"retry" and not faces:
+    faces = detector.get(image)
+for name in names[1:]:
+    detector.get((directory / name).read_bytes())
 if not faces:
     raise ValueError("No face detected in input image pool")
 (directory / "id_embeds.bin").write_bytes(b"\x04\x00\x00\x00identity-fixture")
@@ -1356,14 +1381,22 @@ if not faces:
     client.connectToService();
     QTRY_VERIFY(client.capabilities().photoMakerIdentityExport);
     QVERIFY(client.exportPhotoMakerIdentity({}).isEmpty());
-    for (const auto &source : {QByteArray("single"), QByteArray("none"), QByteArray("multiple"),
+    const auto png = QByteArray::fromHex("89504e470d0a1a0a") + "fixture";
+    QVERIFY(!client.exportPhotoMakerIdentityImages({png, png + "2", png + "3", png + "4"}).isEmpty());
+    QTRY_COMPARE(results.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::PhotoMakerIdentityResult>(results.first().first()).succeeded);
+    results.clear();
+    QVERIFY(!client.exportPhotoMakerIdentityImages({png, png + "missingface", png + "3", png + "4"}).isEmpty());
+    QTRY_COMPARE(results.count(), 1);
+    QCOMPARE(qvariant_cast<KiraService::PhotoMakerIdentityResult>(results.first().first()).errorCode, QString("photomaker-no-face"));
+    for (const auto &source : {QByteArray("single"), QByteArray("retry"), QByteArray("none"), QByteArray("multiple"),
                               QByteArray("failure"), QByteArray("missing")}) {
         results.clear();
         const QString id = client.exportPhotoMakerIdentity(source); QVERIFY(!id.isEmpty());
         QTRY_COMPARE(results.count(), 1);
         const auto result = qvariant_cast<KiraService::PhotoMakerIdentityResult>(results.first().first());
         QCOMPARE(result.jobId, id);
-        if (source == "single") {
+        if (source == "single" || source == "retry") {
             QVERIFY2(result.succeeded, qPrintable(result.message));
             QCOMPARE(result.identityData, QByteArray::fromHex("04000000") + "identity-fixture");
         } else {

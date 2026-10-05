@@ -98,6 +98,7 @@ struct ImageGenerationRequest
     QByteArray photoMakerReferenceImageData;
     std::optional<int> photoMakerStyleStrength;
     QString styleId;
+    QList<QByteArray> photoMakerReferenceImages;
 };
 
 struct ImageUpscaleRequest

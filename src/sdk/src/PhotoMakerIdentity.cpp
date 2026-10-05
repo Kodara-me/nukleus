@@ -3,6 +3,7 @@
 #include <archive_entry.h>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QMap>
 #include <memory>
 
@@ -24,17 +25,40 @@ QString archiveError(archive *handle)
 QByteArray KiraService::packPhotoMakerIdentity(const QByteArray &referencePng,
     const QByteArray &embeddings, QString *error)
 {
+    PhotoMakerIdentityPackage identity;
+    identity.references = {referencePng};
+    identity.embeddings = embeddings;
+    return packPhotoMakerIdentity(identity, error);
+}
+
+QByteArray KiraService::packPhotoMakerIdentity(const PhotoMakerIdentityPackage& identity, QString* error)
+{
     if (error) error->clear();
-    if (!referencePng.startsWith(PngSignature) || embeddings.isEmpty()
-        || referencePng.size() + embeddings.size() > MaxBytes) {
+    qsizetype inputSize = identity.embeddings.size();
+    bool valid = !identity.references.isEmpty() && identity.references.size() <= 4;
+    for (const auto& image : identity.references) {
+        valid = valid && image.startsWith(PngSignature);
+        inputSize += image.size();
+    }
+    if (!valid || identity.embeddings.isEmpty() || inputSize > MaxBytes
+        || identity.seed < -1 || identity.identityPrompt.size() + identity.hairPrompt.size() > 65536) {
         fail(error, QStringLiteral("Identity requires a PNG reference and nonempty embeddings (maximum 64 MiB)."));
         return {};
     }
-    const QMap<QString, QByteArray> files{
-        {"manifest.json", QJsonDocument(QJsonObject{{"type", "photomaker-v2"}, {"version", 1}}).toJson(QJsonDocument::Compact)},
-        {"reference.png", referencePng}, {"id_embeds.bin", embeddings}};
+    QMap<QString, QByteArray> files{{"id_embeds.bin", identity.embeddings}};
+    QJsonArray references;
+    for (int i = 0; i < identity.references.size(); ++i) {
+        const auto name = i == 0 ? QStringLiteral("reference.png") : QStringLiteral("reference-%1.png").arg(i + 1);
+        files.insert(name, identity.references[i]);
+        references.append(name);
+    }
+    const auto manifest = QJsonDocument(QJsonObject{{"type", "photomaker-v2"}, {"version", 1},
+        {"references", references}, {"identityPrompt", identity.identityPrompt},
+        {"hairPrompt", identity.hairPrompt}, {"seed", identity.seed}}).toJson(QJsonDocument::Compact);
+    if (manifest.size() > 256 * 1024) { fail(error, "Identity metadata is too large."); return {}; }
+    files.insert("manifest.json", manifest);
+    inputSize += manifest.size();
     std::unique_ptr<archive, decltype(&archive_write_free)> writer(archive_write_new(), archive_write_free);
-    const qsizetype inputSize = referencePng.size() + embeddings.size();
     QByteArray output(inputSize + inputSize / 100 + 65536, Qt::Uninitialized);
     size_t written = 0;
     if (archive_write_set_format_zip(writer.get()) != ARCHIVE_OK
@@ -65,6 +89,16 @@ bool KiraService::unpackPhotoMakerIdentity(const QByteArray &package, QByteArray
     QByteArray &embeddings, QString *error)
 {
     referencePng.clear(); embeddings.clear();
+    PhotoMakerIdentityPackage identity;
+    if (!unpackPhotoMakerIdentity(package, identity, error)) return false;
+    referencePng = identity.references.first();
+    embeddings = identity.embeddings;
+    return true;
+}
+
+bool KiraService::unpackPhotoMakerIdentity(const QByteArray& package, PhotoMakerIdentityPackage& identity, QString* error)
+{
+    identity = {};
     if (error) error->clear();
     if (package.isEmpty() || package.size() > MaxBytes + 1024 * 1024)
         return fail(error, QStringLiteral("Identity archive is empty or exceeds 65 MiB."));
@@ -79,11 +113,12 @@ bool KiraService::unpackPhotoMakerIdentity(const QByteArray &package, QByteArray
     while ((status = archive_read_next_header(reader.get(), &entry)) == ARCHIVE_OK) {
         const QString name = QString::fromUtf8(archive_entry_pathname(entry));
         const auto size = archive_entry_size(entry);
-        if ((name != "manifest.json" && name != "reference.png" && name != "id_embeds.bin")
+        if ((name != "manifest.json" && name != "reference.png" && name != "id_embeds.bin"
+                && name != "reference-2.png" && name != "reference-3.png" && name != "reference-4.png")
             || files.contains(name) || archive_entry_filetype(entry) != AE_IFREG
             || archive_entry_symlink(entry) || archive_entry_hardlink(entry)
-            || size <= 0 || size > MaxBytes || total + size > MaxBytes + 4096
-            || (name == "manifest.json" && size > 4096))
+            || size <= 0 || size > MaxBytes || total + size > MaxBytes + 256 * 1024
+            || (name == "manifest.json" && size > 256 * 1024))
             return fail(error, QStringLiteral("Identity archive contains invalid, duplicate or oversized entries."));
         QByteArray bytes;
         char buffer[16384];
@@ -99,12 +134,34 @@ bool KiraService::unpackPhotoMakerIdentity(const QByteArray &package, QByteArray
     }
     if (status != ARCHIVE_EOF) return fail(error, archiveError(reader.get()));
     const auto manifest = QJsonDocument::fromJson(files.value("manifest.json")).object();
-    if (files.size() != 3 || manifest.value("type").toString() != "photomaker-v2"
+    if (manifest.value("type").toString() != "photomaker-v2"
         || manifest.value("version") != QJsonValue(1)
         || files.value("reference.png").size() + files.value("id_embeds.bin").size() > MaxBytes
         || !files.value("reference.png").startsWith(PngSignature))
         return fail(error, QStringLiteral("Unsupported or incomplete PhotoMaker identity archive."));
-    referencePng = files.value("reference.png");
-    embeddings = files.value("id_embeds.bin");
+    QJsonArray references = manifest.value("references").toArray();
+    if (!manifest.contains("references")) references = QJsonArray{QStringLiteral("reference.png")};
+    if (references.isEmpty() || references.size() > 4 || files.size() != references.size() + 2
+        || (manifest.contains("identityPrompt") && !manifest.value("identityPrompt").isString())
+        || (manifest.contains("hairPrompt") && !manifest.value("hairPrompt").isString()))
+        return fail(error, "Invalid identity metadata.");
+    PhotoMakerIdentityPackage decoded;
+    for (int i = 0; i < references.size(); ++i) {
+        const auto name = i == 0 ? QStringLiteral("reference.png") : QStringLiteral("reference-%1.png").arg(i + 1);
+        if (references[i] != QJsonValue(name) || !files.value(name).startsWith(PngSignature))
+            return fail(error, "Invalid identity reference list.");
+        decoded.references.append(files.value(name));
+    }
+    decoded.embeddings = files.value("id_embeds.bin");
+    qsizetype payload = decoded.embeddings.size();
+    for (const auto& image : decoded.references) payload += image.size();
+    if (decoded.embeddings.isEmpty() || payload > MaxBytes) return fail(error, "Invalid identity payload.");
+    if (manifest.contains("seed") && (!manifest.value("seed").isDouble()
+        || manifest.value("seed").toDouble() != manifest.value("seed").toInt(-2)
+        || manifest.value("seed").toInt(-2) < -1)) return fail(error, "Invalid identity seed.");
+    decoded.seed = manifest.value("seed").toInt(-1);
+    decoded.identityPrompt = manifest.value("identityPrompt").toString();
+    decoded.hairPrompt = manifest.value("hairPrompt").toString();
+    identity = decoded;
     return true;
 }

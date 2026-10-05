@@ -57,7 +57,8 @@ public:
                     const auto options = message.value("options").toObject();
                     if (options.value("hasPhotoMakerIdentity").toBool()) {
                         m_uploadJobs.insert(socket, jobId);
-                        m_photoMakerUploads.insert(socket, 2);
+                        m_photoMakerUploads.insert(socket, options.value("referenceCount").toInt(1) + 1);
+                        m_referenceCounts.insert(socket, options.value("referenceCount").toInt(1));
                         socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
                             {"type", "upload-required"}, {"jobId", jobId}, {"inputRole", "photomaker-reference"}}).toJson()));
                         return;
@@ -79,6 +80,14 @@ public:
             });
             connect(socket, &QWebSocket::binaryMessageReceived, this, [this, socket](const QByteArray &data) {
                 m_uploadedImages.append(data);
+                if (m_photoMakerUploads.value(socket) > 2) {
+                    --m_photoMakerUploads[socket];
+                    socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+                        {"type", "upload-required"}, {"jobId", m_uploadJobs.value(socket)},
+                        {"inputRole", "photomaker-reference"},
+                        {"referenceIndex", m_referenceCounts.value(socket) - m_photoMakerUploads.value(socket) + 1}}).toJson()));
+                    return;
+                }
                 if (m_photoMakerUploads.value(socket) == 2) {
                     m_photoMakerUploads[socket] = 1;
                     socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
@@ -123,6 +132,7 @@ private:
     QList<QByteArray> m_uploadedImages;
     bool m_ipAdapter = false;
     QHash<QWebSocket *, int> m_photoMakerUploads;
+    QHash<QWebSocket *, int> m_referenceCounts;
 };
 }
 
@@ -178,6 +188,21 @@ void ServiceSdkTest::identityPackages()
     const QByteArray bin("embedding\0bytes", 15);
     QString error;
     const auto package = KiraService::packPhotoMakerIdentity(png, bin, &error);
+    KiraService::PhotoMakerIdentityPackage full;
+    full.references = {png, png + "2", png + "3", png + "4"};
+    full.embeddings = bin;
+    full.identityPrompt = "adult with green eyes";
+    full.hairPrompt = "curly brown hair";
+    full.seed = 123;
+    const auto multi = KiraService::packPhotoMakerIdentity(full, &error);
+    QVERIFY2(!multi.isEmpty(), qPrintable(error));
+    KiraService::PhotoMakerIdentityPackage decoded;
+    QVERIFY2(KiraService::unpackPhotoMakerIdentity(multi, decoded, &error), qPrintable(error));
+    QCOMPARE(decoded.references, full.references);
+    QCOMPARE(decoded.embeddings, bin);
+    QCOMPARE(decoded.identityPrompt, full.identityPrompt);
+    QCOMPARE(decoded.hairPrompt, full.hairPrompt);
+    QCOMPARE(decoded.seed, 123);
     QVERIFY2(!package.isEmpty(), qPrintable(error));
     QVERIFY(package.startsWith("PK"));
     QVERIFY(package.size() < png.size());
@@ -253,6 +278,19 @@ void ServiceSdkTest::submitsPhotoMakerIdentity()
     request.photoMakerReferenceImageData.clear(); request.photoMakerIdentityData.clear();
     QVERIFY(!client.submitGeneration(request).isEmpty()); QTRY_COMPARE(results.count(), 2);
     QCOMPARE(service.uploadedImages().mid(2), QList<QByteArray>({reference, identity}));
+    KiraService::PhotoMakerIdentityPackage full;
+    full.references = {reference, reference + "2", reference + "3", reference + "4"};
+    full.embeddings = identity;
+    full.identityPrompt = "metadata only";
+    full.hairPrompt = "metadata hair only";
+    full.seed = 987;
+    request.photoMakerIdentityPackageData = KiraService::packPhotoMakerIdentity(full);
+    QVERIFY(!client.submitGeneration(request).isEmpty()); QTRY_COMPARE(results.count(), 3);
+    auto uploads = full.references;
+    uploads.append(identity);
+    QCOMPARE(service.uploadedImages().mid(4), uploads);
+    QCOMPARE(service.messages().last().value("options").toObject().value("prompt").toString(), request.prompt);
+    QCOMPARE(service.messages().last().value("options").toObject().value("seed").toInt(), request.seed);
     request.photoMakerIdentityPackageData = "invalid";
     QVERIFY(client.submitGeneration(request).isEmpty());
     request.photoMakerIdentityPackageData.clear();

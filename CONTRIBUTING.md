@@ -1,5 +1,11 @@
 # Contributing to Kira Service
 
+PhotoMaker package tests cover four ordered references and optional face/hair/seed
+metadata, plus legacy single-reference archives. SDK and daemon fixtures verify
+each upload, all PNGs staged for extraction and sd-cli, and metadata remaining
+independent of submitted generation prompts and seed. Multi-reference clients
+require the updated service's additive protocol-v3 referenceCount support.
+
 Model labels come from optional server-saved `displayName`, falling back to the
 full installed filename. New installations choose an unused filename (numeric
 suffix on collision), keeping atomic no-overwrite publication and separate

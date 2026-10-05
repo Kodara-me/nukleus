@@ -39,6 +39,7 @@ public:
     QString submitGeneration(const ImageGenerationRequest &request);
     QString submitUpscale(const ImageUpscaleRequest &request);
     QString exportPhotoMakerIdentity(const QByteArray &sourceImageData);
+    QString exportPhotoMakerIdentityImages(const QList<QByteArray>& sourceImages);
     bool canEnhancePrompt(const QString& modelId) const;
     QString enhancePrompt(const PromptEnhancementRequest& request);
 signals:
@@ -67,8 +68,9 @@ private:
         bool identityExport = false;
         QByteArray photoMakerIdentityData;
         bool promptEnhancement = false;
+        QList<QByteArray> referenceImages;
     };
-    QString submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData, const QByteArray &ipAdapterImageData = {}, const QByteArray &photoMakerIdentityData = {});
+    QString submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData, const QByteArray &ipAdapterImageData = {}, const QByteArray &photoMakerIdentityData = {}, const QList<QByteArray>& references = {});
     void authenticate();
     void handleTextMessage(const QString &message);
     void handleBinaryMessage(const QByteArray &data);
