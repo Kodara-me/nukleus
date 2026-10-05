@@ -28,6 +28,8 @@ namespace
 const QList<QPair<QString, QString>> categories{{"edition", "Edition"},
                                                 {"llm-chat", "LLM"},
                                                 {"image-generation", "Image generation"},
+                                                {"inpaint", "Inpaint"},
+                                                {"face-parsing", "Face parsing"},
                                                 {"upscaler", "Upscaler"},
                                                 {"ip_adapter", "IP-Adapter"}, {"clip_vision", "CLIP Vision"},
                                                 {"photomaker", "PhotoMaker"},
@@ -334,7 +336,7 @@ void ManageModelsWindow::updateActions()
     m_displayName->setEnabled(m_client->isAuthenticated() && !m_saving && !m_selectedId.isEmpty());
     m_add->setEnabled(m_client->isAuthenticated() && !m_saving);
     m_attach->setEnabled(m_client->isAuthenticated() && !m_saving &&
-        (m_selectedId.startsWith("image-generation:") || m_selectedId.startsWith("edition:") || m_selectedId.startsWith("ip-adapter:")
+        (m_selectedId.startsWith("image-generation:") || m_selectedId.startsWith("inpaint:") || m_selectedId.startsWith("edition:") || m_selectedId.startsWith("ip-adapter:")
          || m_selectedId.startsWith("ip_adapter:")));
     m_delete->setEnabled(m_client->modelListAvailable() && m_client->isAuthenticated() && !m_saving &&
                          !m_selectedId.isEmpty());

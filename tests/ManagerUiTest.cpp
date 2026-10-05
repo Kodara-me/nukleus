@@ -290,16 +290,67 @@ class ManagerUiTest final : public QObject
         dialog.close();
         QTRY_VERIFY(!dialog.isVisible());
     }
+    void installsFaceParsingFromManager()
+    {
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        client.connectToService();
+        QTRY_VERIFY(client.modelListAvailable());
+        AddModelDialog dialog(&client, "face-parsing");
+        dialog.show();
+        auto* category = dialog.findChild<QComboBox*>("modelCategory");
+        QCOMPARE(category->currentData().toString(), QString("face-parsing"));
+        auto* options = dialog.findChild<ModelOptionsWidget*>();
+        QCOMPARE(options->options(), KiraService::Protocol::defaultModelOptions("face-parsing"));
+        QVERIFY(dialog.findChild<QLineEdit*>("companionUrl")->isHidden());
+        dialog.findChild<QLineEdit*>("modelUrl")->setText("https://example.com/model.onnx");
+        auto* start = dialog.findChild<QPushButton*>("startDownload");
+        QVERIFY(start->isEnabled());
+        start->click();
+        QTRY_COMPARE(m_messages.last().value("type").toString(), QString("models.install"));
+        QCOMPARE(m_messages.last().value("category").toString(), QString("face-parsing"));
+        QCOMPARE(m_messages.last().value("recommendedOptions").toObject(), options->options());
+        QVERIFY(!m_messages.last().contains("companionUrl"));
+        dialog.close();
+        QTRY_COMPARE(m_messages.last().value("type").toString(), QString("models.install.cancel"));
+        send({{"type", "models.list.result"}, {"categories", QJsonArray{QJsonObject{
+            {"category", "face-parsing"}, {"models", QJsonArray{QJsonObject{
+                {"id", "face-parsing:model.onnx"}, {"fileName", "model.onnx"},
+                {"displayName", "Face parser"}, {"recommendedOptions", options->options()}}}}}}}});
+        QTRY_COMPARE(client.models("face-parsing").size(), 1);
+        QCOMPARE(client.models("face-parsing").first().id, QString("face-parsing:model.onnx"));
+        m_peer->close();
+        QTRY_VERIFY(!client.isAuthenticated());
+        QVERIFY(client.models("face-parsing").isEmpty());
+    }
+
     void fieldsFollowCategory()
     {
         ModelOptionsWidget widget;
-        for (const auto &category : {"image-generation", "edition", "llm-chat", "upscaler", "ip-adapter", "ip_adapter", "clip_vision", "photomaker"})
+        for (const auto &category : {"image-generation", "inpaint", "edition", "llm-chat", "upscaler", "ip-adapter", "ip_adapter", "clip_vision", "photomaker", "face-parsing"})
         {
             widget.setOptions(category);
             QCOMPARE(widget.options(), KiraService::Protocol::defaultModelOptions(category));
             QVERIFY(widget.isValid());
             QVERIFY(!widget.explicitContent());
         }
+        widget.setOptions("face-parsing");
+        QVERIFY(!widget.findChild<QWidget*>("resolution"));
+        QVERIFY(!widget.findChild<QWidget*>("steps"));
+        auto* regions = widget.findChild<QListWidget*>("includedClasses");
+        QVERIFY(regions);
+        QCOMPARE(regions->count(), 19);
+        for (int index = 0; index < regions->count(); ++index)
+            regions->item(index)->setCheckState(Qt::Unchecked);
+        QVERIFY(!widget.isValid());
+        regions->item(13)->setCheckState(Qt::Checked);
+        QCOMPARE(widget.options().value("includedClasses").toArray(), QJsonArray{"hair"});
+        widget.findChild<QSpinBox*>("dilatePixels")->setValue(12);
+        widget.findChild<QCheckBox*>("invertMask")->setChecked(true);
+        const auto saved = widget.options();
+        widget.setOptions("face-parsing", saved);
+        QCOMPARE(widget.options(), saved);
+        QVERIFY(widget.isValid());
         widget.setOptions("ip_adapter", {{"strength", 0.75}});
         QCOMPARE(widget.options(), QJsonObject({{"strength", 0.75}}));
         widget.setOptions("clip_vision");
@@ -388,7 +439,7 @@ class ManagerUiTest final : public QObject
         QVERIFY(tree);
         QCOMPARE(tree->model()->rowCount(), 1);
         auto root = tree->model()->index(0, 0);
-        QCOMPARE(tree->model()->rowCount(root), 8);
+        QCOMPARE(tree->model()->rowCount(root), 10);
         auto branch = tree->model()->index(2, 0, root);
         auto model = tree->model()->index(0, 0, branch);
         tree->setCurrentIndex(model);

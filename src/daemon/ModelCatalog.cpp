@@ -34,8 +34,11 @@ bool isSafeFileName(const QString &fileName)
 QStringList extensionsFor(ModelCategory category)
 {
     switch (category) {
+    case ModelCategory::FaceParsing:
+        return {QStringLiteral("onnx")};
     case ModelCategory::PhotoMaker:
         return {QStringLiteral("safetensors")};
+    case ModelCategory::Inpaint:
     case ModelCategory::ImageGeneration:
     case ModelCategory::PromptEnhancer:
     case ModelCategory::Edition:
@@ -114,12 +117,14 @@ ModelCatalog::~ModelCatalog() = default;
 
 QList<ModelCategory> ModelCatalog::categories()
 {
-    return {ModelCategory::ImageGeneration, ModelCategory::Edition, ModelCategory::Upscaler, ModelCategory::LlmChat, ModelCategory::IpAdapter, ModelCategory::ClipVision, ModelCategory::PhotoMaker, ModelCategory::PromptEnhancer};
+    return {ModelCategory::ImageGeneration, ModelCategory::Inpaint, ModelCategory::Edition, ModelCategory::Upscaler, ModelCategory::LlmChat, ModelCategory::IpAdapter, ModelCategory::ClipVision, ModelCategory::PhotoMaker, ModelCategory::PromptEnhancer, ModelCategory::FaceParsing};
 }
 
 QString ModelCatalog::categoryName(ModelCategory category)
 {
     switch (category) {
+    case ModelCategory::FaceParsing: return QStringLiteral("face-parsing");
+    case ModelCategory::Inpaint: return QStringLiteral("inpaint");
     case ModelCategory::ImageGeneration: return QStringLiteral("image-generation");
     case ModelCategory::Edition: return QStringLiteral("edition");
     case ModelCategory::Upscaler: return QStringLiteral("upscaler");
@@ -137,8 +142,10 @@ QString ModelCatalog::companionRole(ModelCategory category)
     switch (category) {
     case ModelCategory::IpAdapter: return QStringLiteral("lora");
     case ModelCategory::LlmChat: return QStringLiteral("mmproj");
+    case ModelCategory::Inpaint:
     case ModelCategory::ImageGeneration:
     case ModelCategory::Edition: return QStringLiteral("vae");
+    case ModelCategory::FaceParsing:
     case ModelCategory::Upscaler:
     case ModelCategory::PhotoMaker:
     case ModelCategory::PromptEnhancer:
@@ -173,7 +180,7 @@ QList<ModelInfo> ModelCatalog::models(ModelCategory category) const
         if (!companionFileName.isEmpty()) files.insert(companionRole(category), companionFileName);
         bool valid = true;
         for (auto it = files.begin(); it != files.end(); ++it) {
-            const auto roles = category == ModelCategory::ImageGeneration || category == ModelCategory::Edition
+            const auto roles = category == ModelCategory::ImageGeneration || category == ModelCategory::Inpaint || category == ModelCategory::Edition
                 ? QStringList{"vae", "clip-l", "clip-g", "llm", "mmproj"} : QStringList{companionRole(category)};
             if (!roles.contains(it.key()) || !it.value().isString()) { valid = false; break; }
             const auto path = companionPath(category, fileName, it.value().toString());
@@ -255,7 +262,7 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
     if (request.displayName && request.displayName->size() > 256) return fail(tr("Display name must contain at most 256 characters"));
     if (request.modelType != "checkpoint" && request.modelType != "diffusion"
         && !(request.modelType.isEmpty() && !request.existingModelId.isEmpty())) return fail(tr("Invalid model type"));
-    const bool image = request.category == ModelCategory::ImageGeneration || request.category == ModelCategory::Edition;
+    const bool image = request.category == ModelCategory::ImageGeneration || request.category == ModelCategory::Inpaint || request.category == ModelCategory::Edition;
     if (!image && ((request.modelType != "checkpoint" && !(request.modelType.isEmpty() && !request.existingModelId.isEmpty()))
         || (request.category != ModelCategory::IpAdapter && !request.companionUrls.isEmpty())))
         return fail(tr("CLIP/VAE files and diffusion models require an image model category"));
@@ -419,6 +426,8 @@ QString ModelCatalog::directoryPath(ModelCategory category) const
     const QString root = rootPath();
     if (root.isEmpty()) return {};
     switch (category) {
+    case ModelCategory::FaceParsing: return QDir(root).filePath(QStringLiteral("face-parsing"));
+    case ModelCategory::Inpaint: return QDir(root).filePath(QStringLiteral("inpaint"));
     case ModelCategory::ImageGeneration: return root;
     case ModelCategory::Edition: return QDir(root).filePath(QStringLiteral("edition"));
     case ModelCategory::Upscaler: return QDir(root).filePath(QStringLiteral("upscale"));

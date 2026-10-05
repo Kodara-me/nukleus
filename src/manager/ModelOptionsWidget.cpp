@@ -4,6 +4,8 @@
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QLabel>
+#include <QListWidget>
+#include <QJsonArray>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <KiraUi/PlainTextEdit.h>
@@ -68,7 +70,33 @@ void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &
         connect(field, &QComboBox::currentIndexChanged, this, &ModelOptionsWidget::optionsChanged);
         add(key, label, field);
     };
-    if (category == "image-generation" || category == "edition")
+    if (category == "face-parsing")
+    {
+        auto* classes = new QListWidget(this);
+        classes->setFixedHeight(fontMetrics().lineSpacing() * 6);
+        const QStringList labels{tr("Background"), tr("Skin"), tr("Nose"), tr("Glasses"),
+                                 tr("Left eye"), tr("Right eye"), tr("Left eyebrow"), tr("Right eyebrow"),
+                                 tr("Left ear"), tr("Right ear"), tr("Mouth"), tr("Upper lip"),
+                                 tr("Lower lip"), tr("Hair"), tr("Hat"), tr("Earrings"),
+                                 tr("Necklace"), tr("Neck"), tr("Clothing")};
+        const auto names = KiraService::Protocol::faceParsingClasses();
+        const auto included = values.value("includedClasses").toArray();
+        for (int index = 0; index < names.size(); ++index) {
+            auto* item = new QListWidgetItem(labels.at(index), classes);
+            item->setData(Qt::UserRole, names.at(index));
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+            item->setCheckState(included.contains(names.at(index)) ? Qt::Checked : Qt::Unchecked);
+        }
+        connect(classes, &QListWidget::itemChanged, this, &ModelOptionsWidget::optionsChanged);
+        add("includedClasses", tr("Included regions:"), classes);
+        integer("dilatePixels", tr("Mask expansion (pixels):"), 0, 256);
+        integer("featherPixels", tr("Soft edge (pixels):"), 0, 256);
+        boolean("invertMask", tr("Invert mask:"));
+        boolean("preserveAspectRatio", tr("Preserve aspect ratio:"));
+        boolean("outputAtSourceResolution", tr("Use source resolution:"));
+        choices("provider", tr("Execution provider:"), {"CPUExecutionProvider"});
+    }
+    else if (category == "image-generation" || category == "inpaint" || category == "edition")
     {
         auto *resolution = new QComboBox(this);
         for (int side = 256; side <= 2048; side += 256)
@@ -187,7 +215,14 @@ QJsonObject ModelOptionsWidget::options() const
     QJsonObject values;
     for (auto it = m_fields.cbegin(); it != m_fields.cend(); ++it)
     {
-        if (auto *check = qobject_cast<QCheckBox *>(it.value()))
+        if (auto* list = qobject_cast<QListWidget*>(it.value())) {
+            QJsonArray included;
+            for (int index = 0; index < list->count(); ++index)
+                if (list->item(index)->checkState() == Qt::Checked)
+                    included.append(list->item(index)->data(Qt::UserRole).toString());
+            values.insert(it.key(), included);
+        }
+        else if (auto *check = qobject_cast<QCheckBox *>(it.value()))
             values.insert(it.key(), check->isChecked());
         else if (auto *spin = qobject_cast<QSpinBox *>(it.value()))
             values.insert(it.key(), spin->value());

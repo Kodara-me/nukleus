@@ -21,7 +21,9 @@ enum class ModelCategory
     Edition,
     ClipVision,
     PhotoMaker,
-    PromptEnhancer
+    PromptEnhancer,
+    Inpaint,
+    FaceParsing
 };
 
 struct ModelInfo
@@ -70,7 +72,9 @@ enum class ImageOperation
 {
     Generate,
     Upscale,
-    Edit
+    Edit,
+    FaceParsing,
+    Inpaint
 };
 
 struct ImageGenerationRequest
@@ -127,6 +131,8 @@ struct ServiceCapabilities
     bool photoMakerIdentityExport = false;
     bool photoMaker = false;
     bool promptEnhancement = false;
+    bool faceParsing = false;
+    bool imageInpaint = false;
 };
 
 struct PromptEnhancementRequest

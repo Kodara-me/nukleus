@@ -63,6 +63,9 @@ class ServiceTest final : public QObject
 private slots:
     void persistsPromptStyles();
     void installsAndPersistsPromptEnhancer();
+    void installsAndPersistsFaceParsing();
+    void generatesFaceMaskThroughSdk();
+    void inpaintsThroughSdk();
     void enhancesPromptThroughSdk();
     void configuresStylesOverProtocol();
     void generatesWithValidatedOptionsAndVae();
@@ -96,6 +99,282 @@ private slots:
     void migratesLegacyModelRoot();
     void rejectsConflictingModelRoots();
 };
+
+void ServiceTest::inpaintsThroughSdk()
+{
+#ifndef Q_OS_UNIX
+    QSKIP("The disposable backend uses a POSIX shell");
+#else
+    QTemporaryDir directory;
+    QVERIFY(QDir().mkpath(directory.filePath("models/inpaint")));
+    QVERIFY(QDir().mkpath(directory.filePath("models/clip_vision")));
+    QVERIFY(QDir().mkpath(directory.filePath("models/ip-adapter")));
+    const auto write = [&](const QString& name, const QByteArray& bytes) {
+        QFile file(directory.filePath(name));
+        return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
+    };
+    const QByteArray png = QByteArray::fromBase64(
+        "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAfElEQVR4nNXOQREAMAjAsK7+PTMRPLhGQd7QJnESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ES53Vg6wNShQF/fRSLfgAAAABJRU5ErkJggg==");
+    QVERIFY(write("fixture.png", png));
+    QVERIFY(write("models/inpaint/inpaint.safetensors", "weights"));
+    QVERIFY(write("models/clip_vision/vision.safetensors", "vision weights"));
+    QVERIFY(write("models/ip-adapter/adapter.safetensors", "adapter weights"));
+    const auto root = directory.path().toUtf8();
+    QVERIFY(write("sd-cli", "#!/bin/sh\n"
+        "if [ \"$1\" = --help ]; then exit 0; fi\n"
+        "if [ -f '" + root + "/fail' ]; then echo 'inpaint fixture failure' >&2; exit 1; fi\n"
+        "printf '%s\\n' \"$@\" > '" + root + "/args'\n"
+        "previous=''\nfor argument in \"$@\"; do\n"
+        "if [ \"$previous\" = --init-img ]; then cp \"$argument\" '" + root + "/source.png'; fi\n"
+        "if [ \"$previous\" = --mask ]; then cp \"$argument\" '" + root + "/mask.png'; fi\n"
+        "if [ \"$previous\" = --ip-adapter-image ]; then cp \"$argument\" '" + root + "/reference.png'; fi\n"
+        "if [ \"$previous\" = --output ]; then cp '" + root + "/fixture.png' \"$argument\"; fi\n"
+        "previous=\"$argument\"\ndone\n"));
+    QVERIFY(QFile::setPermissions(directory.filePath("sd-cli"), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    const auto oldPath = qgetenv("PATH");
+    const auto restore = qScopeGuard([&] { qputenv("PATH", oldPath); });
+    qputenv("PATH", root + ':' + oldPath);
+    KiraServiceConfiguration configuration;
+    configuration.port = 0;
+    configuration.modelRootPath = directory.filePath("models");
+    KiraServiceDaemon daemon(configuration);
+    QString error;
+    QVERIFY2(daemon.start(&error), qPrintable(error));
+    KiraService::ServiceClient client;
+    client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
+    client.connectToService();
+    QTRY_VERIFY(client.canSubmit(KiraService::ImageOperation::Inpaint, "inpaint:inpaint.safetensors"));
+    KiraService::ImageGenerationRequest request;
+    request.modelId = "inpaint:inpaint.safetensors";
+    request.prompt = "adult with green eyes";
+    request.negativePrompt = "blur";
+    request.width = request.height = 64;
+    request.steps = 5;
+    request.seed = 456;
+    request.baseImageStrength = 0.99;
+    request.baseImageData = png;
+    QSignalSpy finished(&client, &KiraService::ServiceClient::imageJobFinished);
+    QVERIFY(!client.submitInpaint(request, png).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    const auto result = qvariant_cast<KiraService::ImageJobResult>(finished.takeFirst().at(0));
+    QVERIFY(result.succeeded);
+    QCOMPARE(result.operation, KiraService::ImageOperation::Inpaint);
+    QCOMPARE(result.imageData, png);
+    const auto read = [&](const QString& name) {
+        QFile file(directory.filePath(name));
+        return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+    };
+    QCOMPARE(read("source.png"), png);
+    QCOMPARE(read("mask.png"), png);
+    const auto arguments = QString::fromUtf8(read("args")).split('\n');
+    QVERIFY(arguments.contains("--mask"));
+    QVERIFY(arguments.contains("--init-img"));
+    QVERIFY(!arguments.contains("--ref-image"));
+    QCOMPARE(arguments.value(arguments.indexOf("--strength") + 1).toDouble(), 0.99);
+    QCOMPARE(arguments.value(arguments.indexOf("--seed") + 1), QString("456"));
+    QCOMPARE(arguments.value(arguments.indexOf("--negative-prompt") + 1), QString("blur"));
+    QVERIFY(client.submitInpaint(request, {}).isEmpty());
+    auto invalid = request;
+    invalid.width = 128;
+    QVERIFY(!client.submitInpaint(invalid, png).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    QCOMPARE(qvariant_cast<KiraService::ImageJobResult>(finished.takeFirst().at(0)).errorCode, QString("invalid-image"));
+    invalid = request;
+    invalid.photoMakerModelId = "identity";
+    QVERIFY(client.submitInpaint(invalid, png).isEmpty());
+    QVERIFY(write("fail", ""));
+    QVERIFY(!client.submitInpaint(request, png).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    const auto failure = qvariant_cast<KiraService::ImageJobResult>(finished.takeFirst().at(0));
+    QVERIFY(!failure.succeeded);
+    QVERIFY(failure.message.contains("inpaint fixture failure"));
+    QVERIFY(QFile::remove(directory.filePath("fail")));
+    QVERIFY(!client.submitInpaint(request, png).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::ImageJobResult>(finished.takeFirst().at(0)).succeeded);
+    // Adapter reference is a third upload, independent from source/mask dimensions.
+    const QByteArray reference = QByteArray::fromBase64(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1kAAAAASUVORK5CYII=");
+    request.clipVisionModelId = "clip_vision:vision.safetensors";
+    request.ipAdapterModelId = "ip-adapter:adapter.safetensors";
+    request.ipAdapterImageData = reference;
+    request.ipAdapterStrength = 0.8;
+    QVERIFY(!client.submitInpaint(request, png).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::ImageJobResult>(finished.takeFirst().at(0)).succeeded);
+    QCOMPARE(read("source.png"), png);
+    QCOMPARE(read("mask.png"), png);
+    QCOMPARE(read("reference.png"), reference);
+    const auto adapterArguments = QString::fromUtf8(read("args")).split('\n');
+    QCOMPARE(adapterArguments.value(adapterArguments.indexOf("--clip_vision") + 1),
+        directory.filePath("models/clip_vision/vision.safetensors"));
+    QCOMPARE(adapterArguments.value(adapterArguments.indexOf("--ip-adapter") + 1),
+        directory.filePath("models/ip-adapter/adapter.safetensors"));
+    QVERIFY(adapterArguments.contains("--ip-adapter-image"));
+    QCOMPARE(adapterArguments.value(adapterArguments.indexOf("--ip-adapter-strength") + 1).toDouble(), 0.8);
+    request.clipVisionModelId = "missing";
+    QVERIFY(client.submitInpaint(request, png).isEmpty());
+#endif
+}
+
+void ServiceTest::generatesFaceMaskThroughSdk()
+{
+#ifndef Q_OS_UNIX
+    QSKIP("The disposable process fixture uses a POSIX shell");
+#else
+    QTemporaryDir directory;
+    QVERIFY(QDir().mkpath(directory.filePath("models/face-parsing")));
+    const auto write = [&](const QString& name, const QByteArray& bytes) {
+        QFile file(directory.filePath(name));
+        return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
+    };
+    QVERIFY(write("models/face-parsing/parser.onnx", "fixture"));
+    const QByteArray png = QByteArray::fromBase64(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1kAAAAASUVORK5CYII=");
+    QVERIFY(write("fixture.png", png));
+    const auto path = directory.path().toUtf8();
+    QVERIFY(write("worker", "#!/bin/sh\n"
+        "printf '%s' \"$6\" > '" + path + "/options.json'\n"
+        "if [ -f '" + path + "/fail' ]; then echo 'fixture parsing error' >&2; exit 1; fi\n"
+        "if [ -f '" + path + "/slow' ]; then sleep 2; fi\n"
+        "cp '" + path + "/fixture.png' \"$5\"\n"));
+    QVERIFY(QFile::setPermissions(directory.filePath("worker"), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    auto options = KiraService::Protocol::defaultModelOptions("face-parsing");
+    options.insert("dilatePixels", 11);
+    ModelCatalog catalog(directory.filePath("models"), false);
+    QVERIFY(catalog.configure("face-parsing:parser.onnx", options));
+    KiraServiceConfiguration configuration;
+    configuration.port = 0;
+    configuration.modelRootPath = directory.filePath("models");
+    configuration.faceParsingPython = directory.filePath("worker");
+    configuration.faceParsingTimeoutMs = 100;
+    KiraServiceDaemon daemon(configuration);
+    QString error;
+    QVERIFY2(daemon.start(&error), qPrintable(error));
+    KiraService::ServiceClient client;
+    client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
+    client.connectToService();
+    QTRY_VERIFY(client.canSubmit(KiraService::ImageOperation::FaceParsing, "face-parsing:parser.onnx"));
+    QSignalSpy finished(&client, &KiraService::ServiceClient::imageJobFinished);
+    const auto submit = [&] { return client.submitFaceParsing({png, "face-parsing:parser.onnx"}); };
+    QVERIFY(!submit().isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    auto result = qvariant_cast<KiraService::ImageJobResult>(finished.takeFirst().at(0));
+    QVERIFY(result.succeeded);
+    QCOMPARE(result.operation, KiraService::ImageOperation::FaceParsing);
+    QCOMPARE(result.imageData, png);
+    QFile captured(directory.filePath("options.json"));
+    QVERIFY(captured.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(captured.readAll()).object(), options);
+    QVERIFY(client.submitFaceParsing({{}, "face-parsing:parser.onnx"}).isEmpty());
+    QVERIFY(write("fail", ""));
+    QVERIFY(!submit().isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    result = qvariant_cast<KiraService::ImageJobResult>(finished.takeFirst().at(0));
+    QVERIFY(!result.succeeded);
+    QCOMPARE(result.errorCode, QString("face-parsing-failed"));
+    QVERIFY(result.message.contains("fixture parsing error"));
+    QVERIFY(QFile::remove(directory.filePath("fail")));
+    QVERIFY(write("slow", ""));
+    QVERIFY(!submit().isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    result = qvariant_cast<KiraService::ImageJobResult>(finished.takeFirst().at(0));
+    QVERIFY(!result.succeeded);
+    QVERIFY(result.message.contains("timed out"));
+    QVERIFY(QFile::remove(directory.filePath("slow")));
+    QVERIFY(!submit().isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::ImageJobResult>(finished.takeFirst().at(0)).succeeded);
+    // A disconnected active job must release the worker and the shared queue.
+    QVERIFY(write("slow", ""));
+    QSignalSpy states(&client, &KiraService::ServiceClient::jobStateChanged);
+    const auto disconnectedJob = submit();
+    QVERIFY(!disconnectedJob.isEmpty());
+    QTRY_VERIFY(std::any_of(states.cbegin(), states.cend(), [&](const auto& event) {
+        return event.at(0).toString() == disconnectedJob
+            && qvariant_cast<KiraService::JobState>(event.at(1)) == KiraService::JobState::Running;
+    }));
+    client.disconnectFromService();
+    QVERIFY(QFile::remove(directory.filePath("slow")));
+    KiraService::ServiceClient reconnected;
+    reconnected.setConfiguration(client.endpoint(), {});
+    reconnected.connectToService();
+    QTRY_VERIFY(reconnected.canSubmit(KiraService::ImageOperation::FaceParsing, "face-parsing:parser.onnx"));
+    QSignalSpy recovered(&reconnected, &KiraService::ServiceClient::imageJobFinished);
+    QVERIFY(!reconnected.submitFaceParsing({png, "face-parsing:parser.onnx"}).isEmpty());
+    QTRY_COMPARE(recovered.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::ImageJobResult>(recovered.first().at(0)).succeeded);
+#endif
+}
+
+void ServiceTest::installsAndPersistsFaceParsing()
+{
+    using namespace KiraService::Protocol;
+    TestHttpServer server("onnx weights");
+    QVERIFY(server.start());
+    QTemporaryDir directory;
+    ModelCatalog catalog(directory.path(), true);
+    QSignalSpy completed(&catalog, &ModelCatalog::installFinished);
+    QString error;
+    auto options = defaultModelOptions("face-parsing");
+    QVERIFY(validateModelOptions("face-parsing", options));
+    QCOMPARE(options.value("includedClasses").toArray().size(), 12);
+    QVERIFY(!options.value("includedClasses").toArray().contains("neck"));
+    QCOMPARE(options.value("dilatePixels").toInt(), 8);
+    QCOMPARE(options.value("featherPixels").toInt(), 8);
+    ModelInstallRequest request;
+    request.installId = "face-parser";
+    request.category = ModelCategory::FaceParsing;
+    request.url = server.url("model.onnx");
+    request.recommendedOptions = options;
+    request.companionUrl = server.url("vae.gguf");
+    QVERIFY(!catalog.install(request, &error));
+    request.companionUrl.reset();
+    request.url = server.url("model.gguf");
+    QVERIFY(!catalog.install(request, &error));
+    request.url = server.url("model.onnx");
+    QVERIFY(catalog.install(request, &error));
+    QTRY_COMPARE(completed.count(), 1);
+    const QString id = "face-parsing:model.onnx";
+    QVERIFY(catalog.modelById(id));
+    QVERIFY(QFileInfo::exists(directory.filePath("face-parsing/model.onnx")));
+    QCOMPARE(catalog.modelById(id)->recommendedOptions, options);
+    QVERIFY(catalog.models(ModelCategory::ImageGeneration).isEmpty());
+    options.insert("includedClasses", QJsonArray{"skin", "hair"});
+    options.insert("dilatePixels", 12);
+    options.insert("invertMask", true);
+    QVERIFY(catalog.configure(id, options, &error, true, QString("Face parser")));
+    ModelCatalog restarted(directory.path(), true);
+    QCOMPARE(restarted.modelById(id)->recommendedOptions, options);
+    QVERIFY(restarted.modelById(id)->explicitContent);
+    QCOMPARE(restarted.modelById(id)->displayName, QString("Face parser"));
+    QCOMPARE(ModelCatalog::categoryFromName("face-parsing"), std::optional<ModelCategory>(ModelCategory::FaceParsing));
+    QVERIFY(ModelCatalog::companionRole(ModelCategory::FaceParsing).isEmpty());
+    for (const auto& invalid : {QJsonArray{}, QJsonArray{"hair", "hair"}, QJsonArray{"left_eye"}, QJsonArray{1}}) {
+        auto bad = options;
+        bad.insert("includedClasses", invalid);
+        QVERIFY(!catalog.configure(id, bad, &error));
+        QCOMPARE(catalog.modelById(id)->recommendedOptions, options);
+    }
+    for (const auto& key : {"dilatePixels", "featherPixels"}) {
+        for (const auto& invalid : {QJsonValue(-1), QJsonValue(257), QJsonValue(1.5), QJsonValue("8")}) {
+            auto bad = options;
+            bad.insert(key, invalid);
+            QVERIFY(!validateModelOptions("face-parsing", bad));
+        }
+    }
+    for (const auto& key : {"invertMask", "preserveAspectRatio", "outputAtSourceResolution", "provider"}) {
+        auto bad = options;
+        bad.insert(key, 1);
+        QVERIFY(!validateModelOptions("face-parsing", bad));
+    }
+    auto bad = options;
+    bad.insert("provider", "CUDAExecutionProvider");
+    QVERIFY(!validateModelOptions("face-parsing", bad));
+    QVERIFY(catalog.remove(id, &error));
+    QVERIFY(!QFileInfo::exists(directory.filePath("face-parsing/model.onnx")));
+    QVERIFY(restarted.models(ModelCategory::FaceParsing).isEmpty());
+}
 
 void ServiceTest::persistsPromptStyles()
 {
@@ -820,7 +1099,26 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
 void ServiceTest::validatesRecommendedOptions()
 {
     using namespace KiraService::Protocol;
-    for (auto category : {"image-generation", "edition", "llm-chat", "upscaler", "ip-adapter", "ip_adapter", "clip_vision", "photomaker", "prompt-enhancer"}) {
+    QTemporaryDir directory;
+    QVERIFY(QDir().mkpath(directory.filePath("inpaint")));
+    QFile weights(directory.filePath("inpaint/test.gguf"));
+    QVERIFY(weights.open(QIODevice::WriteOnly));
+    weights.write("weights");
+    weights.close();
+    ModelCatalog catalog(directory.path(), false);
+    const QString id = "inpaint:test.gguf";
+    QVERIFY(catalog.modelById(id));
+    QVERIFY(catalog.models(ModelCategory::ImageGeneration).isEmpty());
+    auto inpaint = defaultModelOptions("inpaint");
+    inpaint.insert("steps", 35);
+    QVERIFY(catalog.configure(id, inpaint));
+    ModelCatalog restarted(directory.path(), false);
+    QCOMPARE(restarted.models(ModelCategory::Inpaint).size(), 1);
+    QCOMPARE(restarted.modelById(id)->recommendedOptions, inpaint);
+    QCOMPARE(defaultModelOptions("inpaint"), defaultModelOptions("image-generation"));
+    QCOMPARE(ModelCatalog::categoryFromName("inpaint"), std::optional<ModelCategory>(ModelCategory::Inpaint));
+    QCOMPARE(ModelCatalog::companionRole(ModelCategory::Inpaint), QString("vae"));
+    for (auto category : {"image-generation", "inpaint", "edition", "llm-chat", "upscaler", "ip-adapter", "ip_adapter", "clip_vision", "photomaker", "prompt-enhancer"}) {
         auto options = defaultModelOptions(category); QVERIFY(validateModelOptions(category, options));
         options.insert("unrelated", true); QVERIFY(!validateModelOptions(category, options));
     }

@@ -89,7 +89,7 @@ bool ServicePaths::ensureModelDirectories(QString *errorMessage)
         if (errorMessage) *errorMessage = QObject::tr("Service data directory is unavailable");
         return false;
     }
-    const std::array<QString, 8> paths = {root, modelsPath(), upscaleModelsPath(), chatModelsPath(), ipAdapterModelsPath(), clipVisionModelsPath(), photoMakerModelsPath(), promptEnhancerModelsPath()};
+    const std::array<QString, 10> paths = {root, modelsPath(), QDir(modelsPath()).filePath(QStringLiteral("face-parsing")), QDir(modelsPath()).filePath(QStringLiteral("inpaint")), upscaleModelsPath(), chatModelsPath(), ipAdapterModelsPath(), clipVisionModelsPath(), photoMakerModelsPath(), promptEnhancerModelsPath()};
     for (const QString &path : paths) {
         if (!QDir().mkpath(path)) {
             if (errorMessage) *errorMessage = QObject::tr("Could not create %1").arg(path);

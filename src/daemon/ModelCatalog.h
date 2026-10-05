@@ -18,7 +18,9 @@ enum class ModelCategory
     Edition,
     ClipVision,
     PhotoMaker,
-    PromptEnhancer
+    PromptEnhancer,
+    Inpaint,
+    FaceParsing
 };
 
 struct ModelInfo

@@ -8,6 +8,7 @@
 
 #include <QDebug>
 #include <QDir>
+#include <QtEndian>
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -86,6 +87,8 @@ struct KiraServiceDaemon::Submission
     QList<QByteArray> referenceImages;
     int referenceCount = 1;
     QByteArray ipAdapterImageData;
+    QByteArray maskImageData;
+    bool waitingMask = false;
 };
 
 struct KiraServiceDaemon::Job
@@ -106,6 +109,7 @@ struct KiraServiceDaemon::Job
     QPointer<QWebSocket> client;
     std::unique_ptr<QTemporaryDir> directory = std::make_unique<QTemporaryDir>();
     QString inputPath;
+    QString maskPath;
     QString ipAdapterImagePath;
     QString outputPath;
     QString photoMakerPath;
@@ -144,6 +148,25 @@ KiraServiceDaemon::KiraServiceDaemon(KiraServiceConfiguration configuration, QOb
         }
     });
     m_photoMakerTimeout.setSingleShot(true);
+    m_faceParsingTimeout.setSingleShot(true);
+    m_faceParsingTimeout.setInterval(m_configuration.faceParsingTimeoutMs);
+    connect(&m_faceParsingTimeout, &QTimer::timeout, this, [this] {
+        m_faceParsingTimedOut = true;
+        m_faceParsingProcess.kill();
+    });
+    connect(&m_faceParsingProcess, &QProcess::readyReadStandardError, this, [this] {
+        m_faceParsingError = (m_faceParsingError + m_faceParsingProcess.readAllStandardError()).right(4096);
+    });
+    connect(&m_faceParsingProcess, &QProcess::readyReadStandardOutput, this, [this] {
+        m_faceParsingProcess.readAllStandardOutput();
+    });
+    connect(&m_faceParsingProcess, &QProcess::finished, this, &KiraServiceDaemon::handleFaceParsingFinished);
+    connect(&m_faceParsingProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) {
+            m_faceParsingError = m_faceParsingProcess.errorString().toUtf8();
+            handleFaceParsingFinished(-1, QProcess::CrashExit);
+        }
+    });
     m_photoMakerTimeout.setInterval(10 * 60 * 1000);
     connect(&m_photoMakerTimeout, &QTimer::timeout, this, [this] {
         m_photoMakerTimedOut = true;
@@ -203,6 +226,9 @@ KiraServiceDaemon::~KiraServiceDaemon()
     // Closing the server while the client bookkeeping is still alive prevents
     // disconnect callbacks from accessing members already being destroyed.
     m_servers.clear();
+    m_faceParsingProcess.disconnect(this);
+    m_faceParsingProcess.kill();
+    m_faceParsingProcess.waitForFinished(3000);
     m_promptProcess.disconnect(this);
     m_promptProcess.kill();
     m_promptProcess.waitForFinished(3000);
@@ -334,14 +360,44 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     const bool upscale = operationName == QStringLiteral("image.upscale");
     const bool identityExport = operationName == QStringLiteral("photomaker.export");
     const bool promptEnhance = operationName == QStringLiteral("prompt.enhance");
+    const bool faceParsing = operationName == QStringLiteral("image.face-parsing");
+    const bool inpaint = operationName == QStringLiteral("image.inpaint");
     QJsonObject options = message.value(QStringLiteral("options")).toObject();
     const QString jobId = message.value(QStringLiteral("jobId")).toString();
     bool duplicateId = jobForId(jobId) != nullptr;
     for (const auto &pending : m_pendingUploads) {
         duplicateId = duplicateId || pending->id == jobId;
     }
-    if ((!generate && !upscale && !edit && !identityExport && !promptEnhance) || jobId.isEmpty() || duplicateId) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid job request"), jobId); return; }
+    if ((!generate && !upscale && !edit && !identityExport && !promptEnhance && !faceParsing && !inpaint) || jobId.isEmpty() || duplicateId) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid job request"), jobId); return; }
     if (promptEnhance) { submitPromptEnhancement(socket, message); return; }
+    if (faceParsing) {
+        if (!isFaceParsingReady()) {
+            sendError(socket, "face-parsing-unavailable", tr("Face parsing Python is not configured"), jobId); return;
+        }
+        if (!message.value("options").isObject() || options.keys() != QStringList{"modelId"}
+            || !options.value("modelId").isString()) {
+            sendError(socket, "invalid-request", tr("Face parsing accepts only a model ID and source image"), jobId); return;
+        }
+        const auto model = m_models->model(ModelCategory::FaceParsing, options.value("modelId").toString());
+        if (!model) { sendError(socket, "model-unavailable", tr("The requested face parsing model is unavailable"), jobId); return; }
+        if (m_pendingUploads.contains(socket) || m_queue.size() >= MaximumQueuedJobs) {
+            sendError(socket, "queue-full", tr("An upload is pending or the service queue is full"), jobId); return;
+        }
+        const auto recommendations = model->recommendedOptions.isEmpty()
+            ? KiraService::Protocol::defaultModelOptions("face-parsing") : model->recommendedOptions;
+        if (!KiraService::Protocol::validateModelOptions("face-parsing", recommendations)) {
+            sendError(socket, "invalid-request", tr("Invalid face parsing model recommendations"), jobId); return;
+        }
+        auto submission = std::make_shared<Submission>();
+        submission->id = jobId;
+        submission->operation = Operation::FaceParsing;
+        submission->options = recommendations;
+        submission->modelPath = model->filePath;
+        submission->client = socket;
+        m_pendingUploads.insert(socket, submission);
+        send(socket, {{"type", "upload-required"}, {"jobId", jobId}, {"inputRole", "source"}});
+        return;
+    }
     if (identityExport) {
         if (!isPhotoMakerExportReady()) {
             sendError(socket, "photomaker-unavailable", tr("PhotoMaker identity extraction is not configured"), jobId);
@@ -369,7 +425,7 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         sendError(socket, QStringLiteral("backend-not-ready"), tr("The requested service backend is unavailable"), jobId);
         return;
     }
-    const ModelCategory category = edit ? ModelCategory::Edition : generate ? ModelCategory::ImageGeneration : ModelCategory::Upscaler;
+    const ModelCategory category = inpaint ? ModelCategory::Inpaint : edit ? ModelCategory::Edition : generate ? ModelCategory::ImageGeneration : ModelCategory::Upscaler;
     const std::optional<ModelInfo> model = m_models->model(category, options.value(QStringLiteral("modelId")).toString());
     if (!model.has_value()) { sendError(socket, QStringLiteral("model-unavailable"), tr("The requested model is unavailable"), jobId); return; }
     if (upscale && options.contains(QStringLiteral("scale"))) {
@@ -377,10 +433,17 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         return;
     }
     if (m_queue.size() >= MaximumQueuedJobs) { sendError(socket, QStringLiteral("queue-full"), tr("The service queue is full"), jobId); return; }
-    if ((generate || edit) && (!validGenerationOptions(options)
+    if ((generate || edit || inpaint) && (!validGenerationOptions(options)
         || (edit && options.value("prompt").toString().trimmed().isEmpty()))) {
         sendError(socket, QStringLiteral("invalid-request"), tr("Invalid generation options"), jobId);
         return;
+    }
+    if ((inpaint && (!options.value("hasMask").isBool() || !options.value("hasMask").toBool()
+            || !options.value("hasInput").isBool() || !options.value("hasInput").toBool()
+            || !validNumber(options, "width", 64, 4096, true)
+            || !validNumber(options, "height", 64, 4096, true)))
+        || (!inpaint && options.contains("hasMask"))) {
+        sendError(socket, "invalid-request", tr("Inpainting requires a source image and mask"), jobId); return;
     }
     if (options.contains("styleId") && (!options.value("styleId").isString()
         || (!generate && !options.value("styleId").toString().isEmpty()))) {
@@ -444,24 +507,24 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         sendError(socket, "upload-in-progress", tr("Finish the pending image upload before submitting another job"), jobId);
         return;
     }
-    const bool needsInput = edit || upscale || options.value(QStringLiteral("hasInput")).toBool();
+    const bool needsInput = inpaint || edit || upscale || options.value(QStringLiteral("hasInput")).toBool();
     auto submission = std::make_shared<Submission>();
     submission->id = jobId;
-    submission->operation = edit ? Operation::Edit : generate ? Operation::Generate : Operation::Upscale;
+    submission->operation = inpaint ? Operation::Inpaint : edit ? Operation::Edit : generate ? Operation::Generate : Operation::Upscale;
     submission->options = options;
     submission->modelPath = model->filePath;
     if (photoMaker) {
         submission->photoMakerPath = photoMaker->filePath;
         submission->referenceCount = options.value("referenceCount").toInt(1);
     }
-    if ((generate || edit) && model->companionRole == QStringLiteral("vae") && !model->companionFileName.isEmpty())
+    if ((generate || edit || inpaint) && model->companionRole == QStringLiteral("vae") && !model->companionFileName.isEmpty())
         submission->vaePath = QDir(QFileInfo(model->filePath).absolutePath()).filePath(model->companionFileName);
     const QDir modelDirectory(QFileInfo(model->filePath).absolutePath());
     const auto filePath = [&](const QString &role) {
         const auto name = model->companionFiles.value(role).toString();
         return name.isEmpty() ? QString() : modelDirectory.filePath(name);
     };
-    if (generate || edit) {
+    if (generate || edit || inpaint) {
         if (model->companionFiles.contains("vae")) submission->vaePath = filePath("vae");
         submission->llmPath = filePath("llm");
         submission->llmVisionPath = filePath("mmproj");
@@ -712,7 +775,27 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
         sendError(socket, QStringLiteral("invalid-image"), tr("Image upload is empty or too large"), submission->id);
         return;
     }
-    if (submission->waitingPhotoMakerIdentity) submission->photoMakerIdentityData = data;
+    if (submission->operation == Operation::Inpaint && !submission->waitingIpAdapterImage) {
+        const auto validPng = [&](const QByteArray& bytes) {
+            return bytes.size() >= 33 && bytes.startsWith(QByteArray::fromHex("89504e470d0a1a0a"))
+                && bytes.mid(12, 4) == "IHDR"
+                && qFromBigEndian<quint32>(bytes.constData() + 8) == 13
+                && qFromBigEndian<quint32>(bytes.constData() + 16) == quint32(submission->options.value("width").toInt())
+                && qFromBigEndian<quint32>(bytes.constData() + 20) == quint32(submission->options.value("height").toInt());
+        };
+        if (!validPng(data) || data.size() + submission->inputData.size() > m_configuration.maximumImageBytes) {
+            m_pendingUploads.remove(socket);
+            sendError(socket, "invalid-image", tr("Source and mask must be PNGs with the requested dimensions and fit the upload limit"), submission->id); return;
+        }
+        if (!submission->waitingMask) {
+            submission->inputData = data;
+            submission->waitingMask = true;
+            send(socket, {{"type", "upload-required"}, {"jobId", submission->id}, {"inputRole", "mask"}});
+            return;
+        }
+        submission->maskImageData = data;
+    }
+    else if (submission->waitingPhotoMakerIdentity) submission->photoMakerIdentityData = data;
     else if (submission->operation == Operation::PhotoMakerExport || !submission->photoMakerPath.isEmpty()) {
         qsizetype total = data.size();
         for (const auto& image : submission->referenceImages) total += image.size();
@@ -729,7 +812,15 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
         }
         submission->inputData = submission->referenceImages.first();
     }
-    else if (submission->waitingIpAdapterImage) submission->ipAdapterImageData = data;
+    else if (submission->waitingIpAdapterImage) {
+        if (submission->operation == Operation::Inpaint
+            && data.size() + submission->inputData.size() + submission->maskImageData.size() > m_configuration.maximumImageBytes) {
+            m_pendingUploads.remove(socket);
+            sendError(socket, "invalid-image", tr("The combined source, mask and reference upload is too large"), submission->id);
+            return;
+        }
+        submission->ipAdapterImageData = data;
+    }
     else submission->inputData = data;
     if (!submission->photoMakerPath.isEmpty() && !submission->waitingPhotoMakerIdentity) {
         submission->waitingPhotoMakerIdentity = true;
@@ -762,6 +853,7 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
     job->ipAdapterLoraPath = submission->ipAdapterLoraPath;
     job->client = socket;
     job->photoMakerPath = submission->photoMakerPath;
+    job->maskPath = submission->maskImageData.isEmpty() ? QString() : job->directory->filePath("mask.png");
     if (!job->directory->isValid()) { sendError(socket, QStringLiteral("storage-error"), tr("Could not create job storage"), job->id); return; }
     const auto saveImage = [&](const QByteArray &bytes, const QString &name, QString &path) {
         if (bytes.isEmpty()) return true;
@@ -770,6 +862,7 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket *socket, const QByteArra
         return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
     };
     if (!saveImage(submission->inputData, "input.png", job->inputPath)
+        || !saveImage(submission->maskImageData, "mask.png", job->maskPath)
         || !saveImage(submission->ipAdapterImageData, "ip-adapter.png", job->ipAdapterImagePath)
         || !saveImage(submission->photoMakerIdentityData, "id_embeds.bin", job->photoMakerIdentityPath)) {
         sendError(socket, QStringLiteral("storage-error"), tr("Could not save image upload"), job->id);
@@ -800,6 +893,9 @@ void KiraServiceDaemon::startNextJob()
     send(m_activeJob->client, {{QStringLiteral("type"), QStringLiteral("running")}, {QStringLiteral("jobId"), m_activeJob->id}});
     if (m_activeJob->operation == Operation::PromptEnhance) {
         startPromptEnhancement();
+    } else if (m_activeJob->operation == Operation::FaceParsing) {
+        startFaceParsing();
+        return;
     } else if (m_activeJob->operation == Operation::PhotoMakerExport) {
         m_activeJob->outputPath = m_activeJob->directory->filePath("id_embeds.bin");
         QFile wrapper(":/photomaker/photomaker-export.py");
@@ -819,7 +915,7 @@ void KiraServiceDaemon::startNextJob()
         broadcastQueuePositions();
         return;
     }
-    if (m_activeJob->operation == Operation::Generate || m_activeJob->operation == Operation::Edit) {
+    if (m_activeJob->operation == Operation::Generate || m_activeJob->operation == Operation::Edit || m_activeJob->operation == Operation::Inpaint) {
         m_activeJob->outputPath = m_activeJob->directory->filePath(QStringLiteral("result.png"));
         GenerationRequest request;
         const QJsonObject &o = m_activeJob->options;
@@ -829,7 +925,7 @@ void KiraServiceDaemon::startNextJob()
         request.height = o.value(QStringLiteral("height")).toInt(request.height);
         request.steps = o.value(QStringLiteral("steps")).toInt(request.steps);
         request.cfgScale = o.value(QStringLiteral("cfgScale")).toDouble(7.0); request.clipSkip = o.value(QStringLiteral("clipSkip")).toInt(-1); request.seed = o.value(QStringLiteral("seed")).toInt(-1);
-        request.baseImageStrength = o.value(QStringLiteral("baseImageStrength")).toDouble(0.55); request.outputPath = m_activeJob->outputPath;
+        request.baseImageStrength = o.value(QStringLiteral("baseImageStrength")).toDouble(m_activeJob->operation == Operation::Inpaint ? 0.99 : 0.55); request.outputPath = m_activeJob->outputPath;
         request.modelPath = m_activeJob->modelPath;
         request.vaePath = m_activeJob->vaePath;
         request.llmPath = m_activeJob->llmPath;
@@ -844,6 +940,7 @@ void KiraServiceDaemon::startNextJob()
         request.ipAdapterStrength = o.value("ip_adapter_strength").toDouble(1.0);
         request.photoMakerPath = m_activeJob->photoMakerPath;
         request.photoMakerIdentityPath = m_activeJob->photoMakerIdentityPath;
+        request.maskImagePath = m_activeJob->maskPath;
         request.photoMakerImagesDirectory = m_activeJob->directory->path();
         request.photoMakerStyleStrength = o.value("photoMakerStyleStrength").toInt(20);
         if (m_activeJob->operation == Operation::Edit) request.referenceImagePath = m_activeJob->inputPath;
@@ -868,7 +965,7 @@ void KiraServiceDaemon::handleGenerationFinished(const SdCliGenerationResult &re
         if (!diagnostic.isEmpty()) detail += tr("\nBackend error:\n%1").arg(diagnostic);
         sendError(job->client, QStringLiteral("generation-failed"), detail, job->id);
     }
-    else { QFile output(job->outputPath); const bool opened = output.open(QIODevice::ReadOnly); const QByteArray bytes = opened ? output.readAll() : QByteArray(); if (bytes.isEmpty()) sendError(job->client, QStringLiteral("result-read-failed"), tr("Could not read generated image"), job->id); else { send(job->client, {{QStringLiteral("type"), QStringLiteral("result")}, {QStringLiteral("jobId"), job->id}, {QStringLiteral("operation"), job->operation == Operation::Edit ? QStringLiteral("image.edit") : QStringLiteral("image.generate")}, {QStringLiteral("mimeType"), QStringLiteral("image/png")}}); job->client->sendBinaryMessage(bytes); } }
+    else { QFile output(job->outputPath); const bool opened = output.open(QIODevice::ReadOnly); const QByteArray bytes = opened ? output.readAll() : QByteArray(); if (bytes.isEmpty()) sendError(job->client, QStringLiteral("result-read-failed"), tr("Could not read generated image"), job->id); else { send(job->client, {{QStringLiteral("type"), QStringLiteral("result")}, {QStringLiteral("jobId"), job->id}, {QStringLiteral("operation"), job->operation == Operation::Inpaint ? QStringLiteral("image.inpaint") : job->operation == Operation::Edit ? QStringLiteral("image.edit") : QStringLiteral("image.generate")}, {QStringLiteral("mimeType"), QStringLiteral("image/png")}}); job->client->sendBinaryMessage(bytes); } }
     m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
 }
 
@@ -888,6 +985,7 @@ void KiraServiceDaemon::cancelJobsFor(QWebSocket *socket)
     m_queue = std::move(kept);
     if (m_activeJob && m_activeJob->client == socket) {
         if (m_activeJob->operation == Operation::PromptEnhance) m_promptProcess.kill();
+        else if (m_activeJob->operation == Operation::FaceParsing) m_faceParsingProcess.kill();
         else if (m_activeJob->operation == Operation::PhotoMakerExport) m_photoMakerProcess.kill();
         else if (m_sdRunner) m_sdRunner->cancel();
     }
@@ -901,16 +999,66 @@ void KiraServiceDaemon::broadcastQueuePositions()
 
 void KiraServiceDaemon::sendCapabilities(QWebSocket *socket) const
 {
-    const QString state = isImageReady() || isPhotoMakerExportReady() || isPromptEnhancementReady() ? QStringLiteral("ready") : QStringLiteral("unavailable");
+    const QString state = isImageReady() || isPhotoMakerExportReady() || isPromptEnhancementReady() || isFaceParsingReady() ? QStringLiteral("ready") : QStringLiteral("unavailable");
     QJsonArray operations;
     if (isImageReady()) {
         operations.append(QStringLiteral("image.generate"));
         operations.append(QStringLiteral("image.upscale"));
         operations.append(QStringLiteral("image.edit"));
+        operations.append(QStringLiteral("image.inpaint"));
     }
     if (isPhotoMakerExportReady()) operations.append("photomaker.export");
     if (isPromptEnhancementReady()) operations.append("prompt.enhance");
+    if (isFaceParsingReady()) operations.append("image.face-parsing");
     send(socket, {{QStringLiteral("type"), QStringLiteral("capabilities")}, {QStringLiteral("state"), state}, {QStringLiteral("operations"), operations}, {"ipAdapter", isImageReady()}, {"photoMaker", isImageReady()}});
+}
+
+bool KiraServiceDaemon::isFaceParsingReady() const
+{
+    return !m_configuration.faceParsingPython.isEmpty()
+        && !QStandardPaths::findExecutable(m_configuration.faceParsingPython).isEmpty();
+}
+
+void KiraServiceDaemon::startFaceParsing()
+{
+    auto job = m_activeJob;
+    job->outputPath = job->directory->filePath("mask.png");
+    QFile wrapper(":/face-parsing/face-parsing.py");
+    if (!wrapper.open(QIODevice::ReadOnly)) {
+        sendError(job->client, "face-parsing-failed", tr("Could not load the face parser"), job->id);
+        m_activeJob.reset(); startNextJob(); return;
+    }
+    m_faceParsingError.clear();
+    m_faceParsingTimedOut = false;
+    m_faceParsingProcess.setWorkingDirectory(job->directory->path());
+    m_faceParsingTimeout.start();
+    m_faceParsingProcess.start(m_configuration.faceParsingPython,
+        {"-c", QString::fromUtf8(wrapper.readAll()), job->modelPath, job->inputPath, job->outputPath,
+         QString::fromUtf8(QJsonDocument(job->options).toJson(QJsonDocument::Compact))});
+    broadcastQueuePositions();
+}
+
+void KiraServiceDaemon::handleFaceParsingFinished(int exitCode, QProcess::ExitStatus status)
+{
+    if (!m_activeJob || m_activeJob->operation != Operation::FaceParsing) return;
+    m_faceParsingTimeout.stop();
+    const auto job = m_activeJob;
+    m_faceParsingError = (m_faceParsingError + m_faceParsingProcess.readAllStandardError()).right(4096);
+    QFile output(job->outputPath);
+    QByteArray bytes;
+    if (status == QProcess::NormalExit && exitCode == 0 && !m_faceParsingTimedOut
+        && output.size() <= m_configuration.maximumImageBytes && output.open(QIODevice::ReadOnly))
+        bytes = output.readAll();
+    if (!bytes.startsWith(QByteArray::fromHex("89504e470d0a1a0a"))) {
+        QString detail = m_faceParsingTimedOut ? tr("Face parsing timed out") : tr("Face parsing failed");
+        if (!m_faceParsingError.isEmpty()) detail += '\n' + QString::fromUtf8(m_faceParsingError);
+        sendError(job->client, "face-parsing-failed", detail, job->id);
+    } else if (job->client) {
+        send(job->client, {{"type", "result"}, {"jobId", job->id},
+            {"operation", "image.face-parsing"}, {"mimeType", "image/png"}});
+        job->client->sendBinaryMessage(bytes);
+    }
+    m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
 }
 
 bool KiraServiceDaemon::isPromptEnhancementReady() const

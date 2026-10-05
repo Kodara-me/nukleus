@@ -1,4 +1,6 @@
 #include "kira/service/ModelOptions.h"
+#include <QJsonArray>
+#include <QSet>
 #include <cmath>
 
 namespace KiraService::Protocol
@@ -34,9 +36,22 @@ QJsonObject defaultPromptEnhancerOptions(const QString &subtype, bool sampling)
     return options;
 }
 
+QStringList faceParsingClasses()
+{
+    return {"background", "skin", "nose", "eye_g", "l_eye", "r_eye", "l_brow", "r_brow",
+            "l_ear", "r_ear", "mouth", "u_lip", "l_lip", "hair", "hat", "ear_r",
+            "neck_l", "neck", "cloth"};
+}
+
 QJsonObject defaultModelOptions(const QString &category)
 {
-    if (category == "image-generation" || category == "edition")
+    if (category == "face-parsing")
+        return {{"includedClasses", QJsonArray{"skin", "nose", "l_eye", "r_eye", "l_brow", "r_brow",
+                                              "l_ear", "r_ear", "mouth", "u_lip", "l_lip", "hair"}},
+                {"dilatePixels", 8}, {"featherPixels", 8}, {"invertMask", false},
+                {"preserveAspectRatio", true}, {"outputAtSourceResolution", true},
+                {"provider", "CPUExecutionProvider"}};
+    if (category == "image-generation" || category == "inpaint" || category == "edition")
         return {{"width", 1024}, {"height", 1024},  {"steps", 28},   {"cfgScale", 7.0},
                 {"sampler", ""}, {"scheduler", ""}, {"clipSkip", -1}};
     if (category == "llm-chat")
@@ -73,7 +88,22 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
         return value.isDouble() && std::isfinite(n) && n >= low && n <= high &&
                (!integer || std::floor(n) == n);
     };
-    if (category == "prompt-enhancer") {
+    if (category == "face-parsing") {
+        const auto classes = options.value("includedClasses");
+        if (!classes.isArray() || classes.toArray().isEmpty()
+            || !number("dilatePixels", 0, 256, true) || !number("featherPixels", 0, 256, true)
+            || !options.value("invertMask").isBool()
+            || !options.value("preserveAspectRatio").isBool()
+            || !options.value("outputAtSourceResolution").isBool()
+            || options.value("provider") != QJsonValue("CPUExecutionProvider")) return fail();
+        QSet<QString> included;
+        for (const auto& value : classes.toArray()) {
+            if (!value.isString() || !faceParsingClasses().contains(value.toString())
+                || included.contains(value.toString())) return fail();
+            included.insert(value.toString());
+        }
+    }
+    else if (category == "prompt-enhancer") {
         const auto subtype = options.value("subtype").toString();
         if (!options.value("doSample").isBool() || !number("maxOutputTokens", 1, 131072, true)
             || !number("repetitionPenalty", 0.01, 10)) return fail();
@@ -91,7 +121,7 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
             if (!number("temperature", 0, 2) || !number("topP", 0.01, 1)
                 || !number("topK", 0, 10000, true)) return fail();
     }
-    else if (category == "image-generation" || category == "edition")
+    else if (category == "image-generation" || category == "inpaint" || category == "edition")
     {
         const int width = options.value("width").toInt();
         const int clip = options.value("clipSkip").toInt();

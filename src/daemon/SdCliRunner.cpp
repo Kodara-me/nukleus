@@ -142,6 +142,8 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
         arguments.append({QStringLiteral("--init-img"), request.baseImagePath,
                           QStringLiteral("--strength"), QString::number(request.baseImageStrength, 'g', 17)});
     }
+    if (!request.maskImagePath.isEmpty())
+        arguments.append({QStringLiteral("--mask"), request.maskImagePath});
     if (request.clipSkip > 0) arguments.append({QStringLiteral("--clip-skip"), QString::number(request.clipSkip)});
     if (m_requestType != RequestType::None || m_executablePath.isEmpty()) {
         return false;

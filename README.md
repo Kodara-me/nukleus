@@ -1,5 +1,54 @@
 # Kira Service
 
+The **Inpaint** category (`inpaint`, stored under `models/inpaint/`) uses the
+same recommended generation parameters, primary weight formats, model types
+and optional encoder/VAE files as Image generation. Manage it through the
+Manager or SDK installation/configuration APIs. Existing Image generation,
+PhotoMaker and IP-Adapter models retain their categories and functionality.
+The additive `image.inpaint` operation uploads a PNG source followed by its PNG
+mask and runs sd-cli with `--init-img`, `--mask` and `--strength`. It uses the
+shared execution FIFO, progress and diagnostic errors. The requested dimensions
+must match both images (64–4096 per side); the combined upload fits the configured
+image-byte limit. The default denoising strength is 0.99 when omitted. Saved
+recommendations are not silently applied by the service. Canvas explicitly
+selects the default model's recommendations and recomposes the output through
+the mask to preserve unselected pixels. Inpainting also accepts existing
+IP-Adapter conditioning fields. Request the reference as a third
+`inputRole: ip-adapter` upload after source and mask; its dimensions may differ.
+Resolve the opaque CLIP Vision/IP-Adapter model IDs and pass the reference through
+`--clip_vision`, `--ip-adapter`, `--ip-adapter-image` and
+`--ip-adapter-strength`. Canvas uses the accepted package's first PNG and 0.8.
+
+The **Face parsing** category (`face-parsing`, stored under
+`models/face-parsing/`) accepts one `.onnx` file and no companions. The Manager
+supports installation, configuration and deletion through the existing atomic
+workflows. Mask recommendations default to face regions plus hair, expansion
+and soft edges of 8 source pixels, no inversion, preserved aspect ratio, source
+output resolution and `CPUExecutionProvider`. These are saved recommendations
+only until a job is explicitly submitted. Face parsing runs through the optional
+server-side Python/ONNX Runtime worker described below.
+Input resolution is not a user setting. Install the desired regular or quantized
+ONNX file; there is no quantization toggle or automatic weight conversion.
+
+To enable mask generation, install `numpy`, `Pillow` and `onnxruntime` in a
+service-readable Python environment and set `KIRA_FACE_PARSING_PYTHON` to its
+Python executable. Under systemd, add that variable to
+`/etc/kira-service/kira-service.conf` and restart the service; `ProtectHome`
+requires an environment outside home directories, such as `/opt/kira-face-parsing`.
+The additive `image.face-parsing` operation accepts the installed model's opaque
+ID and source image bytes. It snapshots saved recommendations (shared defaults
+when absent), runs on CPU in the shared FIFO, and returns a grayscale PNG.
+White selects the included regions; black excludes them. No matching regions,
+unreadable images, missing runtime dependencies, incompatible models and timeouts
+produce explicit job errors. There is no automatic download or inpainting.
+
+[jonathandinu/face-parsing](https://huggingface.co/jonathandinu/face-parsing)
+provides SegFormer/MiT-B5 with 19 CelebAMask-HQ classes and
+[regular and quantized ONNX files](https://huggingface.co/jonathandinu/face-parsing/tree/main/onnx).
+Use its actual labels (`l_eye`, `l_brow`, `u_lip`, etc.), as documented in
+the protocol. This model's card describes non-commercial research/educational
+use. It is a reference model, not downloaded or bundled by Kira.
+
 PhotoMaker identity packages support one to four ordered PNG references plus
 optional face/hair descriptions and seed metadata. Extraction and generation use
 all references; metadata prompts/seed are not applied to generation. Existing

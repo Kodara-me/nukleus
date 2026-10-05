@@ -78,7 +78,7 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
         });
         connect(browse, &QPushButton::clicked, this, [this, field] {
             const QString path = QFileDialog::getOpenFileName(this, tr("Choose model file"), {},
-                tr("Model files (*.gguf *.safetensors *.ckpt *.bin);;All files (*)"));
+                tr("Model files (*.gguf *.safetensors *.ckpt *.bin *.onnx);;All files (*)"));
             if (!path.isEmpty()) field->setText(QUrl::fromLocalFile(path).toString());
         });
         return row;
@@ -88,6 +88,8 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     m_category = new QComboBox(content);
     m_category->setObjectName("modelCategory");
     for (const auto &item : QList<QPair<QString, QString>>{{tr("Image generation"), "image-generation"},
+                                                           {tr("Inpaint"), "inpaint"},
+                                                           {tr("Face parsing"), "face-parsing"},
                                                            {tr("Edition"), "edition"},
                                                            {tr("Upscaler"), "upscaler"},
                                                            {tr("LLM"), "llm-chat"},
@@ -210,13 +212,13 @@ void AddModelDialog::updateCategory()
 {
     const QString category = m_category->currentData().toString();
     m_companion->clear();
-    const bool supports = category != "upscaler" && category != "clip_vision" && category != "photomaker" && category != "prompt-enhancer";
+    const bool supports = category != "face-parsing" && category != "upscaler" && category != "clip_vision" && category != "photomaker" && category != "prompt-enhancer";
     m_companion->setVisible(supports);
     m_companionLabel->setVisible(supports);
     m_companionLabel->setText(category == "llm-chat"     ? tr("Optional mmproj URL:")
                               : category == "ip_adapter" ? tr("Optional LoRA URL:")
                                                          : tr("Optional VAE URL:"));
-    const bool image = category == "image-generation" || category == "edition";
+    const bool image = category == "image-generation" || category == "inpaint" || category == "edition";
     m_clipL->clear();
     m_clipG->clear();
     m_textEncoder->clear();

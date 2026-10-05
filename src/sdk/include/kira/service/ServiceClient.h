@@ -38,6 +38,8 @@ public:
     QString submitEdit(const ImageGenerationRequest &request);
     QString submitGeneration(const ImageGenerationRequest &request);
     QString submitUpscale(const ImageUpscaleRequest &request);
+    QString submitFaceParsing(const ImageUpscaleRequest &request);
+    QString submitInpaint(const ImageGenerationRequest& request, const QByteArray& maskImageData);
     QString exportPhotoMakerIdentity(const QByteArray &sourceImageData);
     QString exportPhotoMakerIdentityImages(const QList<QByteArray>& sourceImages);
     bool canEnhancePrompt(const QString& modelId) const;
@@ -64,13 +66,14 @@ private:
         ImageOperation operation = ImageOperation::Generate;
         QByteArray inputData;
         QByteArray ipAdapterImageData;
+        QByteArray maskImageData;
         QString mimeType;
         bool identityExport = false;
         QByteArray photoMakerIdentityData;
         bool promptEnhancement = false;
         QList<QByteArray> referenceImages;
     };
-    QString submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData, const QByteArray &ipAdapterImageData = {}, const QByteArray &photoMakerIdentityData = {}, const QList<QByteArray>& references = {});
+    QString submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData, const QByteArray &ipAdapterImageData = {}, const QByteArray &photoMakerIdentityData = {}, const QList<QByteArray>& references = {}, const QByteArray& maskImageData = {});
     void authenticate();
     void handleTextMessage(const QString &message);
     void handleBinaryMessage(const QByteArray &data);

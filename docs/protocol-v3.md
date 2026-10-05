@@ -9,12 +9,51 @@ Clients authenticate first:
 The version-3 authentication message is required for every client. Loopback peers may send an empty token. Non-loopback peers must send the configured shared LAN token.
 
 The service replies with `authenticated` and `capabilities`. `models.list` returns
-`image-generation`, `edition`, `upscaler`, `llm-chat`, `ip_adapter`,
-`clip_vision`, `photomaker` and `prompt-enhancer`. `ip-adapter` remains an accepted category alias;
+`image-generation`, `inpaint`, `edition`, `upscaler`, `llm-chat`, `ip_adapter`,
+`clip_vision`, `photomaker`, `prompt-enhancer` and `face-parsing`. `ip-adapter` remains an accepted category alias;
 existing opaque `ip-adapter:` IDs and the storage directory are preserved.
 Each model contains `id`, `name`, `fileName` and `bytes`; a model with a
 companion also includes the category-relative `companionFileName` and
 `companionRole` (`lora`, `mmproj` or `vae`). PhotoMaker does not accept companions.
+Inpaint supports the same primary formats, model types and optional companion
+roles as Image generation. It uses separate `models/inpaint/` storage and opaque
+`inpaint:` IDs. It executes through `image.inpaint`.
+
+### Inpainting
+
+```json
+{"type":"submit","operation":"image.inpaint","jobId":"inpaint-job","options":{"modelId":"inpaint:model.safetensors","prompt":"adult with green eyes","negativePrompt":"blur","width":1024,"height":1024,"seed":42,"hasInput":true,"hasMask":true,"baseImageStrength":0.99}}
+```
+
+Require an installed Inpaint model, a nonblank prompt, explicit width/height
+integers 64–4096 and both upload flags set to true. Other generation parameters
+use the existing validation/defaults; absent strength defaults to 0.99. Reject
+PhotoMaker conditioning and nonempty style IDs. Allow existing IP-Adapter fields
+and validation (both opaque model IDs, hasIpAdapterImage and strength 0–2).
+Do not apply saved
+recommendations automatically. Canvas composes selected style prefixes locally.
+
+Request `upload-required` / `inputRole: source`, then `inputRole: mask`.
+Both uploads must be PNGs with IHDR dimensions matching the requested width and
+height, and fit maximumImageBytes together. Empty, oversized or mismatched data
+returns `invalid-image`; decoding errors remain backend job failures.
+When IP-Adapter fields are supplied, request a third `inputRole: ip-adapter`
+upload after the mask. Its dimensions are independent of source/mask. Bound the
+combined three uploads by maximumImageBytes. Queue only after all requested
+uploads arrive. Protect model/companions throughout pending
+upload and execution; disconnect uses the existing cleanup/cancellation behavior.
+
+Run sd-cli with `--init-img`, `--mask` and `--strength`, retaining the normal
+modelType and companion handling. Resolve conditioning IDs and use the existing
+`--clip_vision`, `--ip-adapter`, `--ip-adapter-image` and
+`--ip-adapter-strength` flags when requested. Return a PNG through the standard result/binary
+image-job lifecycle, with `operation: image.inpaint`. The SDK exposes
+`submitInpaint(ImageGenerationRequest, maskImageData)` and
+`ServiceCapabilities::imageInpaint`.
+
+The mask uses white for replacement, black for preservation and gray for partial
+blending. Canvas resizes output to source dimensions if necessary and blends
+through the snapshotted mask to preserve unselected pixels exactly.
 
 Model administrators send `models.install` with a client-generated `installId`, explicit category, and HTTPS model-file URL. Optional `companionUrl` is an auxiliary LoRA for `ip_adapter`, mmproj for `llm-chat`, or VAE for `image-generation` and `edition`; it is rejected for `upscaler` and `clip_vision`. mmproj requires a `.gguf` filename; VAE and LoRA accept `.safetensors`, `.ckpt`, or `.gguf`. SHA-256 is no longer checked or accepted by the SDK/manager; legacy protocol `sha256` fields are ignored. The service stages both downloads and commits the primary, companion, and relationship metadata together, so a failed or canceled pair leaves no usable catalog entry. A restart preserves the relationship; deletion removes both files. Listings and install completion expose the companion filename and role, never absolute paths. Image-generation VAE companions are resolved internally and passed to sd-cli with --vae; image LLM text encoders and mmproj use --llm and --llm_vision respectively; LLM-chat mmproj does not alter image invocation. IP-Adapter auxiliary LoRA is consumed when the adapter is explicitly selected (see below). The service emits `models.install.accepted`, `models.install.progress`, `models.install.completed`, or an `error` containing that `installId`.
 
@@ -132,13 +171,52 @@ when provided, the object must contain exactly the category's complete fields:
 
 | Category | Fields and validation |
 | --- | --- |
-| image-generation / edition | `width` and `height`: identical integers 256–2048, multiples of 256; `steps`: integer 1–200; `cfgScale`: number 0–100; `sampler` and `scheduler`: allowed strings; `clipSkip`: -1 or integer 1–12 |
+| image-generation / inpaint / edition | `width` and `height`: identical integers 256–2048, multiples of 256; `steps`: integer 1–200; `cfgScale`: number 0–100; `sampler` and `scheduler`: allowed strings; `clipSkip`: -1 or integer 1–12 |
 | llm-chat | `temperature`: number 0–2; `topP`: number >0 and ≤1; `contextLength`: integer 256–131072; `maxTokens`: integer 1–contextLength |
 | upscaler | `tileSize`: integer 64, 128, 256, 512 or 1024 |
 | ip_adapter (legacy ip-adapter alias) | `strength`: number 0–2, default 1.0 |
 | clip_vision | `image_size`: integer 1–4096, default 224; `normalize_input`: boolean, default true |
 | photomaker | `style_strength`: integer 0–100, default 20 |
 | prompt-enhancer | `subtype`: T5, LLM or VLM; subtype-specific fields below |
+| face-parsing | `includedClasses`: nonempty array of unique class labels below; `dilatePixels` / `featherPixels`: integers 0–256, default 8; `invertMask`: boolean, default false; `preserveAspectRatio` / `outputAtSourceResolution`: booleans, default true; `provider`: exactly `CPUExecutionProvider` |
+
+Face parsing accepts one `.onnx` primary, without companions or image-model
+type/encoder configuration. Install either regular or quantized weights using
+the existing install API; the selected file determines quantization. Storage is
+`models/face-parsing/` and IDs remain opaque (`face-parsing:` category prefix).
+The optional `image.face-parsing` operation is advertised when the configured
+`KIRA_FACE_PARSING_PYTHON` executable exists. Its environment requires NumPy,
+Pillow and ONNX Runtime; missing dependencies produce job errors.
+
+Allowed labels follow
+[jonathandinu/face-parsing](https://huggingface.co/jonathandinu/face-parsing):
+`background`, `skin`, `nose`, `eye_g` (glasses), `l_eye`, `r_eye`,
+`l_brow`, `r_brow`, `l_ear`, `r_ear`, `mouth`, `u_lip`, `l_lip`,
+`hair`, `hat`, `ear_r` (earring), `neck_l` (necklace), `neck`, `cloth`.
+Defaults include `skin,nose,l_eye,r_eye,l_brow,r_brow,l_ear,r_ear,mouth,u_lip,l_lip,hair`.
+Dilation and feathering sizes represent source-image pixels. Input resolution
+is not exposed; recommendations are snapshotted only for an explicit parsing job.
+
+```json
+{"type":"submit","operation":"image.face-parsing","jobId":"mask-job","options":{"modelId":"face-parsing:model.onnx"}}
+```
+
+Accept only a model ID in options; no prompt, identity or adapter inputs. The
+service responds with `upload-required` / `inputRole: source`, accepts one
+binary image, then uses the shared queued/running/result lifecycle. Completion
+returns `operation: image.face-parsing`, `mimeType: image/png` and mask bytes.
+The SDK exposes `submitFaceParsing(ImageUpscaleRequest)` and returns the mask via
+`imageJobFinished` with `ImageOperation::FaceParsing`. A configured worker is
+independent of sd-cli readiness.
+
+The mask uses all selected matching semantic regions. White means selected and
+black means excluded; inversion reverses this convention. Default output matches
+the source resolution; disabling `outputAtSourceResolution` returns the fitted
+model-input region resolution. Dilation/feathering always occur in source pixels.
+No selected regions, malformed input/model, process errors and the ten-minute
+timeout return `face-parsing-failed`. Empty/oversized uploads return
+`invalid-image`. Disconnect terminates the worker, retaining temporary storage
+until process exit. No identity transfer or inpainting occurs.
 
 Prompt Enhancer stores `subtype` within `recommendedOptions` and defaults to LLM
 when recommendations are initialized. Options are complete, validated objects;
@@ -266,7 +344,7 @@ heuristics determine model type. Unused companions remain optional.
 Every model object in `models.list.result`, `models.install.completed` and
 `models.configure.completed` includes `explicitContent`, a boolean that defaults
 to `false` for models without saved classification. It is separate from
-`recommendedOptions` and applies to all seven categories.
+`recommendedOptions` and applies to all model categories.
 
 `models.install` and `models.configure` accept optional `explicitContent`.
 Non-boolean values are rejected. Omission leaves existing classification unchanged

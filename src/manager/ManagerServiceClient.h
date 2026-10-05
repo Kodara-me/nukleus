@@ -108,6 +108,8 @@ private:
     QList<ManagedModelInfo> m_promptEnhancerModels;
     QList<ManagedModelInfo> m_ipAdapterModels;
     QList<ManagedModelInfo> m_clipVisionModels;
+    QList<ManagedModelInfo> m_faceParsingModels;
+    QList<ManagedModelInfo> m_inpaintModels;
     QList<ManagedModelInfo> m_photoMakerModels;
     QList<ManagedInstall> m_installs;
 };

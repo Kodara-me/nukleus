@@ -25,6 +25,38 @@
 
 ## Manager UI and recommended options
 
+Inpaint uses category `inpaint` and models/inpaint storage. It shares Image
+generation recommended options, primary weight formats, model types and optional
+companions. image.inpaint accepts a source PNG followed by a same-size mask PNG,
+with explicit generation options. Require dimensions 64–4096 matching the PNG
+headers and a combined upload within maximumImageBytes. Use the shared FIFO,
+model protection and temporary job storage; invoke sd-cli through QProcess with
+--init-img, --mask and --strength (0.99 when absent). Preserve companion/modelType
+handling. Do not apply saved recommendations automatically or accept PhotoMaker
+or styleId conditioning for this operation. Allow existing IP-Adapter fields;
+after source and mask, request the separate ip-adapter upload, with independent
+dimensions. Bound all three uploads together and protect all selected models.
+Use existing --clip_vision/--ip-adapter/--ip-adapter-image/--ip-adapter-strength
+arguments and companion handling. Return a normal image job
+result; Canvas owns mask blending and history. Keep existing categories unchanged.
+
+Face parsing uses category `face-parsing` and models/face-parsing storage.
+Accept one ONNX primary and no companions. Protocol owns strict mask recommendation
+defaults/validation; Manager edits semantic regions, dilation/feather source-pixel
+sizes, inversion, aspect-ratio/source-resolution flags and CPU provider metadata.
+Use the 19 jonathandinu/face-parsing labels; include face regions plus hair by
+default. Input resolution stays internal. Quantization is selected by the installed
+file, without a conversion toggle. image.face-parsing accepts only an opaque model
+ID plus one source-image upload and returns a grayscale PNG. Snapshot saved
+recommendations, using shared defaults when absent; share the FIFO and protect the
+model while pending/queued/active. An embedded Python worker uses optional NumPy,
+Pillow and ONNX Runtime on CPU, configured through KIRA_FACE_PARSING_PYTHON.
+Canvas never runs it. Preserve aspect ratio by padding/removing padding, normalize
+according to the reference SegFormer preprocessor, resize logits before argmax,
+then dilate/feather at source resolution. Missing regions, invalid input/model,
+missing dependencies and timeouts fail explicitly and release the queue after
+process termination. Disconnect cancels the owned job. Preserve existing categories.
+
 Model install/configure accepts optional displayName (trimmed, at most 256
 characters). Omission preserves it; an empty value clears it. Catalogue name
 resolves displayName or the full installed filename. Manager and Canvas use

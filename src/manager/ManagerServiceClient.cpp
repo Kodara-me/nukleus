@@ -72,7 +72,7 @@ ManagerServiceClient::ManagerServiceClient(QObject *parent, quint16 localPort)
         m_connectionTimeout.stop();
         m_authenticated = false;
         m_modelListAvailable = false;
-        m_generationModels.clear(); m_editionModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_ipAdapterModels.clear(); m_clipVisionModels.clear(); m_photoMakerModels.clear(); m_promptEnhancerModels.clear();
+        m_faceParsingModels.clear(); m_inpaintModels.clear(); m_generationModels.clear(); m_editionModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_ipAdapterModels.clear(); m_clipVisionModels.clear(); m_photoMakerModels.clear(); m_promptEnhancerModels.clear();
         failActiveInstalls(tr("Service connection was closed"));
         emit modelsChanged();
         if (!m_openingConnection) {
@@ -124,6 +124,8 @@ QList<ManagedModelInfo> ManagerServiceClient::models(const QString &category) co
     if (category == QStringLiteral("llm-chat")) return m_llmChatModels;
     if (category == QStringLiteral("ip-adapter") || category == "ip_adapter") return m_ipAdapterModels;
     if (category == "clip_vision") return m_clipVisionModels;
+    if (category == "face-parsing") return m_faceParsingModels;
+    if (category == "inpaint") return m_inpaintModels;
     if (category == "photomaker") return m_photoMakerModels;
     if (category == "prompt-enhancer") return m_promptEnhancerModels;
     return {};
@@ -208,7 +210,7 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
     const QJsonObject object = document.object(); const QString type = object.value(QStringLiteral("type")).toString();
     if (type == QStringLiteral("authenticated")) { m_connectionTimeout.stop(); m_authenticated = true; requestModels(); emit serviceStateChanged(QStringLiteral("connected"), tr("Connected to service")); return; }
     if (type == QStringLiteral("models.list.result")) {
-        m_generationModels.clear(); m_editionModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_ipAdapterModels.clear(); m_clipVisionModels.clear(); m_photoMakerModels.clear(); m_promptEnhancerModels.clear();
+        m_faceParsingModels.clear(); m_inpaintModels.clear(); m_generationModels.clear(); m_editionModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_ipAdapterModels.clear(); m_clipVisionModels.clear(); m_photoMakerModels.clear(); m_promptEnhancerModels.clear();
         for (const QJsonValue &categoryValue : object.value(QStringLiteral("categories")).toArray()) {
             const QJsonObject category = categoryValue.toObject(); QList<ManagedModelInfo> *modelsForCategory = nullptr;
             const QString name = category.value(QStringLiteral("category")).toString();
@@ -218,6 +220,8 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
             else if (name == QStringLiteral("llm-chat")) modelsForCategory = &m_llmChatModels;
             else if (name == QStringLiteral("ip-adapter") || name == "ip_adapter") modelsForCategory = &m_ipAdapterModels;
             else if (name == "clip_vision") modelsForCategory = &m_clipVisionModels;
+            else if (name == "face-parsing") modelsForCategory = &m_faceParsingModels;
+            else if (name == "inpaint") modelsForCategory = &m_inpaintModels;
             else if (name == "photomaker") modelsForCategory = &m_photoMakerModels;
             else if (name == "prompt-enhancer") modelsForCategory = &m_promptEnhancerModels;
             if (!modelsForCategory) continue;

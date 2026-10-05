@@ -31,6 +31,8 @@ struct KiraServiceConfiguration
     QString photoMakerFaceDetect = qEnvironmentVariable("KIRA_PHOTOMAKER_FACE_DETECT");
     QString llamaCompletion = qEnvironmentVariable("KIRA_LLAMA_COMPLETION", "llama-completion");
     int promptEnhancementTimeoutMs = 10 * 60 * 1000;
+    QString faceParsingPython = qEnvironmentVariable("KIRA_FACE_PARSING_PYTHON");
+    int faceParsingTimeoutMs = 10 * 60 * 1000;
 };
 
 class KiraServiceDaemon final : public QObject
@@ -44,7 +46,7 @@ public:
     quint16 serverPort() const;
 
 private:
-    enum class Operation { Generate, Upscale, Edit, PhotoMakerExport, PromptEnhance };
+    enum class Operation { Generate, Upscale, Edit, PhotoMakerExport, PromptEnhance, FaceParsing, Inpaint };
     struct Submission;
     struct Job;
 
@@ -70,6 +72,9 @@ private:
     void handlePhotoMakerExportFinished(int exitCode, QProcess::ExitStatus status);
     bool isPhotoMakerExportReady() const;
     bool isPromptEnhancementReady() const;
+    bool isFaceParsingReady() const;
+    void startFaceParsing();
+    void handleFaceParsingFinished(int exitCode, QProcess::ExitStatus status);
     void submitPromptEnhancement(QWebSocket* socket, const QJsonObject& message);
     void startPromptEnhancement();
     void handlePromptEnhancementFinished(int exitCode, QProcess::ExitStatus status);
@@ -99,4 +104,8 @@ private:
     QByteArray m_promptError;
     bool m_promptTimedOut = false;
     bool m_promptOutputExceeded = false;
+    QProcess m_faceParsingProcess;
+    QTimer m_faceParsingTimeout;
+    QByteArray m_faceParsingError;
+    bool m_faceParsingTimedOut = false;
 };

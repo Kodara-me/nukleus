@@ -1,5 +1,78 @@
 # Contributing to Kira Service
 
+## Inpainting
+
+Inpainting uses the existing sd-cli backend; no additional Python dependencies
+are required. Update/restart the Service before running an updated Canvas so it
+advertises `image.inpaint`. Install/select an Inpaint model through the Manager
+and Canvas Service Preferences, along with a default Face parsing model.
+Select an image and click the single Inpaint button. Choose a .kiraid and accept
+its existing confirmation dialog. Canvas snapshots the source and accepted
+descriptions/seed, generates the mask internally, then submits inpainting.
+Cancel starts no job. Only the final image is displayed in history. Select saved
+default CLIP Vision and IP-Adapter models as well. Canvas uploads the first
+accepted package portrait as an independent third image, with IP-Adapter strength
+0.8. Use a compatible encoder/adapter pair for the installed SDXL inpaint model.
+
+Canvas submits source-resolution PNGs, the default Inpaint model's recommended
+Steps/CFG/sampler/scheduler/Clip Skip values and strength 0.99. It composes any
+selected style prefixes locally. Service validates the upload dimensions, stages
+source, mask and adapter reference separately, and invokes sd-cli with `--init-img`,
+`--mask`, `--clip_vision`, `--ip-adapter`, `--ip-adapter-image` and
+`--ip-adapter-strength`. The reference is not required to match source dimensions.
+The normal shared FIFO and progress/errors apply. Canvas blends the returned
+image through the original grayscale mask and adds a new history entry.
+
+The Service/SDK test uses a disposable sd-cli process to check staged uploads,
+arguments, dimension rejection, failures and recovery. Canvas tests exercise
+the toolbar, package choice/confirmation, two-stage snapshots, busy guard,
+recommendation/seed submission, intermediate-mask suppression,
+resolution normalization and exact black-mask pixel preservation. Production
+weight quality and runtime compatibility require an installed model; these
+fixtures do not claim to validate model inference.
+
+## Face parsing worker
+
+Mask generation has optional service-side Python dependencies. For a local
+developer daemon:
+
+```sh
+python3 -m venv /tmp/kira-face-parsing-venv
+/tmp/kira-face-parsing-venv/bin/python -m pip install numpy Pillow onnxruntime
+export KIRA_FACE_PARSING_PYTHON=/tmp/kira-face-parsing-venv/bin/python
+./build/src/kira-service
+```
+
+Install a SegFormer/CelebAMask-HQ ONNX model in the Face parsing category through
+the Manager, then select it as Canvas's default. No PyTorch is required. The
+embedded worker takes an RGB image, preserves aspect ratio with padding when
+requested, uses the model's NCHW input dimensions (512 when dynamic), applies
+the reference model's normalization, resizes logits before selecting semantic
+regions, removes padding, then expands/softens the mask in source pixels.
+Source dimensions are bounded to 4096 per side. All configured matching regions
+are included; this slice does not select one person in a multi-face image.
+
+For systemd, use a persistent environment such as `/opt/kira-face-parsing/venv`,
+ensure the service user can read it, and set `KIRA_FACE_PARSING_PYTHON` in
+`/etc/kira-service/kira-service.conf`. Restart the daemon after changing it.
+The capability is advertised when the configured executable exists; missing
+Python packages are reported as job failures. Keep the worker out of protected
+home directories. Builds do not install Python packages.
+
+The daemon/SDK tests use a disposable process fixture to exercise upload,
+recommendation snapshots, binary delivery, failure, timeout and queue recovery.
+Real ONNX inference and mask processing use small generated graphs:
+
+```sh
+/tmp/kira-face-parsing-venv/bin/python -m pip install onnx
+/tmp/kira-face-parsing-venv/bin/python tests/FaceParsingTest.py
+```
+
+CTest registers the Python test when Python is available and skips it if its
+optional dependencies are missing. Configure `Python3_EXECUTABLE` with the
+environment above to run it through CTest. These tests verify implementation
+behavior; visual segmentation quality still depends on the installed weights.
+
 PhotoMaker package tests cover four ordered references and optional face/hair/seed
 metadata, plus legacy single-reference archives. SDK and daemon fixtures verify
 each upload, all PNGs staged for extraction and sd-cli, and metadata remaining

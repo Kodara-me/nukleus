@@ -16,6 +16,7 @@ struct GenerationRequest
     int seed = -1;
     QString referenceImagePath;
     QString baseImagePath;
+    QString maskImagePath;
     double baseImageStrength = 0.55;
     QString outputPath;
     QString modelPath;
