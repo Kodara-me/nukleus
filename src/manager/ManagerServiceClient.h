@@ -27,7 +27,7 @@ struct ManagedModelInfo
     bool explicitContent = false;
     QList<KiraService::PromptStyle> styles;
     QString displayName;
-    bool canEdit = false;
+    QString mmprojModelId;
     QString displayLabel() const { return displayName.trimmed().isEmpty() ? fileName : displayName.trimmed(); }
 };
 
@@ -66,8 +66,8 @@ public:
     QList<ManagedInstall> installs() const;
     void requestModels();
     QString installModel(const QString &category, const QUrl &url, const QUrl &companionUrl = {}, const QJsonObject &recommendedOptions = {}, const QJsonObject &companionUrls = {},
-        const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {}, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {}, std::optional<bool> canEdit = {});
-    bool configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {}, std::optional<bool> canEdit = {});
+        const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {}, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {}, std::optional<QString> mmprojModelId = {});
+    bool configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {}, std::optional<QString> mmprojModelId = {});
     bool configureModelStyles(const QString &id, const QList<KiraService::PromptStyle> &styles);
     bool cancelInstall(const QString &installId);
     bool deleteModel(const QString &id);
@@ -103,14 +103,8 @@ private:
     bool m_authenticated = false;
     bool m_modelListAvailable = false;
     QList<ManagedModelInfo> m_generationModels;
-    QList<ManagedModelInfo> m_editionModels;
     QList<ManagedModelInfo> m_upscaleModels;
     QList<ManagedModelInfo> m_llmChatModels;
-    QList<ManagedModelInfo> m_promptEnhancerModels;
-    QList<ManagedModelInfo> m_ipAdapterModels;
-    QList<ManagedModelInfo> m_clipVisionModels;
-    QList<ManagedModelInfo> m_faceParsingModels;
-    QList<ManagedModelInfo> m_inpaintModels;
-    QList<ManagedModelInfo> m_photoMakerModels;
+    QList<ManagedModelInfo> m_companionModels;
     QList<ManagedInstall> m_installs;
 };

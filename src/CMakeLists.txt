@@ -2,7 +2,6 @@ include(GNUInstallDirs)
 add_subdirectory(sdk)
 
 set(SERVICE_DAEMON_SOURCES
-    daemon/resources.qrc
     daemon/GenerationRequest.h
     daemon/KiraService.cpp
     daemon/KiraService.h

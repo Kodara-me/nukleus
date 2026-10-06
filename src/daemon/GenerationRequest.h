@@ -16,7 +16,6 @@ struct GenerationRequest
     int seed = -1;
     QString referenceImagePath;
     QString baseImagePath;
-    QString maskImagePath;
     double baseImageStrength = 0.55;
     QString outputPath;
     QString modelPath;
@@ -26,13 +25,4 @@ struct GenerationRequest
     QString clipLPath;
     QString clipGPath;
     bool diffusionModel = false;
-    QString clipVisionPath;
-    QString ipAdapterPath;
-    QString ipAdapterImagePath;
-    QString ipAdapterLoraPath;
-    double ipAdapterStrength = 1.0;
-    QString photoMakerPath;
-    QString photoMakerIdentityPath;
-    QString photoMakerImagesDirectory;
-    int photoMakerStyleStrength = 20;
 };

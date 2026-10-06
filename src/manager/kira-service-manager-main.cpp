@@ -54,26 +54,28 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
         QTextStream(stderr) << "add requires --category <category>.\n";
         return 2;
     }
+    if (command == "add" && parser.value("display-name").trimmed().isEmpty()) {
+        QTextStream(stderr) << "add requires --display-name <name>.\n"; return 2;
+    }
     const QString category = command == "attach" ? positional.value(1).section(':', 0, 0) : parser.value("category");
-    if (command == "attach" && (positional.size() != 2 || (category != "image-generation" && category != "inpaint" && category != "edition" && category != "ip_adapter" && category != "ip-adapter"))) {
-        QTextStream(stderr) << "attach requires an opaque image-generation, inpaint, edition or IP-Adapter model ID.\n"; return 2;
+    if (command == "attach" && (positional.size() != 2 || (category != "image-generation"))) {
+        QTextStream(stderr) << "attach requires an opaque image-generation model ID.\n"; return 2;
     }
     if (parser.value("model-type") != "checkpoint" && parser.value("model-type") != "diffusion") {
         QTextStream(stderr) << "--model-type must be checkpoint or diffusion.\n"; return 2;
     }
     if ((parser.isSet("clip-l") || parser.isSet("clip-g") || parser.isSet("text-encoder") || parser.isSet("model-type")) &&
-        ((command != "add" && command != "attach") || (category != "image-generation" && category != "inpaint" && category != "edition"))) {
+        ((command != "add" && command != "attach") || (category != "image-generation"))) {
         QTextStream(stderr) << "CLIP files and model type require an image model add or attach command.\n"; return 2;
     }
     int companionCount = 0;
-    for (const QString &option : {QStringLiteral("companion-lora"), QStringLiteral("mmproj"), QStringLiteral("vae")}) {
+    for (const QString &option : {QStringLiteral("mmproj"), QStringLiteral("vae")}) {
         if (!parser.isSet(option)) continue;
-        if (option == "mmproj" && (category == "image-generation" || category == "inpaint" || category == "edition")
+        if (option == "mmproj" && (category == "image-generation")
             && (command == "add" || command == "attach")) continue;
         ++companionCount;
-        const bool validCategory = option == QStringLiteral("companion-lora") ? (category == QStringLiteral("ip_adapter") || category == QStringLiteral("ip-adapter"))
-            : option == QStringLiteral("mmproj") ? category == QStringLiteral("llm-chat")
-            : category == QStringLiteral("edition") || (category == QStringLiteral("image-generation") || category == QStringLiteral("inpaint"));
+        const bool validCategory = option == QStringLiteral("mmproj") ? false
+            : category == QStringLiteral("image-generation");
         if (!validCategory || companionCount > 1) {
             QTextStream(stderr) << "Use one optional companion URL matching the model category.\n";
             return 2;
@@ -129,7 +131,7 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
                 QString size;
             };
             QList<ModelRow> rows;
-            for (const QString &category : {QStringLiteral("image-generation"), QStringLiteral("inpaint"), QStringLiteral("edition"), QStringLiteral("upscaler"), QStringLiteral("llm-chat"), QStringLiteral("ip_adapter"), QStringLiteral("clip_vision"), QStringLiteral("photomaker"), QStringLiteral("prompt-enhancer"), QStringLiteral("face-parsing")}) {
+            for (const QString &category : {QStringLiteral("image-generation"), QStringLiteral("upscaler"), QStringLiteral("llm-chat"), QStringLiteral("companion")}) {
                 const QList<ManagedModelInfo> models = client.models(category);
                 if (models.isEmpty()) {
                     rows.append({category, QStringLiteral("(none)"), QStringLiteral("-"), QStringLiteral("-"), QStringLiteral("-")});
@@ -184,13 +186,14 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
             if (parser.isSet("clip-l")) files.insert("clip-l", parser.value("clip-l"));
             if (parser.isSet("clip-g")) files.insert("clip-g", parser.value("clip-g"));
             if (parser.isSet("text-encoder")) files.insert("llm", parser.value("text-encoder"));
-            const bool image = category == "image-generation" || category == "inpaint" || category == "edition";
+            const bool image = category == "image-generation";
             if (image && parser.isSet("mmproj")) files.insert("mmproj", parser.value("mmproj"));
-            const auto companion = QUrl(!image && parser.isSet("mmproj") ? parser.value("mmproj") : parser.isSet("vae") ? parser.value("vae") : parser.value("companion-lora"));
+            const auto companion = QUrl(!image && parser.isSet("mmproj") ? parser.value("mmproj") : parser.isSet("vae") ? parser.value("vae") : QString());
             installId = client.installModel(category, command == "attach" ? QUrl{} : QUrl(argument),
-                companion, {}, files, command == "attach" && !parser.isSet("model-type") ? QString() : parser.value("model-type"),
+                companion, category == "companion" ? QJsonObject{{"subtype", parser.value("companion-type")}} : QJsonObject{}, files, command == "attach" && !parser.isSet("model-type") ? QString() : parser.value("model-type"),
                 command == "attach" ? argument : QString(), {},
-                parser.isSet("display-name") ? std::optional<QString>(parser.value("display-name")) : std::nullopt);
+                parser.isSet("display-name") ? std::optional<QString>(parser.value("display-name")) : std::nullopt,
+                parser.isSet("mmproj-model") ? std::optional<QString>(parser.value("mmproj-model")) : std::nullopt);
             if (installId.isEmpty()) finish(1, QStringLiteral("Could not start model installation."));
         });
         QObject::connect(&client, &ManagerServiceClient::installsChanged, &loop, [&] {
@@ -237,10 +240,11 @@ int main(int argc, char *argv[])
     parser.addHelpOption();
     parser.addOption({QStringLiteral("gui"), QStringLiteral("Start the graphical manager.")});
     parser.addOption({QStringLiteral("category"), QStringLiteral("Model category for add."), QStringLiteral("category")});
-    parser.addOption({"display-name", "Optional model display name for add/attach.", "name"});
-    parser.addOption({QStringLiteral("companion-lora"), QStringLiteral("Optional auxiliary LoRA URL for an IP-Adapter add/attach."), QStringLiteral("url")});
-    parser.addOption({QStringLiteral("mmproj"), QStringLiteral("Optional mmproj URL for LLM add or image add/attach."), QStringLiteral("url")});
-    parser.addOption({QStringLiteral("vae"), QStringLiteral("Optional VAE URL for an Edition or Image-generation add/attach."), QStringLiteral("url")});
+    parser.addOption({"companion-type", "Companion subtype: vae or mmproj.", "type", "vae"});
+    parser.addOption({"mmproj-model", "Installed MMPROJ companion ID for an LLM model; empty clears.", "id"});
+    parser.addOption({"display-name", "Required display name for add; optional rename for attach.", "name"});
+    parser.addOption({QStringLiteral("mmproj"), QStringLiteral("Optional mmproj URL for image add/attach."), QStringLiteral("url")});
+    parser.addOption({QStringLiteral("vae"), QStringLiteral("Optional VAE URL for an Image-generation add/attach."), QStringLiteral("url")});
     parser.addOption({"clip-l", "Optional CLIP-L URL for image add/attach.", "url"});
     parser.addOption({"text-encoder", "Optional LLM text encoder URL for image add/attach.", "url"});
     parser.addOption({"clip-g", "Optional CLIP-G URL for image add/attach.", "url"});
@@ -252,7 +256,7 @@ int main(int argc, char *argv[])
 
     if (guiRequested) {
         if (parser.isSet("display-name")) { QTextStream(stderr) << "--gui cannot be combined with --display-name.\n"; return 2; }
-        if (!parser.positionalArguments().isEmpty() || parser.isSet(QStringLiteral("category")) || parser.isSet(QStringLiteral("companion-lora")) || parser.isSet(QStringLiteral("mmproj")) || parser.isSet(QStringLiteral("vae")) || parser.isSet(QStringLiteral("yes")) || parser.isSet("clip-l") || parser.isSet("clip-g") || parser.isSet("text-encoder") || parser.isSet("model-type")) {
+        if (!parser.positionalArguments().isEmpty() || parser.isSet(QStringLiteral("category")) || parser.isSet(QStringLiteral("mmproj")) || parser.isSet(QStringLiteral("vae")) || parser.isSet("mmproj-model") || parser.isSet("companion-type") || parser.isSet(QStringLiteral("yes")) || parser.isSet("clip-l") || parser.isSet("clip-g") || parser.isSet("text-encoder") || parser.isSet("model-type")) {
             QTextStream(stderr) << "--gui cannot be combined with a CLI command.\n";
             return 2;
         }

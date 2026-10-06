@@ -14,6 +14,7 @@
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QComboBox>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
@@ -25,15 +26,9 @@
 
 namespace
 {
-const QList<QPair<QString, QString>> categories{{"edition", "Edition"},
-                                                {"llm-chat", "LLM"},
+const QList<QPair<QString, QString>> categories{{"llm-chat", "LLM"},
                                                 {"image-generation", "Image generation"},
-                                                {"inpaint", "Inpaint"},
-                                                {"face-parsing", "Face parsing"},
-                                                {"upscaler", "Upscaler"},
-                                                {"ip_adapter", "IP-Adapter"}, {"clip_vision", "CLIP Vision"},
-                                                {"photomaker", "PhotoMaker"},
-                                                {"prompt-enhancer", "Prompt Enhancer"}};
+                                                {"upscaler", "Upscaler"}, {"companion", "Companion"}};
 QString sizeText(qint64 bytes) { return QObject::tr("%1 MiB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1); }
 } // namespace
 ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *client)
@@ -84,7 +79,13 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     m_styles->setObjectName("modelStyles");
     left->addWidget(m_styles);
     auto *configuration = new KiraUi::Panel(m_splitter);
-    auto *right = new QVBoxLayout(configuration);
+    auto* panelLayout = new QVBoxLayout(configuration);
+    m_configurationBody = new QWidget(configuration);
+    m_configurationBody->setObjectName("modelConfigurationBody");
+    panelLayout->addWidget(m_configurationBody, 1);
+    auto *right = new QVBoxLayout(m_configurationBody);
+    right->setContentsMargins(0, 0, 0, 0);
+    m_configurationBody->hide();
     right->addWidget(new QLabel(tr("Model configuration"), configuration));
     auto *scroll = new QScrollArea(configuration);
     scroll->setWidgetResizable(true);
@@ -95,25 +96,39 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     m_details->setWordWrap(true);
     m_details->setTextFormat(Qt::PlainText);
     contentLayout->addWidget(m_details);
-    auto* displayNameLabel = new QLabel(tr("Display name (optional):"), content);
+    auto* displayNameLabel = new QLabel(tr("Display name:"), content);
     contentLayout->addWidget(displayNameLabel);
     m_displayName = new QLineEdit(content);
     m_displayName->setObjectName("modelDisplayName");
     m_displayName->setMaxLength(256);
-    m_displayName->setPlaceholderText(tr("Filename when empty"));
+    m_displayName->setPlaceholderText(tr("Required display name"));
     displayNameLabel->setBuddy(m_displayName);
     contentLayout->addWidget(m_displayName);
+    m_mmprojLabel = new QLabel(tr("MMPROJ companion:"), content);
+    m_mmproj = new QComboBox(content);
+    m_mmproj->setObjectName("modelMmprojCompanion");
+    contentLayout->addWidget(m_mmprojLabel);
+    contentLayout->addWidget(m_mmproj);
+    connect(m_mmproj, &QComboBox::currentIndexChanged, this, [this] {
+        m_mmproj->setProperty("selectedModelId", m_mmproj->currentData());
+        m_dirty = m_options->options() != m_originalOptions
+            || m_options->explicitContent() != m_originalExplicitContent
+            || m_displayName->text().trimmed() != m_originalDisplayName
+            || m_mmproj->currentData().toString() != m_originalMmproj;
+        updateActions();
+    });
     m_options = new ModelOptionsWidget(content);
     m_options->hide();
     contentLayout->addWidget(m_options);
-    auto *hint =
+    m_hint =
         new QLabel(tr("Recommended values for this model. Applications can override them."), content);
-    hint->setWordWrap(true);
-    contentLayout->addWidget(hint);
+    m_hint->setWordWrap(true);
+    m_hint->setObjectName("recommendedValuesHint");
+    contentLayout->addWidget(m_hint);
     contentLayout->addStretch();
     scroll->setWidget(content);
     right->addWidget(scroll, 1);
-    m_save = new KiraUi::PrimaryButton(tr("Save recommended options"), configuration);
+    m_save = new KiraUi::PrimaryButton(tr("Save"), configuration);
     m_save->setObjectName("saveOptions");
     m_save->setIcon(KiraUi::IconProvider::icon(KiraUi::Icon::Save));
     right->addWidget(m_save);
@@ -125,17 +140,17 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
             [this]
             {
                 m_dirty = m_options->options() != m_originalOptions
-                    || m_options->canEdit() != m_originalCanEdit
                     || m_options->explicitContent() != m_originalExplicitContent
-                    || m_displayName->text().trimmed() != m_originalDisplayName;
+                    || m_displayName->text().trimmed() != m_originalDisplayName
+                    || m_mmproj->currentData().toString() != m_originalMmproj;
                 updateActions();
             });
     connect(m_add, &QPushButton::clicked, this, &ManageModelsWindow::addModel);
     connect(m_displayName, &QLineEdit::textChanged, this, [this] {
         m_dirty = m_options->options() != m_originalOptions
-            || m_options->canEdit() != m_originalCanEdit
             || m_options->explicitContent() != m_originalExplicitContent
-            || m_displayName->text().trimmed() != m_originalDisplayName;
+            || m_displayName->text().trimmed() != m_originalDisplayName
+                    || m_mmproj->currentData().toString() != m_originalMmproj;
         updateActions();
     });
     connect(m_attach, &QPushButton::clicked, this, &ManageModelsWindow::attachFiles);
@@ -143,6 +158,7 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     connect(m_delete, &QPushButton::clicked, this, &ManageModelsWindow::deleteSelectedModel);
     connect(m_save, &QPushButton::clicked, this, &ManageModelsWindow::saveOptions);
     connect(m_client, &ManagerServiceClient::modelsChanged, this, &ManageModelsWindow::populateModels);
+    connect(m_client, &ManagerServiceClient::modelsChanged, this, &ManageModelsWindow::refreshCompanions);
     connect(m_client, &ManagerServiceClient::serviceStateChanged, this,
             [this](const QString &state, const QString &message)
             {
@@ -175,8 +191,8 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
                     return;
                 m_originalOptions = options;
                 m_originalExplicitContent = explicitContent;
-                m_originalCanEdit = m_options->canEdit();
                 m_originalDisplayName = m_displayName->text().trimmed();
+                m_originalMmproj = m_mmproj->currentData().toString();
                 m_dirty = false;
                 m_saving = false;
                 m_status->setText(tr("Recommended options saved."));
@@ -221,6 +237,18 @@ void ManageModelsWindow::populateModels()
         branch->setIcon(KiraUi::IconProvider::icon(KiraUi::Icon::Folder));
         branch->setData(category.first, Qt::UserRole + 2);
         root->appendRow(branch);
+        QHash<QString, QStandardItem*> subtypeBranches;
+        if (category.first == "companion") {
+            for (const auto& subtype : {QString("vae"), QString("mmproj")}) {
+                auto* group = new QStandardItem(subtype == "vae" ? tr("VAE") : tr("MMPROJ (vision projector)"));
+                group->setEditable(false);
+                group->setIcon(KiraUi::IconProvider::icon(KiraUi::Icon::Folder));
+                group->setData(category.first, Qt::UserRole + 2);
+                group->setData(subtype, Qt::UserRole + 3);
+                branch->appendRow(group);
+                subtypeBranches.insert(subtype, group);
+            }
+        }
         for (const auto &model : m_client->models(category.first))
         {
             auto *item = new QStandardItem(model.displayLabel());
@@ -229,7 +257,8 @@ void ManageModelsWindow::populateModels()
             item->setData(model.id, Qt::UserRole + 1);
             item->setData(category.first, Qt::UserRole + 2);
             item->setToolTip(model.fileName);
-            branch->appendRow(item);
+            auto* destination = subtypeBranches.value(model.recommendedOptions.value("subtype").toString(), branch);
+            destination->appendRow(item);
             auto files = model.companionFiles;
             if (!model.companionFileName.isEmpty()) files.insert(model.companionRole, model.companionFileName);
             for (auto it = files.begin(); it != files.end(); ++it) {
@@ -239,6 +268,14 @@ void ManageModelsWindow::populateModels()
                 companion->setData(category.first, Qt::UserRole + 2);
                 item->appendRow(companion);
             }
+            if (!model.mmprojModelId.isEmpty())
+                for (const auto& target : m_client->models("companion"))
+                    if (target.id == model.mmprojModelId) {
+                        auto* link = new QStandardItem("MMPROJ: " + target.displayLabel());
+                        link->setEditable(false);
+                        link->setData(model.id, Qt::UserRole + 1);
+                        item->appendRow(link);
+                    }
         }
     }
     m_tree->expandAll();
@@ -267,6 +304,7 @@ void ManageModelsWindow::showSelection(const QString &id)
     const QSignalBlocker displayNameBlocker(m_displayName);
     m_displayName->clear();
     m_displayName->setEnabled(false);
+    m_configurationBody->hide();
     m_options->hide();
     m_details->setText(tr("Select a model to view its recommended options."));
     for (const auto &category : categories)
@@ -276,19 +314,21 @@ void ManageModelsWindow::showSelection(const QString &id)
                 continue;
             m_originalOptions = model.recommendedOptions;
             m_originalExplicitContent = model.explicitContent;
-            m_originalCanEdit = model.canEdit;
             m_originalDisplayName = model.displayName;
             m_displayName->setText(model.displayName);
             m_displayName->setEnabled(true);
-            m_options->setOptions(model.id.startsWith("image-generation:") ? QString("image-generation") : category.first,
-                model.recommendedOptions, model.explicitContent, model.canEdit);
-            m_options->show();
+            m_options->setOptions(category.first, model.recommendedOptions, model.explicitContent);
+            m_configurationBody->show();
+            m_options->setVisible(category.first != "upscaler");
+            m_hint->setVisible(category.first == "image-generation");
+            m_mmprojLabel->setVisible(category.first == "llm-chat");
+            m_mmproj->setVisible(category.first == "llm-chat");
+            m_originalMmproj = model.mmprojModelId;
+            m_mmproj->setProperty("selectedModelId", m_originalMmproj);
+            refreshCompanions();
             m_details->setText(
-                tr("%1\n%2 · %3\n%4")
-                    .arg(model.displayLabel(), model.fileName, sizeText(model.fileSize),
-                         model.recommendedOptions.isEmpty()
-                             ? tr("No saved recommendations. Save to attach the proposed values.")
-                             : tr("Recommended options")));
+                tr("%1\n%2 · %3")
+                    .arg(model.displayLabel(), model.fileName, sizeText(model.fileSize)));
         }
     updateActions();
 }
@@ -339,22 +379,22 @@ void ManageModelsWindow::updateActions()
     m_tree->setEnabled(!m_saving);
     m_options->setEnabled(m_client->isAuthenticated() && !m_saving);
     m_displayName->setEnabled(m_client->isAuthenticated() && !m_saving && !m_selectedId.isEmpty());
+    m_mmproj->setEnabled(m_client->isAuthenticated() && !m_saving && m_selectedId.startsWith("llm-chat:"));
     m_add->setEnabled(m_client->isAuthenticated() && !m_saving);
     m_attach->setEnabled(m_client->isAuthenticated() && !m_saving &&
-        (m_selectedId.startsWith("image-generation:") || m_selectedId.startsWith("inpaint:") || m_selectedId.startsWith("edition:") || m_selectedId.startsWith("ip-adapter:")
-         || m_selectedId.startsWith("ip_adapter:")));
+        (m_selectedId.startsWith("image-generation:")));
     m_delete->setEnabled(m_client->modelListAvailable() && m_client->isAuthenticated() && !m_saving &&
                          !m_selectedId.isEmpty());
     m_save->setEnabled(m_client->modelListAvailable() && m_client->isAuthenticated() && !m_saving &&
-                       !m_selectedId.isEmpty() && m_options->isValid() &&
-                       (m_dirty || m_originalOptions.isEmpty()));
+                       !m_selectedId.isEmpty() && !m_displayName->text().trimmed().isEmpty() && m_options->isValid() &&
+                       (m_dirty || (m_originalOptions.isEmpty() && !m_selectedId.startsWith("upscaler:"))));
 }
 void ManageModelsWindow::saveOptions()
 {
     if (!m_options->isValid())
         return;
-    if (m_client->configureModel(m_selectedId, m_options->options(), m_options->explicitContent(), m_displayName->text(),
-        m_selectedId.startsWith("image-generation:") ? std::optional<bool>(m_options->canEdit()) : std::nullopt))
+    if (m_client->configureModel(m_selectedId, m_options->options(), m_selectedId.startsWith("upscaler:") || m_selectedId.startsWith("companion:") ? std::nullopt : std::optional<bool>(m_options->explicitContent()), m_displayName->text(),
+        m_selectedId.startsWith("llm-chat:") ? std::optional<QString>(m_mmproj->currentData().toString()) : std::nullopt))
     {
         m_saving = true;
         m_status->setText(tr("Saving recommended options…"));
@@ -368,6 +408,11 @@ void ManageModelsWindow::addModel()
     const auto open = [this]
     {
         AddModelDialog dialog(m_client, m_tree->currentIndex().data(Qt::UserRole + 2).toString(), this);
+        const auto subtype = m_tree->currentIndex().data(Qt::UserRole + 3).toString();
+        if (!subtype.isEmpty()) {
+            auto* choice = dialog.findChild<QComboBox*>("subtype");
+            if (choice) choice->setCurrentIndex(choice->findData(subtype));
+        }
         connect(&dialog, &AddModelDialog::modelInstalled, this,
                 [this](const QString &id)
                 {
@@ -433,4 +478,21 @@ void ManageModelsWindow::closeEvent(QCloseEvent *event)
     settings.setValue("MainWindow/Geometry", saveGeometry());
     settings.setValue("MainWindow/ModelsSplitter", m_splitter->saveState());
     KiraUi::MainWindow::closeEvent(event);
+}
+
+void ManageModelsWindow::refreshCompanions()
+{
+    const QSignalBlocker blocker(m_mmproj);
+    const auto selected = m_mmproj->property("selectedModelId").toString();
+    m_mmproj->clear();
+    m_mmproj->addItem(tr("None"), QString());
+    for (const auto& model : m_client->models("companion"))
+        if (model.recommendedOptions.value("subtype") == "mmproj")
+            m_mmproj->addItem(model.displayLabel(), model.id);
+    int index = m_mmproj->findData(selected);
+    if (index < 0 && !selected.isEmpty()) {
+        m_mmproj->addItem(tr("Unavailable: %1").arg(selected), selected);
+        index = m_mmproj->count() - 1;
+    }
+    m_mmproj->setCurrentIndex(qMax(0, index));
 }

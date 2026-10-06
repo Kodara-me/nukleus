@@ -16,14 +16,8 @@ enum class ModelCategory
     ImageGeneration,
     Upscaler,
     LlmChat,
-    IpAdapter,
+    Companion,
     Unknown,
-    Edition,
-    ClipVision,
-    PhotoMaker,
-    PromptEnhancer,
-    Inpaint,
-    FaceParsing
 };
 
 struct ModelInfo
@@ -41,7 +35,7 @@ struct ModelInfo
     bool explicitContent = false;
     QList<PromptStyle> styles;
     QString displayName;
-    bool canEdit = false;
+    QString mmprojModelId;
     QString displayLabel() const { return displayName.trimmed().isEmpty() ? fileName : displayName.trimmed(); }
 };
 
@@ -74,8 +68,6 @@ enum class ImageOperation
     Generate,
     Upscale,
     Edit,
-    FaceParsing,
-    Inpaint
 };
 
 struct ImageGenerationRequest
@@ -93,17 +85,7 @@ struct ImageGenerationRequest
     QByteArray baseImageData;
     double baseImageStrength = 0.55;
     QString modelId;
-    QString clipVisionModelId;
-    QString ipAdapterModelId;
-    QByteArray ipAdapterImageData;
-    std::optional<double> ipAdapterStrength;
-    QString photoMakerModelId;
-    QByteArray photoMakerIdentityPackageData; // Complete .kiraid file; preferred over the legacy pair.
-    QByteArray photoMakerIdentityData;
-    QByteArray photoMakerReferenceImageData;
-    std::optional<int> photoMakerStyleStrength;
     QString styleId;
-    QList<QByteArray> photoMakerReferenceImages;
 };
 
 struct ImageUpscaleRequest
@@ -128,12 +110,7 @@ struct ServiceCapabilities
     bool imageGeneration = false;
     bool imageUpscale = false;
     bool imageEdit = false;
-    bool ipAdapter = false;
-    bool photoMakerIdentityExport = false;
-    bool photoMaker = false;
     bool promptEnhancement = false;
-    bool faceParsing = false;
-    bool imageInpaint = false;
 };
 
 struct PromptEnhancementRequest
@@ -148,15 +125,6 @@ struct PromptEnhancementResult
     QString jobId;
     bool succeeded = false;
     QString prompt;
-    QString errorCode;
-    QString message;
-};
-
-struct PhotoMakerIdentityResult
-{
-    QString jobId;
-    bool succeeded = false;
-    QByteArray identityData;
     QString errorCode;
     QString message;
 };
@@ -187,7 +155,6 @@ Q_DECLARE_METATYPE(KiraService::ImageUpscaleRequest)
 Q_DECLARE_METATYPE(KiraService::ImageJobResult)
 Q_DECLARE_METATYPE(KiraService::PromptEnhancementRequest)
 Q_DECLARE_METATYPE(KiraService::PromptEnhancementResult)
-Q_DECLARE_METATYPE(KiraService::PhotoMakerIdentityResult)
 Q_DECLARE_METATYPE(KiraService::ServiceCapabilities)
 Q_DECLARE_METATYPE(KiraService::ServiceConnectionState)
 Q_DECLARE_METATYPE(KiraService::JobState)

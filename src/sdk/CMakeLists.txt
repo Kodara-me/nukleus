@@ -24,8 +24,8 @@ target_include_directories(KiraServiceProtocol PUBLIC
 target_link_libraries(KiraServiceProtocol PUBLIC Qt6::Core)
 
 add_library(KiraServiceSdk STATIC
-    include/kira/service/PhotoMakerIdentity.h
-    src/PhotoMakerIdentity.cpp
+    include/kira/service/Identity.h
+    src/Identity.cpp
     include/kira/service/ImageTypes.h
     include/kira/service/ServiceClient.h
     src/ServiceClient.cpp

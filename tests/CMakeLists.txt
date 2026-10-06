@@ -5,7 +5,6 @@ endif()
 find_package(Qt6 6.2 REQUIRED COMPONENTS Network Test WebSockets)
 
 add_executable(kira-service-test
-    ../src/daemon/resources.qrc
     ServiceTest.cpp
     ../src/daemon/GenerationRequest.h
     ../src/sdk/include/kira/service/GenerationProgress.h
@@ -27,13 +26,6 @@ target_include_directories(kira-service-test PRIVATE
 )
 target_link_libraries(kira-service-test PRIVATE KiraService::SDK Qt6::Network Qt6::Test Qt6::WebSockets)
 add_test(NAME kira-service-test COMMAND kira-service-test)
-
-find_package(Python3 QUIET COMPONENTS Interpreter)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME kira-service-face-parsing-test
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/FaceParsingTest.py)
-    set_tests_properties(kira-service-face-parsing-test PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
-endif()
 
 add_executable(kira-service-sdk-test ServiceSdkTest.cpp)
 target_link_libraries(kira-service-sdk-test PRIVATE KiraService::SDK Qt6::Network Qt6::Test Qt6::WebSockets)

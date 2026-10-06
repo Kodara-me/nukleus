@@ -1,8 +1,0 @@
-<RCC>
-    <qresource prefix="/photomaker">
-        <file>photomaker-export.py</file>
-    </qresource>
-    <qresource prefix="/face-parsing">
-        <file>face-parsing.py</file>
-    </qresource>
-</RCC>

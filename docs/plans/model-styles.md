@@ -21,7 +21,7 @@ edits it; the service applies its prefixes.
 
 Include service persistence, protocol/SDK support, a Manager styles dialog and
 Canvas's existing Style selector. Styles affect `image.generate`, including
-PhotoMaker and Adapter generation. Exclude editing/upscaling, style sharing,
+identity portrait generation. Exclude editing/upscaling, style sharing,
 import/export and automatic style selection.
 
 ## Existing Context
@@ -134,7 +134,7 @@ synchronize it with model changes. Disable it when the model has no styles,
 retaining the None entry. Show both prefixes in each style's tooltip.
 
 **Verification/completion:** Canvas UI/WebSocket tests pass using the Canvas
-validation commands below with regular, PhotoMaker and Adapter requests.
+validation commands below with regular, identity portrait requests.
 
 ## Contracts and Interfaces
 
@@ -209,7 +209,7 @@ Cover:
   application.
 - Unknown/deleted styles and accepted-job snapshots.
 - Canvas None, switching models, refresh preservation/removal and New Image reset.
-- Style selection alongside PhotoMaker and Adapter without modifying their
+- Style selection alongside identity portraits without modifying their
   inputs or user prompts.
 - Older catalogue responses without `styles` and generation requests without
   `styleId`.

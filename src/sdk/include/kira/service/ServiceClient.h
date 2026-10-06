@@ -29,8 +29,8 @@ public:
     QList<ModelInstall> installs() const;
     void requestModels();
     QString installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl = {}, const QJsonObject &recommendedOptions = {}, const QJsonObject &companionUrls = {},
-        const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {}, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {}, std::optional<bool> canEdit = {});
-    bool configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {}, std::optional<bool> canEdit = {});
+        const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {}, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {}, std::optional<QString> mmprojModelId = {});
+    bool configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {}, std::optional<QString> mmprojModelId = {});
     bool configureModelStyles(const QString &id, const QList<PromptStyle> &styles);
     bool cancelInstall(const QString &installId);
     bool deleteModel(const QString &id);
@@ -38,10 +38,6 @@ public:
     QString submitEdit(const ImageGenerationRequest &request);
     QString submitGeneration(const ImageGenerationRequest &request);
     QString submitUpscale(const ImageUpscaleRequest &request);
-    QString submitFaceParsing(const ImageUpscaleRequest &request);
-    QString submitInpaint(const ImageGenerationRequest& request, const QByteArray& maskImageData);
-    QString exportPhotoMakerIdentity(const QByteArray &sourceImageData);
-    QString exportPhotoMakerIdentityImages(const QList<QByteArray>& sourceImages);
     bool canEnhancePrompt(const QString& modelId) const;
     QString enhancePrompt(const PromptEnhancementRequest& request);
 signals:
@@ -58,22 +54,16 @@ signals:
     void jobOutput(const QString &jobId, const QString &stream, const QString &text);
     void generationProgressChanged(const QString &jobId, const KiraService::GenerationProgress &progress);
     void imageJobFinished(const KiraService::ImageJobResult &result);
-    void photoMakerIdentityExportFinished(const KiraService::PhotoMakerIdentityResult &result);
     void promptEnhancementFinished(const KiraService::PromptEnhancementResult& result);
 private:
     struct PendingJob
     {
         ImageOperation operation = ImageOperation::Generate;
         QByteArray inputData;
-        QByteArray ipAdapterImageData;
-        QByteArray maskImageData;
         QString mimeType;
-        bool identityExport = false;
-        QByteArray photoMakerIdentityData;
         bool promptEnhancement = false;
-        QList<QByteArray> referenceImages;
     };
-    QString submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData, const QByteArray &ipAdapterImageData = {}, const QByteArray &photoMakerIdentityData = {}, const QList<QByteArray>& references = {}, const QByteArray& maskImageData = {});
+    QString submit(ImageOperation operation, const QJsonObject& options, const QByteArray& inputData);
     void authenticate();
     void handleTextMessage(const QString &message);
     void handleBinaryMessage(const QByteArray &data);

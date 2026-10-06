@@ -1,6 +1,5 @@
 #include "kira/service/ServiceClient.h"
 #include "kira/service/ServiceProtocol.h"
-#include "kira/service/PhotoMakerIdentity.h"
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -13,47 +12,24 @@ namespace
 {
 KiraService::ModelCategory categoryFromName(const QString &name)
 {
-    if (name == QStringLiteral("face-parsing")) return KiraService::ModelCategory::FaceParsing;
-    if (name == QStringLiteral("inpaint")) return KiraService::ModelCategory::Inpaint;
     if (name == QStringLiteral("image-generation")) return KiraService::ModelCategory::ImageGeneration;
     if (name == QStringLiteral("upscaler")) return KiraService::ModelCategory::Upscaler;
+    if (name == "companion") return KiraService::ModelCategory::Companion;
     if (name == QStringLiteral("llm-chat")) return KiraService::ModelCategory::LlmChat;
-    if (name == QStringLiteral("ip-adapter") || name == QStringLiteral("ip_adapter")) return KiraService::ModelCategory::IpAdapter;
-    if (name == QStringLiteral("edition")) return KiraService::ModelCategory::Edition;
-    if (name == "clip_vision") return KiraService::ModelCategory::ClipVision;
-    if (name == "photomaker") return KiraService::ModelCategory::PhotoMaker;
-    if (name == "prompt-enhancer") return KiraService::ModelCategory::PromptEnhancer;
     return KiraService::ModelCategory::Unknown;
 }
 
 QString categoryName(KiraService::ModelCategory category)
 {
-    if (category == KiraService::ModelCategory::FaceParsing) return QStringLiteral("face-parsing");
-    if (category == KiraService::ModelCategory::Inpaint) return QStringLiteral("inpaint");
     if (category == KiraService::ModelCategory::ImageGeneration) return QStringLiteral("image-generation");
     if (category == KiraService::ModelCategory::Upscaler) return QStringLiteral("upscaler");
+    if (category == KiraService::ModelCategory::Companion) return QStringLiteral("companion");
     if (category == KiraService::ModelCategory::LlmChat) return QStringLiteral("llm-chat");
-    if (category == KiraService::ModelCategory::Edition) return QStringLiteral("edition");
-    // Retain the accepted alias so existing SDK installation calls also work with older servers.
-    if (category == KiraService::ModelCategory::IpAdapter) return QStringLiteral("ip-adapter");
-    if (category == KiraService::ModelCategory::ClipVision) return QStringLiteral("clip_vision");
-    if (category == KiraService::ModelCategory::PhotoMaker) return QStringLiteral("photomaker");
-    if (category == KiraService::ModelCategory::PromptEnhancer) return QStringLiteral("prompt-enhancer");
     return {};
-}
-
-void addIpAdapterOptions(QJsonObject &options, const KiraService::ImageGenerationRequest &request)
-{
-    if (!request.clipVisionModelId.isEmpty()) options.insert("clipVisionModelId", request.clipVisionModelId);
-    if (!request.ipAdapterModelId.isEmpty()) options.insert("ipAdapterModelId", request.ipAdapterModelId);
-    if (!request.ipAdapterImageData.isEmpty()) options.insert("hasIpAdapterImage", true);
-    if (request.ipAdapterStrength) options.insert("ip_adapter_strength", *request.ipAdapterStrength);
 }
 
 QString operationName(KiraService::ImageOperation operation)
 {
-    if (operation == KiraService::ImageOperation::FaceParsing) return QStringLiteral("image.face-parsing");
-    if (operation == KiraService::ImageOperation::Inpaint) return QStringLiteral("image.inpaint");
     if (operation == KiraService::ImageOperation::Edit) return QStringLiteral("image.edit");
     return operation == KiraService::ImageOperation::Generate ? QStringLiteral("image.generate") : QStringLiteral("image.upscale");
 }
@@ -126,18 +102,14 @@ ServiceCapabilities ServiceClient::capabilities() const { return m_capabilities;
 
 bool ServiceClient::supports(ImageOperation operation) const
 {
-    if (operation == ImageOperation::FaceParsing) return m_capabilities.faceParsing;
-    if (operation == ImageOperation::Inpaint) return m_capabilities.imageInpaint;
     if (operation == ImageOperation::Edit) return m_capabilities.imageEdit;
     return operation == ImageOperation::Generate ? m_capabilities.imageGeneration : m_capabilities.imageUpscale;
 }
 
 bool ServiceClient::canSubmit(ImageOperation operation, const QString &modelId) const
 {
-    const ModelCategory category = operation == ImageOperation::Inpaint ? ModelCategory::Inpaint
-        : operation == ImageOperation::FaceParsing ? ModelCategory::FaceParsing
-        : operation == ImageOperation::Edit ? ModelCategory::Edition
-        : operation == ImageOperation::Generate ? ModelCategory::ImageGeneration : ModelCategory::Upscaler;
+    const ModelCategory category = operation == ImageOperation::Generate || operation == ImageOperation::Edit
+        ? ModelCategory::ImageGeneration : ModelCategory::Upscaler;
     return m_authenticated && supports(operation) && containsModel(modelId, category);
 }
 
@@ -161,8 +133,9 @@ void ServiceClient::requestModels()
 }
 
 QString ServiceClient::installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl, const QJsonObject &recommendedOptions, const QJsonObject &companionUrls,
-    const QString &modelType, const QString &existingModelId, std::optional<bool> explicitContent, std::optional<QString> displayName, std::optional<bool> canEdit)
+    const QString &modelType, const QString &existingModelId, std::optional<bool> explicitContent, std::optional<QString> displayName, std::optional<QString> mmprojModelId)
 {
+    if ((existingModelId.isEmpty() && !displayName) || (displayName && (displayName->trimmed().isEmpty() || displayName->size() > 256))) return {};
     const QString categoryValue = categoryName(category);
     if (!m_authenticated || categoryValue.isEmpty() || (existingModelId.isEmpty() && (!url.isValid() || url.isEmpty()))) return {};
     const QString installId = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -181,9 +154,9 @@ QString ServiceClient::installModel(ModelCategory category, const QUrl &url, con
     if (!companionUrls.isEmpty()) message.insert("companionUrls", companionUrls);
     if (modelType != "checkpoint" || !existingModelId.isEmpty()) message.insert("modelType", modelType);
     if (!existingModelId.isEmpty()) message.insert("id", existingModelId);
-    if (canEdit) message.insert("canEdit", *canEdit);
     if (explicitContent) message.insert("explicitContent", *explicitContent);
     if (displayName) message.insert("displayName", displayName->trimmed());
+    if (mmprojModelId) message.insert("mmprojModelId", *mmprojModelId);
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     emit installsChanged();
     return installId;
@@ -197,12 +170,13 @@ bool ServiceClient::configureModelStyles(const QString &id, const QList<PromptSt
     return true;
 }
 
-bool ServiceClient::configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent, std::optional<QString> displayName, std::optional<bool> canEdit)
+bool ServiceClient::configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent, std::optional<QString> displayName, std::optional<QString> mmprojModelId)
 {
-    if (!m_authenticated || id.isEmpty()) return false;
+    if (!m_authenticated || id.isEmpty()
+        || (displayName && (displayName->trimmed().isEmpty() || displayName->size() > 256))) return false;
     QJsonObject message{{"type", "models.configure"}, {"id", id}, {"recommendedOptions", options}};
-    if (canEdit) message.insert("canEdit", *canEdit);
     if (displayName) message.insert("displayName", displayName->trimmed());
+    if (mmprojModelId) message.insert("mmprojModelId", *mmprojModelId);
     if (explicitContent) message.insert("explicitContent", *explicitContent);
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     return true;
@@ -225,17 +199,6 @@ bool ServiceClient::deleteModel(const QString &id)
 
 QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
 {
-    if (!request.photoMakerIdentityPackageData.isEmpty()) {
-        if (!request.photoMakerIdentityData.isEmpty() || !request.photoMakerReferenceImageData.isEmpty()
-            || !request.photoMakerReferenceImages.isEmpty()) return {};
-        auto unpacked = request;
-        PhotoMakerIdentityPackage identity;
-        if (!unpackPhotoMakerIdentity(request.photoMakerIdentityPackageData, identity)) return {};
-        unpacked.photoMakerReferenceImages = identity.references;
-        unpacked.photoMakerIdentityData = identity.embeddings;
-        unpacked.photoMakerIdentityPackageData.clear();
-        return submitGeneration(unpacked);
-    }
     QJsonObject options{{QStringLiteral("prompt"), request.prompt},
                               {QStringLiteral("negativePrompt"), request.negativePrompt},
                               {QStringLiteral("sampler"), request.sampler},
@@ -249,45 +212,19 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
                               {QStringLiteral("hasInput"), !request.baseImageData.isEmpty()},
                               {QStringLiteral("baseImageStrength"), request.baseImageStrength},
                               {QStringLiteral("modelId"), request.modelId}};
-    addIpAdapterOptions(options, request);
     if (!request.styleId.isEmpty()) options.insert("styleId", request.styleId);
-    const bool photoMaker = !request.photoMakerModelId.isEmpty() || !request.photoMakerIdentityData.isEmpty()
-        || !request.photoMakerReferenceImageData.isEmpty() || !request.photoMakerReferenceImages.isEmpty() || request.photoMakerStyleStrength.has_value();
-    const auto references = request.photoMakerReferenceImages.isEmpty()
-        ? QList<QByteArray>{request.photoMakerReferenceImageData} : request.photoMakerReferenceImages;
-    if (photoMaker) {
-        if (!m_capabilities.photoMaker || !request.baseImageData.isEmpty()
-            || !request.ipAdapterModelId.isEmpty() || !request.clipVisionModelId.isEmpty()
-            || !request.ipAdapterImageData.isEmpty() || request.ipAdapterStrength.has_value()
-            || request.photoMakerIdentityData.isEmpty() || references.isEmpty() || references.size() > 4
-            || std::any_of(references.cbegin(), references.cend(), [](const QByteArray& image) { return image.isEmpty(); })
-            || (!request.photoMakerReferenceImages.isEmpty() && !request.photoMakerReferenceImageData.isEmpty())
-            || !containsModel(request.photoMakerModelId, ModelCategory::PhotoMaker)
-            || (request.photoMakerStyleStrength && (*request.photoMakerStyleStrength < 0 || *request.photoMakerStyleStrength > 100))) return {};
-        options.insert("photoMakerModelId", request.photoMakerModelId);
-        options.insert("hasPhotoMakerIdentity", true);
-        if (references.size() > 1) options.insert("referenceCount", references.size());
-        if (request.photoMakerStyleStrength) options.insert("photoMakerStyleStrength", *request.photoMakerStyleStrength);
-    }
-    return submit(ImageOperation::Generate, options,
-        photoMaker ? references.first() : request.baseImageData,
-        request.ipAdapterImageData, request.photoMakerIdentityData, photoMaker ? references : QList<QByteArray>{});
+    return submit(ImageOperation::Generate, options, request.baseImageData);
 }
 
 QString ServiceClient::submitEdit(const ImageGenerationRequest &request)
 {
     if (!request.styleId.isEmpty()) return {};
-    if (!request.photoMakerIdentityPackageData.isEmpty()) return {};
-    if (!request.photoMakerModelId.isEmpty() || !request.photoMakerIdentityData.isEmpty()
-        || !request.photoMakerReferenceImageData.isEmpty() || !request.photoMakerReferenceImages.isEmpty()
-        || request.photoMakerStyleStrength.has_value()) return {};
     if (request.baseImageData.isEmpty() || request.prompt.trimmed().isEmpty()) return {};
     QJsonObject options{{"modelId", request.modelId}, {"hasInput", true}, {"prompt", request.prompt},
          {"width", request.width}, {"height", request.height}, {"steps", request.steps},
          {"cfgScale", request.cfgScale}, {"sampler", request.sampler},
          {"scheduler", request.scheduler}, {"clipSkip", request.clipSkip}};
-    addIpAdapterOptions(options, request);
-    return submit(ImageOperation::Edit, options, request.baseImageData, request.ipAdapterImageData);
+    return submit(ImageOperation::Edit, options, request.baseImageData);
 }
 
 QString ServiceClient::submitUpscale(const ImageUpscaleRequest &request)
@@ -298,62 +235,10 @@ QString ServiceClient::submitUpscale(const ImageUpscaleRequest &request)
                   request.sourceImageData);
 }
 
-QString ServiceClient::submitFaceParsing(const ImageUpscaleRequest& request)
-{
-    if (request.sourceImageData.isEmpty()) return {};
-    return submit(ImageOperation::FaceParsing, {{"modelId", request.modelId}}, request.sourceImageData);
-}
-
-QString ServiceClient::submitInpaint(const ImageGenerationRequest& request, const QByteArray& maskImageData)
-{
-    if (!request.photoMakerIdentityPackageData.isEmpty()) {
-        if (!request.photoMakerIdentityData.isEmpty() || !request.photoMakerReferenceImageData.isEmpty()
-            || !request.photoMakerReferenceImages.isEmpty()) return {};
-        PhotoMakerIdentityPackage identity;
-        if (!unpackPhotoMakerIdentity(request.photoMakerIdentityPackageData, identity)) return {};
-        auto unpacked = request;
-        unpacked.photoMakerIdentityPackageData.clear();
-        unpacked.photoMakerIdentityData = identity.embeddings;
-        unpacked.photoMakerReferenceImages = identity.references;
-        return submitInpaint(unpacked, maskImageData);
-    }
-    if (request.baseImageData.isEmpty() || maskImageData.isEmpty() || request.prompt.trimmed().isEmpty()
-        || !request.styleId.isEmpty()) return {};
-    QJsonObject options{{"modelId", request.modelId}, {"hasInput", true}, {"hasMask", true},
-        {"prompt", request.prompt}, {"negativePrompt", request.negativePrompt},
-        {"width", request.width}, {"height", request.height}, {"steps", request.steps},
-        {"cfgScale", request.cfgScale}, {"seed", request.seed}, {"clipSkip", request.clipSkip},
-        {"sampler", request.sampler}, {"scheduler", request.scheduler},
-        {"baseImageStrength", request.baseImageStrength}};
-    addIpAdapterOptions(options, request);
-    const bool photoMaker = !request.photoMakerModelId.isEmpty() || !request.photoMakerIdentityData.isEmpty()
-        || !request.photoMakerReferenceImages.isEmpty() || !request.photoMakerReferenceImageData.isEmpty()
-        || request.photoMakerStyleStrength.has_value();
-    QList<QByteArray> references;
-    if (photoMaker) {
-        references = request.photoMakerReferenceImages.isEmpty()
-            ? QList<QByteArray>{request.photoMakerReferenceImageData} : request.photoMakerReferenceImages;
-        if (!m_capabilities.photoMaker || request.photoMakerIdentityData.isEmpty()
-            || !containsModel(request.photoMakerModelId, ModelCategory::PhotoMaker)
-            || references.isEmpty() || references.size() > 4
-            || std::any_of(references.cbegin(), references.cend(), [](const auto& image) { return image.isEmpty(); })
-            || (!request.photoMakerReferenceImages.isEmpty() && !request.photoMakerReferenceImageData.isEmpty())
-            || !request.ipAdapterImageData.isEmpty() || !request.ipAdapterModelId.isEmpty()
-            || !request.clipVisionModelId.isEmpty() || request.ipAdapterStrength
-            || (request.photoMakerStyleStrength && (*request.photoMakerStyleStrength < 0 || *request.photoMakerStyleStrength > 100))) return {};
-        options.insert("photoMakerModelId", request.photoMakerModelId);
-        options.insert("hasPhotoMakerIdentity", true);
-        options.insert("referenceCount", references.size());
-        if (request.photoMakerStyleStrength) options.insert("photoMakerStyleStrength", *request.photoMakerStyleStrength);
-    }
-    return submit(ImageOperation::Inpaint, options, request.baseImageData, request.ipAdapterImageData,
-        request.photoMakerIdentityData, references, maskImageData);
-}
-
 bool ServiceClient::canEnhancePrompt(const QString& modelId) const
 {
     return m_authenticated && m_capabilities.promptEnhancement
-        && containsModel(modelId, ModelCategory::PromptEnhancer);
+        && containsModel(modelId, ModelCategory::LlmChat);
 }
 
 QString ServiceClient::enhancePrompt(const PromptEnhancementRequest& request)
@@ -370,43 +255,13 @@ QString ServiceClient::enhancePrompt(const PromptEnhancementRequest& request)
     return jobId;
 }
 
-QString ServiceClient::exportPhotoMakerIdentity(const QByteArray &sourceImageData)
-{
-    return exportPhotoMakerIdentityImages(QList<QByteArray>{sourceImageData});
-}
-
-QString ServiceClient::exportPhotoMakerIdentityImages(const QList<QByteArray>& sourceImages)
-{
-    if (!m_authenticated || !m_capabilities.photoMakerIdentityExport || sourceImages.isEmpty() || sourceImages.size() > 4
-        || std::any_of(sourceImages.cbegin(), sourceImages.cend(), [](const QByteArray& image) { return image.isEmpty(); })) return {};
-    const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    PendingJob job;
-    job.inputData = sourceImages.first();
-    job.referenceImages = sourceImages;
-    job.identityExport = true;
-    m_pendingJobs.insert(jobId, job);
-    const QJsonObject message{{"type", "submit"}, {"jobId", jobId}, {"operation", "photomaker.export"},
-        {"options", sourceImages.size() == 1 ? QJsonObject{} : QJsonObject{{"referenceCount", sourceImages.size()}}}};
-    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
-    return jobId;
-}
-
-QString ServiceClient::submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData, const QByteArray &ipAdapterImageData, const QByteArray &photoMakerIdentityData, const QList<QByteArray>& references, const QByteArray& maskImageData)
+QString ServiceClient::submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData)
 {
     if (!canSubmit(operation, options.value(QStringLiteral("modelId")).toString())) return {};
-    const bool adapterRequested = options.contains("clipVisionModelId") || options.contains("ipAdapterModelId")
-        || options.contains("hasIpAdapterImage") || options.contains("ip_adapter_strength");
-    if (adapterRequested && (!m_capabilities.ipAdapter || ipAdapterImageData.isEmpty()
-        || !containsModel(options.value("clipVisionModelId").toString(), ModelCategory::ClipVision)
-        || !containsModel(options.value("ipAdapterModelId").toString(), ModelCategory::IpAdapter))) return {};
     const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     PendingJob job;
     job.operation = operation;
     job.inputData = inputData;
-    job.ipAdapterImageData = ipAdapterImageData;
-    job.maskImageData = maskImageData;
-    job.photoMakerIdentityData = photoMakerIdentityData;
-    job.referenceImages = references;
     m_pendingJobs.insert(jobId, job);
     const QJsonObject message{{QStringLiteral("type"), QStringLiteral("submit")},
                               {QStringLiteral("jobId"), jobId},
@@ -438,8 +293,8 @@ void ServiceClient::handleTextMessage(const QString &message)
     }
     if (type == QStringLiteral("capabilities")) {
         const QJsonArray operations = object.value(QStringLiteral("operations")).toArray();
-        updateCapabilities({operations.contains(QStringLiteral("image.generate")), operations.contains(QStringLiteral("image.upscale")), operations.contains(QStringLiteral("image.edit")), object.value("ipAdapter").toBool(false),
-            operations.contains("photomaker.export"), object.value("photoMaker").toBool(false), operations.contains("prompt.enhance"), operations.contains("image.face-parsing"), operations.contains("image.inpaint")});
+        updateCapabilities({operations.contains("image.generate"), operations.contains("image.upscale"),
+            operations.contains("image.edit"), operations.contains("prompt.enhance")});
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
         return;
@@ -459,7 +314,7 @@ void ServiceClient::handleTextMessage(const QString &message)
                                  model.value(QStringLiteral("companionFileName")).toString(),
                                  model.value(QStringLiteral("companionRole")).toString(), model.value("recommendedOptions").toObject(),
                     model.value("companionFiles").toObject(), model.value("modelType").toString("checkpoint"), model.value("explicitContent").toBool(false),
-                    Protocol::promptStylesFromJson(model.value("styles")).value_or(QList<PromptStyle>{}), model.value("displayName").toString().trimmed(), model.value("canEdit").toBool(false)});
+                    Protocol::promptStylesFromJson(model.value("styles")).value_or(QList<PromptStyle>{}), model.value("displayName").toString().trimmed(), model.value("mmprojModelId").toString()});
             }
         }
         m_modelListAvailable = true;
@@ -508,7 +363,7 @@ void ServiceClient::handleTextMessage(const QString &message)
         if (styles) emit modelStylesConfigured(object.value("id").toString(), *styles);
         return;
     }
-    if (type == "models.styles.changed" || type == "models.changed") { requestModels(); return; }
+    if (type == "models.styles.changed") { requestModels(); return; }
     if (type == "models.companion.delete.completed") {
         emit companionDeleted(object.value("id").toString(), object.value("role").toString());
         requestModels(); return;
@@ -545,17 +400,7 @@ void ServiceClient::handleTextMessage(const QString &message)
         emit jobStateChanged(jobId, JobState::Uploading, -1);
         const auto &job = m_pendingJobs.value(jobId);
         const auto role = object.value("inputRole").toString();
-        if (object.contains("referenceIndex")) {
-            const int index = object.value("referenceIndex").toInt(-1);
-            if (index < 0 || index >= job.referenceImages.size()) {
-                failJob(jobId, "invalid-reference-index", "The service requested an invalid reference image.");
-                return;
-            }
-            m_socket->sendBinaryMessage(job.referenceImages[index]);
-            return;
-        }
-        m_socket->sendBinaryMessage(role == "photomaker-identity" ? job.photoMakerIdentityData
-            : role == "ip-adapter" ? job.ipAdapterImageData : role == "mask" ? job.maskImageData : job.inputData);
+        m_socket->sendBinaryMessage(job.inputData);
     } else if (type == QStringLiteral("progress")) {
         emit generationProgressChanged(jobId, Protocol::progressFromJson(object.value(QStringLiteral("progress")).toObject()));
     } else if (type == QStringLiteral("output")) {
@@ -589,19 +434,14 @@ void ServiceClient::handleBinaryMessage(const QByteArray &data)
     const QString jobId = m_resultJobs.dequeue();
     const PendingJob job = m_pendingJobs.take(jobId);
     emit jobStateChanged(jobId, JobState::Completed, -1);
-    if (job.identityExport) emit photoMakerIdentityExportFinished({jobId, true, data, {}, {}});
-    else emit imageJobFinished({jobId, job.operation, true, data, job.mimeType, {}, {}});
+    emit imageJobFinished({jobId, job.operation, true, data, job.mimeType, {}, {}});
 }
 
 void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
 {
     if (m_capabilities.imageGeneration == capabilities.imageGeneration && m_capabilities.imageUpscale == capabilities.imageUpscale && m_capabilities.imageEdit == capabilities.imageEdit
-        && m_capabilities.ipAdapter == capabilities.ipAdapter
-        && m_capabilities.photoMaker == capabilities.photoMaker
-        && m_capabilities.photoMakerIdentityExport == capabilities.photoMakerIdentityExport
         && m_capabilities.promptEnhancement == capabilities.promptEnhancement
-        && m_capabilities.faceParsing == capabilities.faceParsing
-        && m_capabilities.imageInpaint == capabilities.imageInpaint) return;
+) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
 }
@@ -639,7 +479,6 @@ void ServiceClient::failJob(const QString &jobId, const QString &errorCode, cons
     m_resultJobs.removeAll(jobId);
     emit jobStateChanged(jobId, JobState::Failed, -1);
     if (job.promptEnhancement) emit promptEnhancementFinished({jobId, false, {}, errorCode, message});
-    else if (job.identityExport) emit photoMakerIdentityExportFinished({jobId, false, {}, errorCode, message});
     else emit imageJobFinished({jobId, job.operation, false, {}, job.mimeType, errorCode, message});
 }
 

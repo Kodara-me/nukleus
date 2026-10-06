@@ -34,18 +34,9 @@ bool isSafeFileName(const QString &fileName)
 QStringList extensionsFor(ModelCategory category)
 {
     switch (category) {
-    case ModelCategory::FaceParsing:
-        return {QStringLiteral("onnx")};
-    case ModelCategory::PhotoMaker:
-        return {QStringLiteral("safetensors")};
-    case ModelCategory::Inpaint:
+    case ModelCategory::Companion:
     case ModelCategory::ImageGeneration:
-    case ModelCategory::PromptEnhancer:
-    case ModelCategory::Edition:
         return {QStringLiteral("safetensors"), QStringLiteral("ckpt"), QStringLiteral("gguf")};
-    case ModelCategory::ClipVision:
-    case ModelCategory::IpAdapter:
-        return {QStringLiteral("bin"), QStringLiteral("safetensors"), QStringLiteral("ckpt"), QStringLiteral("gguf")};
     case ModelCategory::Upscaler:
     case ModelCategory::LlmChat:
         return {QStringLiteral("gguf")};
@@ -117,22 +108,16 @@ ModelCatalog::~ModelCatalog() = default;
 
 QList<ModelCategory> ModelCatalog::categories()
 {
-    return {ModelCategory::ImageGeneration, ModelCategory::Inpaint, ModelCategory::Edition, ModelCategory::Upscaler, ModelCategory::LlmChat, ModelCategory::IpAdapter, ModelCategory::ClipVision, ModelCategory::PhotoMaker, ModelCategory::PromptEnhancer, ModelCategory::FaceParsing};
+    return {ModelCategory::ImageGeneration, ModelCategory::Upscaler, ModelCategory::LlmChat, ModelCategory::Companion};
 }
 
 QString ModelCatalog::categoryName(ModelCategory category)
 {
     switch (category) {
-    case ModelCategory::FaceParsing: return QStringLiteral("face-parsing");
-    case ModelCategory::Inpaint: return QStringLiteral("inpaint");
     case ModelCategory::ImageGeneration: return QStringLiteral("image-generation");
-    case ModelCategory::Edition: return QStringLiteral("edition");
     case ModelCategory::Upscaler: return QStringLiteral("upscaler");
     case ModelCategory::LlmChat: return QStringLiteral("llm-chat");
-    case ModelCategory::IpAdapter: return QStringLiteral("ip_adapter");
-    case ModelCategory::ClipVision: return QStringLiteral("clip_vision");
-    case ModelCategory::PhotoMaker: return QStringLiteral("photomaker");
-    case ModelCategory::PromptEnhancer: return QStringLiteral("prompt-enhancer");
+    case ModelCategory::Companion: return QStringLiteral("companion");
     }
     return {};
 }
@@ -140,23 +125,16 @@ QString ModelCatalog::categoryName(ModelCategory category)
 QString ModelCatalog::companionRole(ModelCategory category)
 {
     switch (category) {
-    case ModelCategory::IpAdapter: return QStringLiteral("lora");
     case ModelCategory::LlmChat: return QStringLiteral("mmproj");
-    case ModelCategory::Inpaint:
-    case ModelCategory::ImageGeneration:
-    case ModelCategory::Edition: return QStringLiteral("vae");
-    case ModelCategory::FaceParsing:
-    case ModelCategory::Upscaler:
-    case ModelCategory::PhotoMaker:
-    case ModelCategory::PromptEnhancer:
-    case ModelCategory::ClipVision: return {};
+    case ModelCategory::ImageGeneration: return QStringLiteral("vae");
+    case ModelCategory::Companion:
+    case ModelCategory::Upscaler: return {};
     }
     return {};
 }
 
 std::optional<ModelCategory> ModelCatalog::categoryFromName(const QString &name)
 {
-    if (name == "ip-adapter") return ModelCategory::IpAdapter;
     for (const ModelCategory category : categories()) {
         if (name == categoryName(category)) return category;
     }
@@ -180,7 +158,7 @@ QList<ModelInfo> ModelCatalog::models(ModelCategory category) const
         if (!companionFileName.isEmpty()) files.insert(companionRole(category), companionFileName);
         bool valid = true;
         for (auto it = files.begin(); it != files.end(); ++it) {
-            const auto roles = category == ModelCategory::ImageGeneration || category == ModelCategory::Inpaint || category == ModelCategory::Edition
+            const auto roles = category == ModelCategory::ImageGeneration
                 ? QStringList{"vae", "clip-l", "clip-g", "llm", "mmproj"} : QStringList{companionRole(category)};
             if (!roles.contains(it.key()) || !it.value().isString()) { valid = false; break; }
             const auto path = companionPath(category, fileName, it.value().toString());
@@ -188,8 +166,6 @@ QList<ModelInfo> ModelCatalog::models(ModelCategory category) const
         }
         const auto type = entry.toObject().value("modelType").toString("checkpoint");
         if (!valid || (type != "checkpoint" && type != "diffusion")) continue;
-        // Retain existing opaque adapter IDs independently of the canonical category name.
-        const QString idCategory = category == ModelCategory::IpAdapter ? QStringLiteral("ip-adapter") : categoryName(category);
         QList<KiraService::PromptStyle> styles;
         if (category == ModelCategory::ImageGeneration) {
             styles = entry.toObject().contains("styles")
@@ -197,15 +173,11 @@ QList<ModelInfo> ModelCatalog::models(ModelCategory category) const
                 : KiraService::Protocol::starterPromptStyles();
         }
         const auto displayName = entry.toObject().value("displayName").toString().trimmed();
-        models.append({idCategory + QLatin1Char(':') + fileName,
+        models.append({categoryName(category) + QLatin1Char(':') + fileName,
                        displayName.isEmpty() ? fileName : displayName, fileName, fileInfo.size(), fileInfo.absoluteFilePath(),
                        companionFileName, companionFileName.isEmpty() ? QString() : companionRole(category),
-                       entry.toObject().value("recommendedOptions").toObject(), files, type, entry.toObject().value("explicitContent").toBool(false), styles, displayName,
-                       category == ModelCategory::ImageGeneration && entry.toObject().value("canEdit").toBool(false)});
-    }
-    if (category == ModelCategory::Edition) {
-        for (const auto& model : this->models(ModelCategory::ImageGeneration))
-            if (model.canEdit) models.append(model);
+                       category == ModelCategory::Upscaler ? QJsonObject{} : entry.toObject().value("recommendedOptions").toObject(), files, type, category != ModelCategory::Upscaler && category != ModelCategory::Companion && entry.toObject().value("explicitContent").toBool(false), styles, displayName,
+                       entry.toObject().value("mmprojModelId").toString()});
     }
     std::sort(models.begin(), models.end(), [](const ModelInfo &left, const ModelInfo &right) {
         return QString::compare(left.fileName, right.fileName, Qt::CaseInsensitive) < 0;
@@ -217,8 +189,7 @@ std::optional<ModelInfo> ModelCatalog::model(ModelCategory category, const QStri
 {
     const QList<ModelInfo> availableModels = models(category);
     const auto model = std::find_if(availableModels.cbegin(), availableModels.cend(), [&id](const ModelInfo &candidate) {
-        return candidate.id == id
-            || (candidate.id.startsWith("ip-adapter:") && id == "ip_adapter:" + candidate.fileName);
+        return candidate.id == id;
     });
     return model == availableModels.cend() ? std::nullopt : std::optional<ModelInfo>(*model);
 }
@@ -234,6 +205,16 @@ std::optional<ModelInfo> ModelCatalog::modelById(const QString &id) const
 
 bool ModelCatalog::remove(const QString &id, QString *errorMessage)
 {
+    if (id.startsWith("companion:") && !readMetadata(ModelCategory::LlmChat)) {
+        if (errorMessage) *errorMessage = tr("Could not read LLM companion assignments");
+        return false;
+    }
+    if (m_activeInstall && m_activeInstall->request.mmprojModelId == id) {
+        if (errorMessage) *errorMessage = tr("This companion is being assigned to an installed model");
+        return false;
+    }
+    for (const auto& model : models(ModelCategory::LlmChat))
+        if (model.mmprojModelId == id) { if (errorMessage) *errorMessage = tr("This companion is assigned to an LLM model"); return false; }
     const std::optional<ModelInfo> modelInfo = modelById(id);
     if (!modelInfo.has_value()) {
         if (errorMessage) *errorMessage = tr("The requested model is not installed");
@@ -264,14 +245,19 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
     const auto fail = [&](const QString &message) { if (errorMessage) *errorMessage = message; return false; };
     if (isInstalling()) return fail(tr("Another model installation is in progress"));
     if (request.installId.isEmpty()) return fail(tr("An installation ID is required"));
-    if (request.displayName && request.displayName->size() > 256) return fail(tr("Display name must contain at most 256 characters"));
+    if ((request.existingModelId.isEmpty() && !request.displayName)
+        || (request.displayName && (request.displayName->trimmed().isEmpty() || request.displayName->size() > 256)))
+        return fail(tr("A display name of 1–256 characters is required"));
+    if (!validateMmproj(request.category, request.mmprojModelId, errorMessage)) return false;
+    if ((request.category == ModelCategory::Upscaler || request.category == ModelCategory::Companion) && request.explicitContent.value_or(false))
+        return fail(tr("This category has no explicit-content setting"));
+    if (request.category == ModelCategory::LlmChat && request.companionUrl)
+        return fail(tr("Select an installed MMPROJ companion instead of a URL"));
     if (request.modelType != "checkpoint" && request.modelType != "diffusion"
         && !(request.modelType.isEmpty() && !request.existingModelId.isEmpty())) return fail(tr("Invalid model type"));
-    if (request.canEdit && request.category != ModelCategory::ImageGeneration)
-        return fail(tr("Editing eligibility applies only to generation models"));
-    const bool image = request.category == ModelCategory::ImageGeneration || request.category == ModelCategory::Inpaint || request.category == ModelCategory::Edition;
+    const bool image = request.category == ModelCategory::ImageGeneration;
     if (!image && ((request.modelType != "checkpoint" && !(request.modelType.isEmpty() && !request.existingModelId.isEmpty()))
-        || (request.category != ModelCategory::IpAdapter && !request.companionUrls.isEmpty())))
+        || !request.companionUrls.isEmpty()))
         return fail(tr("CLIP/VAE files and diffusion models require an image model category"));
     if (request.recommendedOptions && !KiraService::Protocol::validateModelOptions(categoryName(request.category), *request.recommendedOptions, errorMessage)) return false;
     const auto acceptsSource = [&](const QUrl& url) {
@@ -302,6 +288,8 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
         const auto url = normalizedModelUrl(request.url);
         if (!acceptsSource(url)) return fail(tr("Choose a readable local model file or an HTTPS model URL"));
         job->fileName = fileNameForUrl(url);
+        if (request.category == ModelCategory::Companion && request.recommendedOptions.value_or(KiraService::Protocol::defaultModelOptions("companion")).value("subtype") == "mmproj"
+            && QFileInfo(job->fileName).suffix().toLower() != "gguf") return fail(tr("MMPROJ companions require GGUF files"));
         if (!acceptsFileName(request.category, job->fileName)) return fail(tr("The URL filename is not supported for this model category"));
         job->finalPath = QDir(directoryPath(request.category)).filePath(job->fileName);
         const QFileInfo original(job->fileName);
@@ -356,25 +344,44 @@ void ModelCatalog::cancel(const QString &installId)
     emit installCanceled(installId);
 }
 
-bool ModelCatalog::configure(const QString &id, const QJsonObject &options, QString *error, std::optional<bool> explicitContent, std::optional<QString> displayName, std::optional<bool> canEdit)
+bool ModelCatalog::configure(const QString &id, const QJsonObject &options, QString *error, std::optional<bool> explicitContent, std::optional<QString> displayName, std::optional<QString> mmprojModelId)
 {
     const auto info = modelById(id);
     if (!info) { if (error) *error = tr("The requested model is not installed"); return false; }
     const auto category = *categoryFromName(id.section(':', 0, 0));
-    if (canEdit && category != ModelCategory::ImageGeneration) {
-        if (error) *error = tr("Editing eligibility applies only to generation models");
+    if (!KiraService::Protocol::validateModelOptions(categoryName(category), options, error)) return false;
+    const auto name = displayName.value_or(info->displayName).trimmed();
+    if (name.isEmpty() || name.size() > 256) { if (error) *error = tr("A display name of 1–256 characters is required"); return false; }
+    if (!validateMmproj(category, mmprojModelId, error)) return false;
+    if ((category == ModelCategory::Upscaler || category == ModelCategory::Companion) && explicitContent.value_or(false)) {
+        if (error) *error = tr("This category has no explicit-content setting");
         return false;
     }
-    if (!KiraService::Protocol::validateModelOptions(categoryName(category), options, error)) return false;
-    if (displayName && displayName->size() > 256) { if (error) *error = tr("Display name must contain at most 256 characters"); return false; }
+    if (category == ModelCategory::Companion) {
+        if (options.value("subtype") != "mmproj"
+            && (!readMetadata(ModelCategory::LlmChat)
+                || (m_activeInstall && m_activeInstall->request.mmprojModelId == id))) {
+            if (error) *error = tr("Could not safely change an assigned MMPROJ companion");
+            return false;
+        }
+        if (options.value("subtype") == "mmproj" && QFileInfo(info->filePath).suffix().toLower() != "gguf") {
+            if (error) *error = tr("MMPROJ companions require GGUF files");
+            return false;
+        }
+        for (const auto& model : models(ModelCategory::LlmChat))
+            if (model.mmprojModelId == id && options.value("subtype") != "mmproj") {
+                if (error) *error = tr("This companion is assigned to an LLM model");
+                return false;
+            }
+    }
     auto metadata = readMetadata(category);
     if (!metadata) { if (error) *error = tr("Could not read model metadata"); return false; }
     QJsonObject entry = metadata->value(info->fileName).toObject();
     if (!info->companionFileName.isEmpty()) entry.insert("companionFileName", info->companionFileName);
     entry.insert("recommendedOptions", options);
-    if (explicitContent) entry.insert("explicitContent", *explicitContent);
-    if (canEdit) entry.insert("canEdit", *canEdit);
-    if (displayName) entry.insert("displayName", displayName->trimmed());
+    if (explicitContent && category != ModelCategory::Upscaler && category != ModelCategory::Companion) entry.insert("explicitContent", *explicitContent);
+    entry.insert("displayName", name);
+    if (mmprojModelId) entry.insert("mmprojModelId", *mmprojModelId);
     metadata->insert(info->fileName, entry);
     if (!writeMetadata(category, *metadata)) { if (error) *error = tr("Could not save model metadata"); return false; }
     return true;
@@ -440,16 +447,10 @@ QString ModelCatalog::directoryPath(ModelCategory category) const
     const QString root = rootPath();
     if (root.isEmpty()) return {};
     switch (category) {
-    case ModelCategory::FaceParsing: return QDir(root).filePath(QStringLiteral("face-parsing"));
-    case ModelCategory::Inpaint: return QDir(root).filePath(QStringLiteral("inpaint"));
     case ModelCategory::ImageGeneration: return root;
-    case ModelCategory::Edition: return QDir(root).filePath(QStringLiteral("edition"));
     case ModelCategory::Upscaler: return QDir(root).filePath(QStringLiteral("upscale"));
     case ModelCategory::LlmChat: return QDir(root).filePath(QStringLiteral("llm"));
-    case ModelCategory::IpAdapter: return QDir(root).filePath(QStringLiteral("ip-adapter"));
-    case ModelCategory::ClipVision: return QDir(root).filePath(QStringLiteral("clip_vision"));
-    case ModelCategory::PhotoMaker: return QDir(root).filePath(QStringLiteral("photomaker"));
-    case ModelCategory::PromptEnhancer: return QDir(root).filePath(QStringLiteral("prompt-enhancer"));
+    case ModelCategory::Companion: return QDir(root).filePath(QStringLiteral("companion"));
     }
     return {};
 }
@@ -588,6 +589,8 @@ void ModelCatalog::completeInstall()
 {
     if (!m_activeInstall) return;
     const auto category = m_activeInstall->request.category;
+    QString referenceError;
+    if (!validateMmproj(category, m_activeInstall->request.mmprojModelId, &referenceError)) { failActiveInstall(referenceError); return; }
     auto metadata = readMetadata(category);
     if (!metadata) { failActiveInstall(tr("Could not read model metadata")); return; }
     if (!m_activeInstall->request.existingModelId.isEmpty() && !QFileInfo(m_activeInstall->finalPath).isFile()) {
@@ -604,9 +607,10 @@ void ModelCatalog::completeInstall()
     entry.insert("companionFiles", m_activeInstall->companionFiles);
     entry.insert("modelType", m_activeInstall->request.modelType);
     if (m_activeInstall->request.recommendedOptions) entry.insert("recommendedOptions", *m_activeInstall->request.recommendedOptions);
-    if (m_activeInstall->request.explicitContent) entry.insert("explicitContent", *m_activeInstall->request.explicitContent);
-    if (m_activeInstall->request.canEdit) entry.insert("canEdit", *m_activeInstall->request.canEdit);
+    if (m_activeInstall->request.explicitContent && category != ModelCategory::Upscaler && category != ModelCategory::Companion) entry.insert("explicitContent", *m_activeInstall->request.explicitContent);
     if (m_activeInstall->request.displayName) entry.insert("displayName", m_activeInstall->request.displayName->trimmed());
+    if (m_activeInstall->request.mmprojModelId) entry.insert("mmprojModelId", *m_activeInstall->request.mmprojModelId);
+    if (category == ModelCategory::Companion) entry.insert("recommendedOptions", m_activeInstall->request.recommendedOptions.value_or(KiraService::Protocol::defaultModelOptions("companion")));
     metadata->insert(m_activeInstall->fileName, entry);
     if (!writeMetadata(category, *metadata)) { failActiveInstall(tr("Could not save model metadata")); return; }
     for (const auto &file : m_activeInstall->files) QFile::remove(file.partPath);
@@ -674,4 +678,18 @@ bool ModelCatalog::removeCompanion(const QString& id, const QString& role, QStri
         return fail(tr("Could not remove the companion file"));
     }
     return true;
+}
+
+bool ModelCatalog::validateMmproj(ModelCategory category, const std::optional<QString>& id, QString* error) const
+{
+    if (!id) return true;
+    if (category != ModelCategory::LlmChat) {
+        if (error) *error = tr("Only LLM models may select an MMPROJ companion");
+        return false;
+    }
+    if (id->isEmpty()) return true;
+    const auto companion = model(ModelCategory::Companion, *id);
+    if (companion && companion->recommendedOptions.value("subtype") == "mmproj") return true;
+    if (error) *error = tr("Select an installed MMPROJ companion");
+    return false;
 }

@@ -12,6 +12,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLineEdit>
+#include <QLabel>
 #include <QListWidget>
 #include <QPlainTextEdit>
 #include <QFileDialog>
@@ -51,7 +52,7 @@ class ManagerUiTest final : public QObject
                QJsonArray{QJsonObject{
                    {"category", "image-generation"},
                    {"models", QJsonArray{QJsonObject{{"id", "image-generation:test.gguf"},
-                                                     {"name", "Test model"},
+                                                     {"name", "Test model"}, {"displayName", "Test model"},
                                                      {"fileName", "test.gguf"},
                                                      {"bytes", 10},
                                                      {"companionFileName", "companions/test.gguf/vae.gguf"},
@@ -59,43 +60,6 @@ class ManagerUiTest final : public QObject
                                                      {"recommendedOptions", m_saved}}}}}}}});
     }
   private slots:
-    void promptEnhancerSubtypeControlsAndDefaults()
-    {
-        using namespace KiraService::Protocol;
-        ModelOptionsWidget widget;
-        widget.setOptions("prompt-enhancer");
-        QCOMPARE(widget.options(), defaultPromptEnhancerOptions("LLM"));
-        widget.findChild<QCheckBox*>("doSample")->setChecked(false);
-        QVERIFY(widget.findChild<QWidget*>("temperature")->isHidden());
-        QVERIFY(widget.isValid());
-        widget.findChild<QPlainTextEdit*>("systemPrompt")->setPlainText("Return only the improved prompt.");
-        QCOMPARE(widget.options().value("systemPrompt").toString(), QString("Return only the improved prompt."));
-        widget.findChild<QComboBox*>("subtype")->setCurrentIndex(0);
-        QTRY_COMPARE(widget.options(), defaultPromptEnhancerOptions("T5"));
-        QVERIFY(widget.isValid());
-        QVERIFY(!widget.findChild<QWidget*>("temperature"));
-        QVERIFY(!widget.findChild<QWidget*>("contextLength"));
-        widget.findChild<QSpinBox*>("maxInputTokens")->setValue(512);
-        widget.findChild<QCheckBox*>("doSample")->setChecked(true);
-        QTRY_VERIFY(widget.findChild<QWidget*>("temperature"));
-        QCOMPARE(widget.options().value("maxInputTokens").toInt(), 512);
-        QVERIFY(widget.isValid());
-        widget.findChild<QCheckBox*>("doSample")->setChecked(false);
-        QTRY_VERIFY(!widget.findChild<QWidget*>("temperature"));
-        QVERIFY(widget.isValid());
-        widget.findChild<QComboBox*>("subtype")->setCurrentIndex(2);
-        QTRY_COMPARE(widget.options(), defaultPromptEnhancerOptions("VLM"));
-        QVERIFY(widget.findChild<QCheckBox*>("visionInputEnabled")->isChecked());
-        QVERIFY(!widget.findChild<QWidget*>("instructionPrompt"));
-        widget.findChild<QComboBox*>("subtype")->setCurrentIndex(1);
-        QTRY_COMPARE(widget.options(), defaultPromptEnhancerOptions("LLM"));
-        QVERIFY(!widget.findChild<QWidget*>("visionInputEnabled"));
-        widget.findChild<QComboBox*>("subtype")->setCurrentIndex(0);
-        widget.setOptions("upscaler");
-        QCoreApplication::processEvents();
-        QCOMPARE(widget.options(), defaultModelOptions("upscaler"));
-    }
-
     void savesConnectionOnlyAfterAuthentication()
     {
         m_requiredToken = "test-key";
@@ -290,87 +254,16 @@ class ManagerUiTest final : public QObject
         dialog.close();
         QTRY_VERIFY(!dialog.isVisible());
     }
-    void installsFaceParsingFromManager()
-    {
-        ManagerServiceClient client(nullptr, m_server.serverPort());
-        client.setAutomaticReconnect(false);
-        client.connectToService();
-        QTRY_VERIFY(client.modelListAvailable());
-        AddModelDialog dialog(&client, "face-parsing");
-        dialog.show();
-        auto* category = dialog.findChild<QComboBox*>("modelCategory");
-        QCOMPARE(category->currentData().toString(), QString("face-parsing"));
-        auto* options = dialog.findChild<ModelOptionsWidget*>();
-        QCOMPARE(options->options(), KiraService::Protocol::defaultModelOptions("face-parsing"));
-        QVERIFY(dialog.findChild<QLineEdit*>("companionUrl")->isHidden());
-        dialog.findChild<QLineEdit*>("modelUrl")->setText("https://example.com/model.onnx");
-        auto* start = dialog.findChild<QPushButton*>("startDownload");
-        QVERIFY(start->isEnabled());
-        start->click();
-        QTRY_COMPARE(m_messages.last().value("type").toString(), QString("models.install"));
-        QCOMPARE(m_messages.last().value("category").toString(), QString("face-parsing"));
-        QCOMPARE(m_messages.last().value("recommendedOptions").toObject(), options->options());
-        QVERIFY(!m_messages.last().contains("companionUrl"));
-        dialog.close();
-        QTRY_COMPARE(m_messages.last().value("type").toString(), QString("models.install.cancel"));
-        send({{"type", "models.list.result"}, {"categories", QJsonArray{QJsonObject{
-            {"category", "face-parsing"}, {"models", QJsonArray{QJsonObject{
-                {"id", "face-parsing:model.onnx"}, {"fileName", "model.onnx"},
-                {"displayName", "Face parser"}, {"recommendedOptions", options->options()}}}}}}}});
-        QTRY_COMPARE(client.models("face-parsing").size(), 1);
-        QCOMPARE(client.models("face-parsing").first().id, QString("face-parsing:model.onnx"));
-        m_peer->close();
-        QTRY_VERIFY(!client.isAuthenticated());
-        QVERIFY(client.models("face-parsing").isEmpty());
-    }
-
     void fieldsFollowCategory()
     {
         ModelOptionsWidget widget;
-        for (const auto &category : {"image-generation", "inpaint", "edition", "llm-chat", "upscaler", "ip-adapter", "ip_adapter", "clip_vision", "photomaker", "face-parsing"})
+        for (const auto &category : {"image-generation", "llm-chat", "upscaler", "companion"})
         {
             widget.setOptions(category);
             QCOMPARE(widget.options(), KiraService::Protocol::defaultModelOptions(category));
             QVERIFY(widget.isValid());
-            QVERIFY(!widget.explicitContent());
+        QVERIFY(!widget.explicitContent());
         }
-        widget.setOptions("face-parsing");
-        QVERIFY(!widget.findChild<QWidget*>("resolution"));
-        QVERIFY(!widget.findChild<QWidget*>("steps"));
-        auto* regions = widget.findChild<QListWidget*>("includedClasses");
-        QVERIFY(regions);
-        QCOMPARE(regions->count(), 19);
-        for (int index = 0; index < regions->count(); ++index)
-            regions->item(index)->setCheckState(Qt::Unchecked);
-        QVERIFY(!widget.isValid());
-        regions->item(13)->setCheckState(Qt::Checked);
-        QCOMPARE(widget.options().value("includedClasses").toArray(), QJsonArray{"hair"});
-        widget.findChild<QSpinBox*>("dilatePixels")->setValue(12);
-        widget.findChild<QCheckBox*>("invertMask")->setChecked(true);
-        const auto saved = widget.options();
-        widget.setOptions("face-parsing", saved);
-        QCOMPARE(widget.options(), saved);
-        QVERIFY(widget.isValid());
-        widget.setOptions("ip_adapter", {{"strength", 0.75}});
-        QCOMPARE(widget.options(), QJsonObject({{"strength", 0.75}}));
-        widget.setOptions("inpaint", KiraService::Protocol::defaultModelOptions("image-generation"));
-        QVERIFY(!widget.findChild<QCheckBox*>("canEdit"));
-        QVERIFY(!widget.findChild<QWidget*>("resolution"));
-        QVERIFY(!widget.options().contains("width"));
-        QVERIFY(!widget.options().contains("height"));
-        QCOMPARE(widget.findChild<QDoubleSpinBox*>("strength")->value(), 0.65);
-        widget.findChild<QDoubleSpinBox*>("strength")->setValue(0.60);
-        QVERIFY(widget.isValid());
-        QCOMPARE(widget.options().value("strength").toDouble(), 0.60);
-        widget.setOptions("photomaker", {{"style_strength", 12}});
-        QCOMPARE(widget.findChild<QSpinBox*>("style_strength")->value(), 12);
-        widget.findChild<QSpinBox*>("style_strength")->setValue(15);
-        QCOMPARE(widget.options().value("style_strength").toInt(), 15);
-        widget.setOptions("clip_vision");
-        widget.findChild<QCheckBox *>("normalize_input")->setChecked(false);
-        widget.findChild<QSpinBox *>("image_size")->setValue(336);
-        QCOMPARE(widget.options(), QJsonObject({{"image_size", 336}, {"normalize_input", false}}));
-        QVERIFY(widget.isValid());
         widget.setOptions("llm-chat");
         QVERIFY(!widget.findChild<QComboBox *>("resolution"));
         widget.findChild<QSpinBox *>("maxTokens")->setValue(5000);
@@ -382,6 +275,71 @@ class ManagerUiTest final : public QObject
         QCOMPARE(widget.options().value("width").toInt(), 256);
         resolution->setCurrentIndex(7);
         QCOMPARE(widget.options().value("height").toInt(), 2048);
+    }
+
+    void categoriesAreEmptyAndLlmSelectsSharedMmproj()
+    {
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        client.connectToService();
+        QTRY_VERIFY(client.modelListAvailable());
+        const QJsonObject llm{{"id", "llm-chat:chat.gguf"}, {"fileName", "chat.gguf"}, {"displayName", "Chat"},
+            {"recommendedOptions", KiraService::Protocol::defaultModelOptions("llm-chat")}};
+        const QJsonObject vae{{"id", "companion:vae.safetensors"}, {"displayName", "VAE"},
+            {"recommendedOptions", QJsonObject{{"subtype", "vae"}}}};
+        const QJsonObject projector{{"id", "companion:vision.gguf"}, {"displayName", "Vision projector"},
+            {"recommendedOptions", QJsonObject{{"subtype", "mmproj"}}}};
+        const QJsonObject scaler{{"id", "upscaler:scale.gguf"}, {"fileName", "scale.gguf"}, {"displayName", "Scaler"}};
+        const QJsonArray catalogue{
+            QJsonObject{{"category", "llm-chat"}, {"models", QJsonArray{llm}}},
+            QJsonObject{{"category", "companion"}, {"models", QJsonArray{vae, projector}}},
+            QJsonObject{{"category", "upscaler"}, {"models", QJsonArray{scaler}}}};
+        send({{"type", "models.list.result"}, {"categories", catalogue}});
+        QTRY_COMPARE(client.models("companion").size(), 2);
+        ManageModelsWindow window(nullptr, &client);
+        window.show();
+        QTRY_VERIFY(client.modelListAvailable());
+        send({{"type", "models.list.result"}, {"categories", catalogue}});
+        QTRY_COMPARE(client.models("companion").size(), 2);
+        auto* tree = window.findChild<KiraUi::TreeView*>("installedModelsTree");
+        auto* body = window.findChild<QWidget*>("modelConfigurationBody");
+        QVERIFY(body->isHidden());
+        const auto select = [&](const QString& id) {
+            const auto matches = tree->model()->match(tree->model()->index(0, 0), Qt::UserRole + 1, id, 1, Qt::MatchExactly | Qt::MatchRecursive);
+            QVERIFY(!matches.isEmpty());
+            tree->setCurrentIndex(matches.first());
+        };
+        select("llm-chat:chat.gguf");
+        QVERIFY(!body->isHidden());
+        auto* companion = window.findChild<QComboBox*>("modelMmprojCompanion");
+        QCOMPARE(companion->count(), 2);
+        QCOMPARE(companion->itemData(1).toString(), QString("companion:vision.gguf"));
+        QVERIFY(window.findChild<QLabel*>("recommendedValuesHint")->isHidden());
+        tree->setCurrentIndex(tree->model()->index(0, 0, tree->model()->index(0, 0)));
+        QVERIFY(body->isHidden());
+        select("upscaler:scale.gguf");
+        auto* options = window.findChild<ModelOptionsWidget*>();
+        QVERIFY(options->isHidden());
+        QVERIFY(!options->findChild<QCheckBox*>("explicitContent"));
+        QVERIFY(!options->findChild<QComboBox*>("tileSize"));
+        QCOMPARE(options->options(), QJsonObject{});
+        AddModelDialog add(&client, "llm-chat");
+        add.show();
+        QVERIFY(add.findChild<QLineEdit*>("companionUrl")->parentWidget()->isHidden());
+        QVERIFY(add.findChild<QLabel*>("recommendedValuesHint")->isHidden());
+        auto* selection = add.findChild<QComboBox*>("llmMmprojCompanion");
+        QCOMPARE(selection->count(), 2);
+        add.findChild<QLineEdit*>("modelUrl")->setText("https://example.com/chat.gguf");
+        auto* start = add.findChild<QPushButton*>("startDownload");
+        QVERIFY(!start->isEnabled());
+        add.findChild<QLineEdit*>("modelDisplayName")->setText("New chat");
+        QVERIFY(start->isEnabled());
+        selection->setCurrentIndex(1);
+        start->click();
+        QTRY_COMPARE(m_messages.last().value("type").toString(), QString("models.install"));
+        QCOMPARE(m_messages.last().value("displayName").toString(), QString("New chat"));
+        QCOMPARE(m_messages.last().value("mmprojModelId").toString(), QString("companion:vision.gguf"));
+        QVERIFY(!m_messages.last().contains("companionUrl"));
     }
     void attachesOptionalFilesToExistingModel()
     {
@@ -452,8 +410,8 @@ class ManagerUiTest final : public QObject
         QVERIFY(tree);
         QCOMPARE(tree->model()->rowCount(), 1);
         auto root = tree->model()->index(0, 0);
-        QCOMPARE(tree->model()->rowCount(root), 10);
-        auto branch = tree->model()->index(2, 0, root);
+        QCOMPARE(tree->model()->rowCount(root), 4);
+        auto branch = tree->model()->index(1, 0, root);
         auto model = tree->model()->index(0, 0, branch);
         tree->setCurrentIndex(model);
         auto *form = window.findChild<ModelOptionsWidget *>();
@@ -469,10 +427,7 @@ class ManagerUiTest final : public QObject
         QVERIFY(explicitContent);
         QVERIFY(!explicitContent->isChecked());
         explicitContent->setChecked(true);
-        auto* canEdit = form->findChild<QCheckBox*>("canEdit");
-        QVERIFY(canEdit);
-        QVERIFY(!canEdit->isChecked());
-        canEdit->setChecked(true);
+        QVERIFY(!form->findChild<QCheckBox*>("canEdit"));
         auto *save = window.findChild<QPushButton *>("saveOptions");
         QVERIFY(save->isEnabled());
         save->click();
@@ -481,7 +436,7 @@ class ManagerUiTest final : public QObject
         QCOMPARE(m_messages.last().value("recommendedOptions").toObject().value("steps").toInt(), 42);
         QCOMPARE(m_messages.last().value("displayName").toString(), QString("Portrait model"));
         QVERIFY(m_messages.last().value("explicitContent").toBool());
-        QVERIFY(m_messages.last().value("canEdit").toBool());
+        QVERIFY(!m_messages.last().contains("canEdit"));
         send({{"type", "error"}, {"id", "image-generation:test.gguf"}, {"message", "Write failed"}});
         QTRY_VERIFY(save->isEnabled());
         QCOMPARE(steps->value(), 42);
@@ -512,7 +467,7 @@ class ManagerUiTest final : public QObject
         QTRY_VERIFY(client.modelListAvailable());
         auto *tree = window.findChild<KiraUi::TreeView *>();
         auto root = tree->model()->index(0, 0);
-        auto category = tree->model()->index(2, 0, root);
+        auto category = tree->model()->index(1, 0, root);
         tree->setCurrentIndex(tree->model()->index(0, 0, category));
         window.findChild<QSpinBox *>("steps")->setValue(33);
         QTimer::singleShot(0,
@@ -544,7 +499,7 @@ class ManagerUiTest final : public QObject
         QTRY_VERIFY(client.modelListAvailable());
         auto *tree = window.findChild<KiraUi::TreeView *>();
         auto root = tree->model()->index(0, 0);
-        auto category = tree->model()->index(2, 0, root);
+        auto category = tree->model()->index(1, 0, root);
         tree->setCurrentIndex(tree->model()->index(0, 0, category));
         window.findChild<QSpinBox *>("steps")->setValue(35);
         auto *save = window.findChild<QPushButton *>("saveOptions");
@@ -569,7 +524,7 @@ class ManagerUiTest final : public QObject
         QTRY_VERIFY(client.modelListAvailable());
         auto *tree = window.findChild<KiraUi::TreeView *>();
         auto root = tree->model()->index(0, 0);
-        auto category = tree->model()->index(2, 0, root);
+        auto category = tree->model()->index(1, 0, root);
         tree->setCurrentIndex(tree->model()->index(0, 0, category));
         auto *form = window.findChild<ModelOptionsWidget *>();
         form->findChild<QSpinBox *>("steps")->setValue(34);
@@ -601,7 +556,7 @@ class ManagerUiTest final : public QObject
         QTRY_VERIFY(client.modelListAvailable());
         auto *tree = window.findChild<KiraUi::TreeView *>();
         auto root = tree->model()->index(0, 0);
-        auto category = tree->model()->index(2, 0, root);
+        auto category = tree->model()->index(1, 0, root);
         tree->setCurrentIndex(tree->model()->index(0, 0, category));
         auto *form = window.findChild<ModelOptionsWidget *>();
         form->findChild<QSpinBox *>("steps")->setValue(45);
@@ -626,13 +581,14 @@ class ManagerUiTest final : public QObject
         client.connectToService();
         QTRY_VERIFY(client.modelListAvailable());
         AddModelDialog dialog(&client);
+        dialog.findChild<QLineEdit*>("modelDisplayName")->setText("Fixture model");
         dialog.show();
         auto *category = dialog.findChild<QComboBox *>("modelCategory");
         auto *companion = dialog.findChild<QLineEdit *>("companionUrl");
         category->setCurrentIndex(category->findData("upscaler"));
         QVERIFY(!companion->isVisible());
         category->setCurrentIndex(category->findData("llm-chat"));
-        QVERIFY(companion->isVisible());
+        QVERIFY(!companion->isVisible());
         dialog.findChild<QLineEdit *>("modelUrl")->setText("https://example.test/model.gguf");
         auto *start = dialog.findChild<QPushButton *>("startDownload");
         QVERIFY(start->isEnabled());
@@ -649,6 +605,7 @@ class ManagerUiTest final : public QObject
         QTRY_VERIFY(!dialog.isVisible());
         QCOMPARE(client.installs().last().state, ManagedInstallState::Canceled);
         AddModelDialog completed(&client);
+        completed.findChild<QLineEdit*>("modelDisplayName")->setText("New model");
         completed.show();
         completed.findChild<QLineEdit *>("modelUrl")->setText("https://example.test/new.gguf");
         completed.findChild<QPushButton *>("startDownload")->click();

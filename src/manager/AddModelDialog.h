@@ -34,6 +34,11 @@ class AddModelDialog final : public KiraUi::Dialog
     QComboBox *m_category;
     QLineEdit *m_url;
     QLineEdit *m_displayName;
+    QComboBox* m_mmprojSelection;
+    QLabel* m_mmprojSelectionLabel;
+    QLabel* m_optionsHint;
+    QWidget* m_recommendations;
+    void refreshCompanions();
     QLineEdit *m_companion;
     QLineEdit *m_textEncoder;
     QLineEdit *m_mmproj;

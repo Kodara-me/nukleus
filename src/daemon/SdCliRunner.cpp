@@ -61,7 +61,7 @@ SdCliRunner::SdCliRunner(const QString &executablePath, QObject *parent)
                 } else if (completedRequest == RequestType::Generation) {
                     appendGenerationOutput(m_process->readAllStandardOutput(), false);
                     appendGenerationOutput(m_process->readAllStandardError(), true);
-                    emitGenerationFinished(succeeded && !m_memoryFailure && !m_photoMakerFailure, exitCode);
+                    emitGenerationFinished(succeeded && !m_memoryFailure, exitCode);
                 } else if (completedRequest == RequestType::Upscale) {
                     emitUpscaleFinished(succeeded, exitCode);
                 }
@@ -116,24 +116,6 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
     if (!request.llmVisionPath.isEmpty()) arguments.append({QStringLiteral("--llm_vision"), request.llmVisionPath});
     if (!request.clipLPath.isEmpty()) arguments.append({QStringLiteral("--clip_l"), request.clipLPath});
     if (!request.clipGPath.isEmpty()) arguments.append({QStringLiteral("--clip_g"), request.clipGPath});
-    if (!request.photoMakerPath.isEmpty()) {
-        arguments.append({QStringLiteral("--photo-maker"), request.photoMakerPath,
-            QStringLiteral("--pm-id-embed-path"), request.photoMakerIdentityPath,
-            QStringLiteral("--pm-id-images-dir"), request.photoMakerImagesDirectory,
-            QStringLiteral("--pm-style-strength"), QString::number(request.photoMakerStyleStrength)});
-    }
-    if (!request.ipAdapterPath.isEmpty()) {
-        arguments.append({QStringLiteral("--clip_vision"), request.clipVisionPath,
-            QStringLiteral("--ip-adapter"), request.ipAdapterPath,
-            QStringLiteral("--ip-adapter-image"), request.ipAdapterImagePath,
-            QStringLiteral("--ip-adapter-strength"), QString::number(request.ipAdapterStrength, 'g', 17)});
-        if (!request.ipAdapterLoraPath.isEmpty()) {
-            const QFileInfo lora(request.ipAdapterLoraPath);
-            arguments.append({QStringLiteral("--lora-model-dir"), lora.absolutePath()});
-            arguments[arguments.indexOf(QStringLiteral("--prompt")) + 1] +=
-                QStringLiteral(" <lora:%1:1>").arg(lora.fileName());
-        }
-    }
     if (!request.referenceImagePath.isEmpty())
         arguments.append({QStringLiteral("--ref-image"), request.referenceImagePath,
             QStringLiteral("--flow-shift"), QStringLiteral("3"),
@@ -142,16 +124,12 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
         arguments.append({QStringLiteral("--init-img"), request.baseImagePath,
                           QStringLiteral("--strength"), QString::number(request.baseImageStrength, 'g', 17)});
     }
-    if (!request.maskImagePath.isEmpty())
-        arguments.append({QStringLiteral("--mask"), request.maskImagePath});
     if (request.clipSkip > 0) arguments.append({QStringLiteral("--clip-skip"), QString::number(request.clipSkip)});
     if (m_requestType != RequestType::None || m_executablePath.isEmpty()) {
         return false;
     }
 
     m_memoryFailure = false;
-    m_photoMakerRequested = !request.photoMakerPath.isEmpty();
-    m_photoMakerFailure = false;
     m_standardOutput.clear();
     m_standardError.clear();
     m_pendingStandardOutput.clear();
@@ -202,7 +180,6 @@ void SdCliRunner::emitGenerationFinished(bool succeeded, int exitCode)
 {
     flushGenerationOutput(false);
     flushGenerationOutput(true);
-    succeeded = succeeded && !m_photoMakerFailure;
     const std::optional<KiraService::GenerationProgress> progress = succeeded ? m_progressParser.complete() : m_progressParser.failed();
     if (progress.has_value()) {
         emit generationProgressChanged(*progress);
@@ -274,11 +251,6 @@ void SdCliRunner::flushGenerationOutput(bool standardError)
 
 void SdCliRunner::processGenerationLine(const QString &line)
 {
-    if (m_photoMakerRequested && line.contains(QStringLiteral("Turn off PhotoMaker"), Qt::CaseInsensitive)) {
-        m_photoMakerFailure = true;
-        m_standardError += QStringLiteral("\nPhotoMaker conditioning was disabled by the backend: ") + line;
-        if (m_process->state() != QProcess::NotRunning) m_process->kill();
-    }
     const bool fatalError = line.contains(QStringLiteral("[ERROR"), Qt::CaseInsensitive)
         || line.contains(QStringLiteral("fatal"), Qt::CaseInsensitive);
     if (!m_memoryFailure && fatalError && (line.contains(QStringLiteral("ErrorOutOfDeviceMemory"), Qt::CaseInsensitive)

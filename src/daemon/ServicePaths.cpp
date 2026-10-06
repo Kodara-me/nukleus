@@ -31,34 +31,10 @@ QString ServicePaths::chatModelsPath()
     return root.isEmpty() ? QString() : QDir(root).filePath(QStringLiteral("llm"));
 }
 
-QString ServicePaths::ipAdapterModelsPath()
-{
-    const QString root = modelsPath();
-    return root.isEmpty() ? QString() : QDir(root).filePath(QStringLiteral("ip-adapter"));
-}
-
-QString ServicePaths::clipVisionModelsPath()
-{
-    const QString root = modelsPath();
-    return root.isEmpty() ? QString() : QDir(root).filePath(QStringLiteral("clip_vision"));
-}
-
 QString ServicePaths::legacyModelsPath()
 {
     const QString dataPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
     return dataPath.isEmpty() ? QString() : QDir(dataPath).filePath(QStringLiteral("kira-canvas/models"));
-}
-
-QString ServicePaths::photoMakerModelsPath()
-{
-    const QString root = modelsPath();
-    return root.isEmpty() ? QString() : QDir(root).filePath(QStringLiteral("photomaker"));
-}
-
-QString ServicePaths::promptEnhancerModelsPath()
-{
-    const QString root = modelsPath();
-    return root.isEmpty() ? QString() : QDir(root).filePath(QStringLiteral("prompt-enhancer"));
 }
 
 bool ServicePaths::migrateLegacyModels(QString *errorMessage)
@@ -89,7 +65,7 @@ bool ServicePaths::ensureModelDirectories(QString *errorMessage)
         if (errorMessage) *errorMessage = QObject::tr("Service data directory is unavailable");
         return false;
     }
-    const std::array<QString, 10> paths = {root, modelsPath(), QDir(modelsPath()).filePath(QStringLiteral("face-parsing")), QDir(modelsPath()).filePath(QStringLiteral("inpaint")), upscaleModelsPath(), chatModelsPath(), ipAdapterModelsPath(), clipVisionModelsPath(), photoMakerModelsPath(), promptEnhancerModelsPath()};
+    const std::array<QString, 5> paths = {root, modelsPath(), upscaleModelsPath(), chatModelsPath(), QDir(modelsPath()).filePath("companion")};
     for (const QString &path : paths) {
         if (!QDir().mkpath(path)) {
             if (errorMessage) *errorMessage = QObject::tr("Could not create %1").arg(path);

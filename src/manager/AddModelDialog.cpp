@@ -5,6 +5,7 @@
 #include <KiraUi/PrimaryButton.h>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QSignalBlocker>
 #include <QFormLayout>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -49,8 +50,8 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     m_displayName = new QLineEdit(content);
     m_displayName->setObjectName("modelDisplayName");
     m_displayName->setMaxLength(256);
-    m_displayName->setPlaceholderText(tr("Filename when empty"));
-    if (m_existingModelId.isEmpty()) form->addRow(tr("Display name (optional):"), m_displayName);
+    m_displayName->setPlaceholderText(tr("Required display name"));
+    if (m_existingModelId.isEmpty()) form->addRow(tr("Display name:"), m_displayName);
     else m_displayName->hide();
     const auto sourceRow = [this, content](QLineEdit* field) {
         auto* row = new QWidget(content);
@@ -88,18 +89,11 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     m_category = new QComboBox(content);
     m_category->setObjectName("modelCategory");
     for (const auto &item : QList<QPair<QString, QString>>{{tr("Image generation"), "image-generation"},
-                                                           {tr("Inpaint"), "inpaint"},
-                                                           {tr("Face parsing"), "face-parsing"},
-                                                           {tr("Edition"), "edition"},
                                                            {tr("Upscaler"), "upscaler"},
-                                                           {tr("LLM"), "llm-chat"},
-                                                           {tr("IP-Adapter"), "ip_adapter"},
-                                                           {tr("CLIP Vision"), "clip_vision"},
-                                                           {tr("PhotoMaker"), "photomaker"},
-                                                           {tr("Prompt Enhancer"), "prompt-enhancer"}})
+                                                           {tr("LLM"), "llm-chat"}, {tr("Companion"), "companion"}})
         m_category->addItem(item.first, item.second);
     if (!category.isEmpty())
-        m_category->setCurrentIndex(m_category->findData(category == "ip-adapter" ? "ip_adapter" : category));
+        m_category->setCurrentIndex(m_category->findData(category));
     m_url = new QLineEdit(content);
     m_url->setObjectName("modelUrl");
     m_url->setPlaceholderText("https://example.com/model.gguf");
@@ -107,6 +101,15 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     m_companion->setObjectName("companionUrl");
     m_companion->setPlaceholderText(tr("Optional HTTPS companion URL"));
     m_companionLabel = new QLabel(content);
+    m_mmprojSelection = new QComboBox(content);
+    m_mmprojSelection->setObjectName("llmMmprojCompanion");
+    m_mmprojSelectionLabel = new QLabel(tr("MMPROJ companion:"), content);
+    form->addRow(m_mmprojSelectionLabel, m_mmprojSelection);
+    connect(m_mmprojSelection, &QComboBox::currentIndexChanged, this, [this] {
+        m_mmprojSelection->setProperty("selectedModelId", m_mmprojSelection->currentData());
+    });
+    connect(m_client, &ManagerServiceClient::modelsChanged, this, &AddModelDialog::refreshCompanions);
+    refreshCompanions();
     form->addRow(tr("Category:"), m_category);
     form->addRow(tr("Model URL or file:"), sourceRow(m_url));
     form->addRow(m_companionLabel, sourceRow(m_companion));
@@ -133,16 +136,18 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     m_modelTypeLabel = new QLabel(tr("Model contents:"), content);
     form->addRow(m_modelTypeLabel, m_modelType);
     auto *recommendations = new QWidget(body);
+    m_recommendations = recommendations;
     auto *optionsLayout = new QVBoxLayout(recommendations);
     optionsLayout->setContentsMargins(0, 0, 0, 0);
     auto *heading = new QLabel(tr("Recommended options"), recommendations);
     optionsLayout->addWidget(heading);
     m_options = new ModelOptionsWidget(recommendations);
     optionsLayout->addWidget(m_options);
-    auto *hint =
+    m_optionsHint =
         new QLabel(tr("Choose recommended values for this model. Applications can override them."), recommendations);
-    hint->setWordWrap(true);
-    optionsLayout->addWidget(hint);
+    m_optionsHint->setWordWrap(true);
+    m_optionsHint->setObjectName("recommendedValuesHint");
+    optionsLayout->addWidget(m_optionsHint);
     optionsLayout->addStretch();
     columns->addWidget(content, 1);
     columns->addWidget(recommendations, 1);
@@ -164,6 +169,7 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     buttons->addWidget(m_start);
     layout->addLayout(buttons);
     connect(m_category, &QComboBox::currentIndexChanged, this, &AddModelDialog::updateCategory);
+    connect(m_displayName, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
     connect(m_url, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
     connect(m_companion, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
     connect(m_clipL, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
@@ -212,13 +218,15 @@ void AddModelDialog::updateCategory()
 {
     const QString category = m_category->currentData().toString();
     m_companion->clear();
-    const bool supports = category != "face-parsing" && category != "upscaler" && category != "clip_vision" && category != "photomaker" && category != "prompt-enhancer";
+    const bool supports = category == "image-generation";
     m_companion->setVisible(supports);
     m_companionLabel->setVisible(supports);
-    m_companionLabel->setText(category == "llm-chat"     ? tr("Optional mmproj URL:")
-                              : category == "ip_adapter" ? tr("Optional LoRA URL:")
-                                                         : tr("Optional VAE URL:"));
-    const bool image = category == "image-generation" || category == "inpaint" || category == "edition";
+    m_companionLabel->setText(tr("Optional VAE URL:"));
+    m_mmprojSelection->setVisible(category == "llm-chat");
+    m_mmprojSelectionLabel->setVisible(category == "llm-chat");
+    m_optionsHint->setVisible(category == "image-generation");
+    m_recommendations->setVisible(category != "upscaler");
+    const bool image = category == "image-generation";
     m_clipL->clear();
     m_clipG->clear();
     m_textEncoder->clear();
@@ -250,7 +258,10 @@ void AddModelDialog::updateActions()
     m_url->parentWidget()->setVisible(m_existingModelId.isEmpty());
     m_modelType->setEnabled(!busy);
     m_options->setEnabled(!busy);
+    m_displayName->setEnabled(!busy);
+    m_mmprojSelection->setEnabled(!busy);
     m_start->setEnabled(!busy && m_client->isAuthenticated() && (!m_existingModelId.isEmpty() || validUrl(m_url->text())) &&
+        (!m_existingModelId.isEmpty() || !m_displayName->text().trimmed().isEmpty()) &&
                         (m_category->currentData() == "upscaler" || m_companion->text().trimmed().isEmpty() ||
                          validUrl(m_companion->text())) &&
                         (m_clipL->text().trimmed().isEmpty() || validUrl(m_clipL->text())) &&
@@ -276,10 +287,10 @@ void AddModelDialog::startInstall()
     m_installId = m_client->installModel(m_category->currentData().toString(), QUrl(m_url->text().trimmed()),
         QUrl(m_companion->text().trimmed()), m_existingModelId.isEmpty() ? m_options->options() : QJsonObject{},
         files, m_modelType->isHidden() ? QString("checkpoint") : m_modelType->currentData().toString(), m_existingModelId,
-        m_existingModelId.isEmpty() ? std::optional<bool>(m_options->explicitContent()) : std::nullopt,
+        m_existingModelId.isEmpty() && m_category->currentData().toString() != "upscaler" && m_category->currentData().toString() != "companion"
+            ? std::optional<bool>(m_options->explicitContent()) : std::nullopt,
         m_existingModelId.isEmpty() ? std::optional<QString>(m_displayName->text()) : std::nullopt,
-        m_existingModelId.isEmpty() && m_category->currentData().toString() == "image-generation"
-            ? std::optional<bool>(m_options->canEdit()) : std::nullopt);
+        m_category->currentData().toString() == "llm-chat" ? std::optional<QString>(m_mmprojSelection->currentData().toString()) : std::nullopt);
     if (m_installId.isEmpty())
     {
         m_busy = false;
@@ -374,7 +385,19 @@ QString AddModelDialog::roleFor(QLineEdit* field) const
     if (field == m_mmproj) return "mmproj";
     if (field == m_companion) {
         const QString category = m_category->currentData().toString();
-        return category == "llm-chat" ? "mmproj" : category == "ip_adapter" ? "lora" : "vae";
+        return category == "llm-chat" ? "mmproj" : "vae";
     }
     return {};
+}
+
+void AddModelDialog::refreshCompanions()
+{
+    const QString selected = m_mmprojSelection->property("selectedModelId").toString();
+    const QSignalBlocker blocker(m_mmprojSelection);
+    m_mmprojSelection->clear();
+    m_mmprojSelection->addItem(tr("None"), QString());
+    for (const auto& model : m_client->models("companion"))
+        if (model.recommendedOptions.value("subtype") == "mmproj")
+            m_mmprojSelection->addItem(model.displayLabel(), model.id);
+    m_mmprojSelection->setCurrentIndex(qMax(0, m_mmprojSelection->findData(selected)));
 }

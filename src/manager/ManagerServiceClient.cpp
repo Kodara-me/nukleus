@@ -72,7 +72,7 @@ ManagerServiceClient::ManagerServiceClient(QObject *parent, quint16 localPort)
         m_connectionTimeout.stop();
         m_authenticated = false;
         m_modelListAvailable = false;
-        m_faceParsingModels.clear(); m_inpaintModels.clear(); m_generationModels.clear(); m_editionModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_ipAdapterModels.clear(); m_clipVisionModels.clear(); m_photoMakerModels.clear(); m_promptEnhancerModels.clear();
+        m_generationModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_companionModels.clear();
         failActiveInstalls(tr("Service connection was closed"));
         emit modelsChanged();
         if (!m_openingConnection) {
@@ -119,24 +119,19 @@ bool ManagerServiceClient::modelListAvailable() const { return m_modelListAvaila
 QList<ManagedModelInfo> ManagerServiceClient::models(const QString &category) const
 {
     if (category == QStringLiteral("image-generation")) return m_generationModels;
-    if (category == QStringLiteral("edition")) return m_editionModels;
     if (category == QStringLiteral("upscaler")) return m_upscaleModels;
+    if (category == "companion") return m_companionModels;
     if (category == QStringLiteral("llm-chat")) return m_llmChatModels;
-    if (category == QStringLiteral("ip-adapter") || category == "ip_adapter") return m_ipAdapterModels;
-    if (category == "clip_vision") return m_clipVisionModels;
-    if (category == "face-parsing") return m_faceParsingModels;
-    if (category == "inpaint") return m_inpaintModels;
-    if (category == "photomaker") return m_photoMakerModels;
-    if (category == "prompt-enhancer") return m_promptEnhancerModels;
     return {};
 }
 QList<ManagedInstall> ManagerServiceClient::installs() const { return m_installs; }
 void ManagerServiceClient::requestModels() { if (m_authenticated) m_socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list\"}")); }
 
 QString ManagerServiceClient::installModel(const QString &category, const QUrl &url, const QUrl &companionUrl, const QJsonObject &recommendedOptions, const QJsonObject &companionUrls,
-    const QString &modelType, const QString &existingModelId, std::optional<bool> explicitContent, std::optional<QString> displayName, std::optional<bool> canEdit)
+    const QString &modelType, const QString &existingModelId, std::optional<bool> explicitContent, std::optional<QString> displayName, std::optional<QString> mmprojModelId)
 {
-    if (!m_authenticated) return {};
+    if (!m_authenticated || (existingModelId.isEmpty() && !displayName)
+        || (displayName && (displayName->trimmed().isEmpty() || displayName->size() > 256))) return {};
     const QUrl preparedUrl = prepareSource(url);
     const QUrl preparedCompanion = prepareSource(companionUrl);
     if ((url.isLocalFile() && preparedUrl.isEmpty()) || (companionUrl.isLocalFile() && preparedCompanion.isEmpty())) return {};
@@ -157,9 +152,9 @@ QString ManagerServiceClient::installModel(const QString &category, const QUrl &
     if (!preparedFiles.isEmpty()) message.insert("companionUrls", preparedFiles);
     if (modelType != "checkpoint" || !existingModelId.isEmpty()) message.insert("modelType", modelType);
     if (!existingModelId.isEmpty()) message.insert("id", existingModelId);
-    if (canEdit) message.insert("canEdit", *canEdit);
     if (explicitContent) message.insert("explicitContent", *explicitContent);
     if (displayName) message.insert("displayName", displayName->trimmed());
+    if (mmprojModelId) message.insert("mmprojModelId", *mmprojModelId);
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     emit installsChanged();
     return installId;
@@ -174,12 +169,13 @@ bool ManagerServiceClient::configureModelStyles(const QString &id, const QList<K
     return true;
 }
 
-bool ManagerServiceClient::configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent, std::optional<QString> displayName, std::optional<bool> canEdit)
+bool ManagerServiceClient::configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent, std::optional<QString> displayName, std::optional<QString> mmprojModelId)
 {
-    if (!m_authenticated || id.isEmpty()) return false;
+    if (!m_authenticated || id.isEmpty()
+        || (displayName && (displayName->trimmed().isEmpty() || displayName->size() > 256))) return false;
     QJsonObject message{{"type", "models.configure"}, {"id", id}, {"recommendedOptions", options}};
-    if (canEdit) message.insert("canEdit", *canEdit);
     if (displayName) message.insert("displayName", displayName->trimmed());
+    if (mmprojModelId) message.insert("mmprojModelId", *mmprojModelId);
     if (explicitContent) message.insert("explicitContent", *explicitContent);
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     return true;
@@ -212,20 +208,14 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
     const QJsonObject object = document.object(); const QString type = object.value(QStringLiteral("type")).toString();
     if (type == QStringLiteral("authenticated")) { m_connectionTimeout.stop(); m_authenticated = true; requestModels(); emit serviceStateChanged(QStringLiteral("connected"), tr("Connected to service")); return; }
     if (type == QStringLiteral("models.list.result")) {
-        m_faceParsingModels.clear(); m_inpaintModels.clear(); m_generationModels.clear(); m_editionModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_ipAdapterModels.clear(); m_clipVisionModels.clear(); m_photoMakerModels.clear(); m_promptEnhancerModels.clear();
+        m_generationModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_companionModels.clear();
         for (const QJsonValue &categoryValue : object.value(QStringLiteral("categories")).toArray()) {
             const QJsonObject category = categoryValue.toObject(); QList<ManagedModelInfo> *modelsForCategory = nullptr;
             const QString name = category.value(QStringLiteral("category")).toString();
             if (name == QStringLiteral("image-generation")) modelsForCategory = &m_generationModels;
-            else if (name == QStringLiteral("edition")) modelsForCategory = &m_editionModels;
             else if (name == QStringLiteral("upscaler")) modelsForCategory = &m_upscaleModels;
+            else if (name == "companion") modelsForCategory = &m_companionModels;
             else if (name == QStringLiteral("llm-chat")) modelsForCategory = &m_llmChatModels;
-            else if (name == QStringLiteral("ip-adapter") || name == "ip_adapter") modelsForCategory = &m_ipAdapterModels;
-            else if (name == "clip_vision") modelsForCategory = &m_clipVisionModels;
-            else if (name == "face-parsing") modelsForCategory = &m_faceParsingModels;
-            else if (name == "inpaint") modelsForCategory = &m_inpaintModels;
-            else if (name == "photomaker") modelsForCategory = &m_photoMakerModels;
-            else if (name == "prompt-enhancer") modelsForCategory = &m_promptEnhancerModels;
             if (!modelsForCategory) continue;
             for (const QJsonValue &modelValue : category.value(QStringLiteral("models")).toArray()) {
                 const QJsonObject model = modelValue.toObject();
@@ -234,7 +224,7 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
                     model.value(QStringLiteral("companionFileName")).toString(),
                                  model.value(QStringLiteral("companionRole")).toString(), model.value("recommendedOptions").toObject(),
                     model.value("companionFiles").toObject(), model.value("modelType").toString("checkpoint"), model.value("explicitContent").toBool(false),
-                    KiraService::Protocol::promptStylesFromJson(model.value("styles")).value_or(QList<KiraService::PromptStyle>{}), model.value("displayName").toString().trimmed(), model.value("canEdit").toBool(false)});
+                    KiraService::Protocol::promptStylesFromJson(model.value("styles")).value_or(QList<KiraService::PromptStyle>{}), model.value("displayName").toString().trimmed(), model.value("mmprojModelId").toString()});
             }
         }
         m_modelListAvailable = true; emit modelsChanged(); return;
@@ -262,7 +252,7 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
         if (styles) emit modelStylesConfigured(object.value("id").toString(), *styles);
         return;
     }
-    if (type == "models.styles.changed" || type == "models.changed") { requestModels(); return; }
+    if (type == "models.styles.changed") { requestModels(); return; }
     if (type == "models.companion.delete.completed") {
         emit companionDeleted(object.value("id").toString(), object.value("role").toString());
         requestModels(); return;
