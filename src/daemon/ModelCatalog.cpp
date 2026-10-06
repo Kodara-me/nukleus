@@ -200,7 +200,12 @@ QList<ModelInfo> ModelCatalog::models(ModelCategory category) const
         models.append({idCategory + QLatin1Char(':') + fileName,
                        displayName.isEmpty() ? fileName : displayName, fileName, fileInfo.size(), fileInfo.absoluteFilePath(),
                        companionFileName, companionFileName.isEmpty() ? QString() : companionRole(category),
-                       entry.toObject().value("recommendedOptions").toObject(), files, type, entry.toObject().value("explicitContent").toBool(false), styles, displayName});
+                       entry.toObject().value("recommendedOptions").toObject(), files, type, entry.toObject().value("explicitContent").toBool(false), styles, displayName,
+                       category == ModelCategory::ImageGeneration && entry.toObject().value("canEdit").toBool(false)});
+    }
+    if (category == ModelCategory::Edition) {
+        for (const auto& model : this->models(ModelCategory::ImageGeneration))
+            if (model.canEdit) models.append(model);
     }
     std::sort(models.begin(), models.end(), [](const ModelInfo &left, const ModelInfo &right) {
         return QString::compare(left.fileName, right.fileName, Qt::CaseInsensitive) < 0;
@@ -262,6 +267,8 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
     if (request.displayName && request.displayName->size() > 256) return fail(tr("Display name must contain at most 256 characters"));
     if (request.modelType != "checkpoint" && request.modelType != "diffusion"
         && !(request.modelType.isEmpty() && !request.existingModelId.isEmpty())) return fail(tr("Invalid model type"));
+    if (request.canEdit && request.category != ModelCategory::ImageGeneration)
+        return fail(tr("Editing eligibility applies only to generation models"));
     const bool image = request.category == ModelCategory::ImageGeneration || request.category == ModelCategory::Inpaint || request.category == ModelCategory::Edition;
     if (!image && ((request.modelType != "checkpoint" && !(request.modelType.isEmpty() && !request.existingModelId.isEmpty()))
         || (request.category != ModelCategory::IpAdapter && !request.companionUrls.isEmpty())))
@@ -282,6 +289,8 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
     auto job = std::make_unique<InstallJob>();
     job->request = request;
     if (!request.existingModelId.isEmpty()) {
+        if (categoryFromName(request.existingModelId.section(':', 0, 0)) != request.category)
+            return fail(tr("Attach companions using the model's original category"));
         const auto existing = model(request.category, request.existingModelId);
         if (!existing) return fail(tr("The requested model is not installed"));
         job->fileName = existing->fileName;
@@ -347,11 +356,15 @@ void ModelCatalog::cancel(const QString &installId)
     emit installCanceled(installId);
 }
 
-bool ModelCatalog::configure(const QString &id, const QJsonObject &options, QString *error, std::optional<bool> explicitContent, std::optional<QString> displayName)
+bool ModelCatalog::configure(const QString &id, const QJsonObject &options, QString *error, std::optional<bool> explicitContent, std::optional<QString> displayName, std::optional<bool> canEdit)
 {
     const auto info = modelById(id);
     if (!info) { if (error) *error = tr("The requested model is not installed"); return false; }
     const auto category = *categoryFromName(id.section(':', 0, 0));
+    if (canEdit && category != ModelCategory::ImageGeneration) {
+        if (error) *error = tr("Editing eligibility applies only to generation models");
+        return false;
+    }
     if (!KiraService::Protocol::validateModelOptions(categoryName(category), options, error)) return false;
     if (displayName && displayName->size() > 256) { if (error) *error = tr("Display name must contain at most 256 characters"); return false; }
     auto metadata = readMetadata(category);
@@ -360,6 +373,7 @@ bool ModelCatalog::configure(const QString &id, const QJsonObject &options, QStr
     if (!info->companionFileName.isEmpty()) entry.insert("companionFileName", info->companionFileName);
     entry.insert("recommendedOptions", options);
     if (explicitContent) entry.insert("explicitContent", *explicitContent);
+    if (canEdit) entry.insert("canEdit", *canEdit);
     if (displayName) entry.insert("displayName", displayName->trimmed());
     metadata->insert(info->fileName, entry);
     if (!writeMetadata(category, *metadata)) { if (error) *error = tr("Could not save model metadata"); return false; }
@@ -591,6 +605,7 @@ void ModelCatalog::completeInstall()
     entry.insert("modelType", m_activeInstall->request.modelType);
     if (m_activeInstall->request.recommendedOptions) entry.insert("recommendedOptions", *m_activeInstall->request.recommendedOptions);
     if (m_activeInstall->request.explicitContent) entry.insert("explicitContent", *m_activeInstall->request.explicitContent);
+    if (m_activeInstall->request.canEdit) entry.insert("canEdit", *m_activeInstall->request.canEdit);
     if (m_activeInstall->request.displayName) entry.insert("displayName", m_activeInstall->request.displayName->trimmed());
     metadata->insert(m_activeInstall->fileName, entry);
     if (!writeMetadata(category, *metadata)) { failActiveInstall(tr("Could not save model metadata")); return; }

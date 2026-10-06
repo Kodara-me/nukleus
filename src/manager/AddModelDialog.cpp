@@ -277,7 +277,9 @@ void AddModelDialog::startInstall()
         QUrl(m_companion->text().trimmed()), m_existingModelId.isEmpty() ? m_options->options() : QJsonObject{},
         files, m_modelType->isHidden() ? QString("checkpoint") : m_modelType->currentData().toString(), m_existingModelId,
         m_existingModelId.isEmpty() ? std::optional<bool>(m_options->explicitContent()) : std::nullopt,
-        m_existingModelId.isEmpty() ? std::optional<QString>(m_displayName->text()) : std::nullopt);
+        m_existingModelId.isEmpty() ? std::optional<QString>(m_displayName->text()) : std::nullopt,
+        m_existingModelId.isEmpty() && m_category->currentData().toString() == "image-generation"
+            ? std::optional<bool>(m_options->canEdit()) : std::nullopt);
     if (m_installId.isEmpty())
     {
         m_busy = false;

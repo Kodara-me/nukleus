@@ -25,7 +25,13 @@ PhotoMaker and IP-Adapter inputs cannot be combined. Upload source and mask firs
 then the ordered references and opaque embeddings. The Service stages identity
 files separately and passes `--photo-maker`, `--pm-id-images-dir`,
 `--pm-id-embed-path` and `--pm-style-strength`. Canvas's PhotoMaker button uses
-style strength 10 and a class word followed by `img`. Reuse requires no extraction.
+the PhotoMaker model's saved style strength (12 when absent) and a class word
+followed by `img`. Reuse requires no extraction. In Manager, edit **Inpaint strength**
+on the Inpaint model (default 0.65, range 0–1), and **Style strength** on the
+PhotoMaker model (range 0–100). Inpaint has no resolution setting: output dimensions
+always match the uploaded source image. Try 0.65 then 0.60, and 12 then 15 respectively.
+Existing saved values are preserved. Canvas explicitly submits these recommendations;
+the service does not apply them automatically.
 
 The **Face parsing** category (`face-parsing`, stored under
 `models/face-parsing/`) accepts one `.onnx` file and no companions. The Manager
@@ -64,6 +70,14 @@ single-reference packages remain supported. Deploy the updated service before
 clients that submit multiple references.
 
 Kira Service is the standalone backend for Kira applications. It owns installed models and their recommended options, single HTTPS model installations, the `sd-cli` image queue, and the versioned WebSocket API. Client applications select opaque installed-model IDs and submit jobs; they do not manage service files.
+
+In Manager, generation models offer **Can edit images**, unchecked by default,
+in the shared add/edit form. Save this flag only for weights that support reference
+image editing. Checked models also appear under **Edition**, with the same opaque
+ID, recommendations and companions; files stay in their original location.
+Canvas can select them as its default edit model. Unchecking removes editing
+eligibility while retaining generation support. Changes refresh connected clients.
+The flag is metadata, not a conversion or a guarantee of backend compatibility.
 
 The Manager also supports a **Prompt Enhancer** catalogue (`prompt-enhancer`),
 stored under `models/prompt-enhancer/`. Choose subtype **T5**, **LLM** (initial),
@@ -276,6 +290,8 @@ source history and normalizing returned output to source resolution if needed.
 Reference-image editing also supplies `--flow-shift 3 --offload-to-cpu --diffusion-fa --model-args qwen_image_zero_cond_t=true`. Fatal/error-level Vulkan `ErrorOutOfDeviceMemory`/`ErrorOutOfHostMemory` output aborts the active generation process; the daemon waits for process termination and returns the command and memory diagnostic as a job error, releasing the queue. Warnings, including pinned-memory allocation failures that fall back to CPU buffers, are not treated as failures.
 
 Image generation and reference-image editing both pass `--offload-to-cpu` to sd-cli.
+For temporary testing, all image generation, editing and inpainting calls also
+pass `--diffusion-fa` exactly once. Per-model configuration is deferred.
 
 ## Remote Linux updates
 

@@ -17,18 +17,26 @@ ModelOptionsWidget::ModelOptionsWidget(QWidget *parent) : QWidget(parent), m_for
     m_form->setContentsMargins(0, 0, 0, 0);
     m_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
 }
-void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &saved, bool explicitContent)
+void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &saved, bool explicitContent, bool canEdit)
 {
     QSignalBlocker blocker(this);
     while (m_form->rowCount())
         m_form->removeRow(0);
     m_fields.clear();
+    m_canEdit = nullptr;
     m_category = category;
     m_explicitContent = new QCheckBox(tr("Explicit content (NSFW)"), this);
     m_explicitContent->setObjectName("explicitContent");
     m_explicitContent->setChecked(explicitContent);
     m_form->addRow(m_explicitContent);
     connect(m_explicitContent, &QCheckBox::toggled, this, &ModelOptionsWidget::optionsChanged);
+    if (category == "image-generation") {
+        m_canEdit = new QCheckBox(tr("Can edit images"), this);
+        m_canEdit->setObjectName("canEdit");
+        m_canEdit->setChecked(canEdit);
+        m_form->addRow(m_canEdit);
+        connect(m_canEdit, &QCheckBox::toggled, this, &ModelOptionsWidget::optionsChanged);
+    }
     const auto values = saved.isEmpty() ? KiraService::Protocol::defaultModelOptions(category) : saved;
     const auto add = [this](const QString &key, const QString &label, QWidget *field)
     {
@@ -98,14 +106,22 @@ void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &
     }
     else if (category == "image-generation" || category == "inpaint" || category == "edition")
     {
-        auto *resolution = new QComboBox(this);
-        for (int side = 256; side <= 2048; side += 256)
-            resolution->addItem(tr("%1 × %1").arg(side), side);
-        resolution->setCurrentIndex(resolution->findData(values.value("width").toInt()));
-        connect(resolution, &QComboBox::currentIndexChanged, this, &ModelOptionsWidget::optionsChanged);
-        add("resolution", tr("Resolution:"), resolution);
+        if (category != "inpaint") {
+            auto *resolution = new QComboBox(this);
+            for (int side = 256; side <= 2048; side += 256)
+                resolution->addItem(tr("%1 × %1").arg(side), side);
+            resolution->setCurrentIndex(resolution->findData(values.value("width").toInt()));
+            connect(resolution, &QComboBox::currentIndexChanged, this, &ModelOptionsWidget::optionsChanged);
+            add("resolution", tr("Resolution:"), resolution);
+        }
         integer("steps", tr("Steps:"), 1, 200);
         decimal("cfgScale", tr("CFG scale:"), 0, 100, 1);
+        if (category == "inpaint") {
+            decimal("strength", tr("Inpaint strength:"), 0, 1, 2);
+            auto* strength = qobject_cast<QDoubleSpinBox*>(m_fields.value("strength"));
+            strength->setSingleStep(0.05);
+            strength->setValue(values.value("strength").toDouble(0.65));
+        }
         choices("sampler", tr("Sampler:"), KiraService::Protocol::modelSamplers());
         choices("scheduler", tr("Scheduler:"), KiraService::Protocol::modelSchedulers());
         auto *clip = new QComboBox(this);
@@ -246,6 +262,11 @@ QJsonObject ModelOptionsWidget::options() const
 bool ModelOptionsWidget::isValid() const
 {
     return KiraService::Protocol::validateModelOptions(m_category, options());
+}
+
+bool ModelOptionsWidget::canEdit() const
+{
+    return m_canEdit && m_canEdit->isChecked();
 }
 
 bool ModelOptionsWidget::explicitContent() const

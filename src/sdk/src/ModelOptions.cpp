@@ -51,7 +51,14 @@ QJsonObject defaultModelOptions(const QString &category)
                 {"dilatePixels", 8}, {"featherPixels", 8}, {"invertMask", false},
                 {"preserveAspectRatio", true}, {"outputAtSourceResolution", true},
                 {"provider", "CPUExecutionProvider"}};
-    if (category == "image-generation" || category == "inpaint" || category == "edition")
+    if (category == "inpaint") {
+        auto options = defaultModelOptions("image-generation");
+        options.remove("width");
+        options.remove("height");
+        options.insert("strength", 0.65);
+        return options;
+    }
+    if (category == "image-generation" || category == "edition")
         return {{"width", 1024}, {"height", 1024},  {"steps", 28},   {"cfgScale", 7.0},
                 {"sampler", ""}, {"scheduler", ""}, {"clipSkip", -1}};
     if (category == "llm-chat")
@@ -79,7 +86,17 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
     const auto defaults = category == "prompt-enhancer"
         ? defaultPromptEnhancerOptions(options.value("subtype").toString(), options.value("doSample").toBool())
         : defaultModelOptions(category);
-    if (defaults.isEmpty() || options.keys() != defaults.keys())
+    auto expectedKeys = defaults.keys();
+    // Existing Inpaint metadata predates the optional strength recommendation.
+    if (category == "inpaint" && !options.contains("strength"))
+        expectedKeys.removeAll("strength");
+    auto actualKeys = options.keys();
+    if (category == "inpaint") {
+        // Accept legacy dimensions, but they never control inpainting output.
+        actualKeys.removeAll("width");
+        actualKeys.removeAll("height");
+    }
+    if (defaults.isEmpty() || actualKeys != expectedKeys)
         return fail();
     const auto number = [&options](const QString &key, double low, double high, bool integer = false)
     {
@@ -123,9 +140,12 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
     }
     else if (category == "image-generation" || category == "inpaint" || category == "edition")
     {
+        if (category == "inpaint" && options.contains("strength") && !number("strength", 0, 1))
+            return fail();
         const int width = options.value("width").toInt();
         const int clip = options.value("clipSkip").toInt();
-        if (!number("width", 256, 2048, true) || width % 256 || !number("height", width, width, true) ||
+        const bool hasDimensions = category != "inpaint" || options.contains("width") || options.contains("height");
+        if ((hasDimensions && (!number("width", 256, 2048, true) || width % 256 || !number("height", width, width, true))) ||
             !number("steps", 1, 200, true) || !number("cfgScale", 0, 100) ||
             !number("clipSkip", -1, 12, true) || clip == 0 || !options.value("sampler").isString() ||
             !modelSamplers().contains(options.value("sampler").toString()) ||

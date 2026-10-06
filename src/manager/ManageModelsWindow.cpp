@@ -125,6 +125,7 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
             [this]
             {
                 m_dirty = m_options->options() != m_originalOptions
+                    || m_options->canEdit() != m_originalCanEdit
                     || m_options->explicitContent() != m_originalExplicitContent
                     || m_displayName->text().trimmed() != m_originalDisplayName;
                 updateActions();
@@ -132,6 +133,7 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     connect(m_add, &QPushButton::clicked, this, &ManageModelsWindow::addModel);
     connect(m_displayName, &QLineEdit::textChanged, this, [this] {
         m_dirty = m_options->options() != m_originalOptions
+            || m_options->canEdit() != m_originalCanEdit
             || m_options->explicitContent() != m_originalExplicitContent
             || m_displayName->text().trimmed() != m_originalDisplayName;
         updateActions();
@@ -173,6 +175,7 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
                     return;
                 m_originalOptions = options;
                 m_originalExplicitContent = explicitContent;
+                m_originalCanEdit = m_options->canEdit();
                 m_originalDisplayName = m_displayName->text().trimmed();
                 m_dirty = false;
                 m_saving = false;
@@ -273,10 +276,12 @@ void ManageModelsWindow::showSelection(const QString &id)
                 continue;
             m_originalOptions = model.recommendedOptions;
             m_originalExplicitContent = model.explicitContent;
+            m_originalCanEdit = model.canEdit;
             m_originalDisplayName = model.displayName;
             m_displayName->setText(model.displayName);
             m_displayName->setEnabled(true);
-            m_options->setOptions(category.first, model.recommendedOptions, model.explicitContent);
+            m_options->setOptions(model.id.startsWith("image-generation:") ? QString("image-generation") : category.first,
+                model.recommendedOptions, model.explicitContent, model.canEdit);
             m_options->show();
             m_details->setText(
                 tr("%1\n%2 · %3\n%4")
@@ -348,7 +353,8 @@ void ManageModelsWindow::saveOptions()
 {
     if (!m_options->isValid())
         return;
-    if (m_client->configureModel(m_selectedId, m_options->options(), m_options->explicitContent(), m_displayName->text()))
+    if (m_client->configureModel(m_selectedId, m_options->options(), m_options->explicitContent(), m_displayName->text(),
+        m_selectedId.startsWith("image-generation:") ? std::optional<bool>(m_options->canEdit()) : std::nullopt))
     {
         m_saving = true;
         m_status->setText(tr("Saving recommended options…"));

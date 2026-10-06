@@ -107,7 +107,8 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
         QStringLiteral("--cfg-scale"), QString::number(request.cfgScale, 'g', 17),
         QStringLiteral("--seed"), QString::number(request.seed),
         QStringLiteral("--output"), request.outputPath,
-        QStringLiteral("--offload-to-cpu")};
+        QStringLiteral("--offload-to-cpu"),
+        QStringLiteral("--diffusion-fa")};
     if (!request.sampler.isEmpty()) arguments.append({QStringLiteral("--sampling-method"), request.sampler});
     if (!request.scheduler.isEmpty()) arguments.append({QStringLiteral("--scheduler"), request.scheduler});
     if (!request.vaePath.isEmpty()) arguments.append({QStringLiteral("--vae"), request.vaePath});
@@ -136,7 +137,6 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
     if (!request.referenceImagePath.isEmpty())
         arguments.append({QStringLiteral("--ref-image"), request.referenceImagePath,
             QStringLiteral("--flow-shift"), QStringLiteral("3"),
-            QStringLiteral("--diffusion-fa"),
             QStringLiteral("--model-args"), QStringLiteral("qwen_image_zero_cond_t=true")});
     if (!request.baseImagePath.isEmpty()) {
         arguments.append({QStringLiteral("--init-img"), request.baseImagePath,

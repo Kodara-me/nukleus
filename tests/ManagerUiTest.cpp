@@ -353,6 +353,19 @@ class ManagerUiTest final : public QObject
         QVERIFY(widget.isValid());
         widget.setOptions("ip_adapter", {{"strength", 0.75}});
         QCOMPARE(widget.options(), QJsonObject({{"strength", 0.75}}));
+        widget.setOptions("inpaint", KiraService::Protocol::defaultModelOptions("image-generation"));
+        QVERIFY(!widget.findChild<QCheckBox*>("canEdit"));
+        QVERIFY(!widget.findChild<QWidget*>("resolution"));
+        QVERIFY(!widget.options().contains("width"));
+        QVERIFY(!widget.options().contains("height"));
+        QCOMPARE(widget.findChild<QDoubleSpinBox*>("strength")->value(), 0.65);
+        widget.findChild<QDoubleSpinBox*>("strength")->setValue(0.60);
+        QVERIFY(widget.isValid());
+        QCOMPARE(widget.options().value("strength").toDouble(), 0.60);
+        widget.setOptions("photomaker", {{"style_strength", 12}});
+        QCOMPARE(widget.findChild<QSpinBox*>("style_strength")->value(), 12);
+        widget.findChild<QSpinBox*>("style_strength")->setValue(15);
+        QCOMPARE(widget.options().value("style_strength").toInt(), 15);
         widget.setOptions("clip_vision");
         widget.findChild<QCheckBox *>("normalize_input")->setChecked(false);
         widget.findChild<QSpinBox *>("image_size")->setValue(336);
@@ -456,6 +469,10 @@ class ManagerUiTest final : public QObject
         QVERIFY(explicitContent);
         QVERIFY(!explicitContent->isChecked());
         explicitContent->setChecked(true);
+        auto* canEdit = form->findChild<QCheckBox*>("canEdit");
+        QVERIFY(canEdit);
+        QVERIFY(!canEdit->isChecked());
+        canEdit->setChecked(true);
         auto *save = window.findChild<QPushButton *>("saveOptions");
         QVERIFY(save->isEnabled());
         save->click();
@@ -464,6 +481,7 @@ class ManagerUiTest final : public QObject
         QCOMPARE(m_messages.last().value("recommendedOptions").toObject().value("steps").toInt(), 42);
         QCOMPARE(m_messages.last().value("displayName").toString(), QString("Portrait model"));
         QVERIFY(m_messages.last().value("explicitContent").toBool());
+        QVERIFY(m_messages.last().value("canEdit").toBool());
         send({{"type", "error"}, {"id", "image-generation:test.gguf"}, {"message", "Write failed"}});
         QTRY_VERIFY(save->isEnabled());
         QCOMPARE(steps->value(), 42);

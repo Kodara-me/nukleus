@@ -161,7 +161,7 @@ void ServiceClient::requestModels()
 }
 
 QString ServiceClient::installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl, const QJsonObject &recommendedOptions, const QJsonObject &companionUrls,
-    const QString &modelType, const QString &existingModelId, std::optional<bool> explicitContent, std::optional<QString> displayName)
+    const QString &modelType, const QString &existingModelId, std::optional<bool> explicitContent, std::optional<QString> displayName, std::optional<bool> canEdit)
 {
     const QString categoryValue = categoryName(category);
     if (!m_authenticated || categoryValue.isEmpty() || (existingModelId.isEmpty() && (!url.isValid() || url.isEmpty()))) return {};
@@ -181,6 +181,7 @@ QString ServiceClient::installModel(ModelCategory category, const QUrl &url, con
     if (!companionUrls.isEmpty()) message.insert("companionUrls", companionUrls);
     if (modelType != "checkpoint" || !existingModelId.isEmpty()) message.insert("modelType", modelType);
     if (!existingModelId.isEmpty()) message.insert("id", existingModelId);
+    if (canEdit) message.insert("canEdit", *canEdit);
     if (explicitContent) message.insert("explicitContent", *explicitContent);
     if (displayName) message.insert("displayName", displayName->trimmed());
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
@@ -196,10 +197,11 @@ bool ServiceClient::configureModelStyles(const QString &id, const QList<PromptSt
     return true;
 }
 
-bool ServiceClient::configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent, std::optional<QString> displayName)
+bool ServiceClient::configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent, std::optional<QString> displayName, std::optional<bool> canEdit)
 {
     if (!m_authenticated || id.isEmpty()) return false;
     QJsonObject message{{"type", "models.configure"}, {"id", id}, {"recommendedOptions", options}};
+    if (canEdit) message.insert("canEdit", *canEdit);
     if (displayName) message.insert("displayName", displayName->trimmed());
     if (explicitContent) message.insert("explicitContent", *explicitContent);
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
@@ -457,7 +459,7 @@ void ServiceClient::handleTextMessage(const QString &message)
                                  model.value(QStringLiteral("companionFileName")).toString(),
                                  model.value(QStringLiteral("companionRole")).toString(), model.value("recommendedOptions").toObject(),
                     model.value("companionFiles").toObject(), model.value("modelType").toString("checkpoint"), model.value("explicitContent").toBool(false),
-                    Protocol::promptStylesFromJson(model.value("styles")).value_or(QList<PromptStyle>{}), model.value("displayName").toString().trimmed()});
+                    Protocol::promptStylesFromJson(model.value("styles")).value_or(QList<PromptStyle>{}), model.value("displayName").toString().trimmed(), model.value("canEdit").toBool(false)});
             }
         }
         m_modelListAvailable = true;
@@ -506,7 +508,7 @@ void ServiceClient::handleTextMessage(const QString &message)
         if (styles) emit modelStylesConfigured(object.value("id").toString(), *styles);
         return;
     }
-    if (type == "models.styles.changed") { requestModels(); return; }
+    if (type == "models.styles.changed" || type == "models.changed") { requestModels(); return; }
     if (type == "models.companion.delete.completed") {
         emit companionDeleted(object.value("id").toString(), object.value("role").toString());
         requestModels(); return;

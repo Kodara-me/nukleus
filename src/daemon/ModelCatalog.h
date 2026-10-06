@@ -38,6 +38,7 @@ struct ModelInfo
     bool explicitContent = false;
     QList<KiraService::PromptStyle> styles;
     QString displayName;
+    bool canEdit = false;
 };
 
 Q_DECLARE_METATYPE(ModelInfo)
@@ -55,6 +56,7 @@ struct ModelInstallRequest
     std::optional<bool> explicitContent;
     bool allowLocalFiles = false;
     std::optional<QString> displayName;
+    std::optional<bool> canEdit;
 };
 
 enum class ModelInstallState
@@ -93,7 +95,7 @@ public:
     bool removeCompanion(const QString& id, const QString& role, QString* error = nullptr);
     void cancel(const QString &installId);
     bool isInstalling() const;
-    bool configure(const QString &id, const QJsonObject &options, QString *error = nullptr, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {});
+    bool configure(const QString &id, const QJsonObject &options, QString *error = nullptr, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {}, std::optional<bool> canEdit = {});
     bool configureStyles(const QString &id, const QList<KiraService::PromptStyle> &styles, QString *error = nullptr);
 
 signals:

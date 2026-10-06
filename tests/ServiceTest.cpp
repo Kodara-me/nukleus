@@ -711,7 +711,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     const auto editArgs = arguments();
     QVERIFY(editArgs.contains("--ref-image"));
     QCOMPARE(editArgs.count("--offload-to-cpu"), 1);
-    QVERIFY(editArgs.contains("--diffusion-fa"));
+    QCOMPARE(editArgs.count("--diffusion-fa"), 1);
     QCOMPARE(editArgs.value(editArgs.indexOf("--model-args") + 1), QString("qwen_image_zero_cond_t=true"));
     QCOMPARE(editArgs.value(editArgs.indexOf("--flow-shift") + 1), QString("3"));
     QVERIFY(!editArgs.contains("--init-img"));
@@ -721,6 +721,37 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(editArgs.value(editArgs.indexOf("--vae") + 1), QDir(editionRoot).filePath("companions/edit.gguf/vae.safetensors"));
     QCOMPARE(editArgs.value(editArgs.indexOf("--llm_vision") + 1), QDir(editionRoot).filePath("companions/edit.gguf/mmproj.gguf"));
     QCOMPARE(messages.last().value("operation").toString(), QString("image.edit"));
+    // A generation model becomes an editing model without moving its weights or VAE.
+    ModelCatalog editingCatalog(root, false);
+    const QString generationId = "image-generation:model.gguf";
+    editOptions.insert("modelId", generationId);
+    const auto submitGenerationEdit = [&](const QString& id) {
+        socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+            {"type", "submit"}, {"operation", "image.edit"}, {"jobId", id},
+            {"options", editOptions}}).toJson()));
+    };
+    submitGenerationEdit("generation-edit-disabled");
+    QTRY_VERIFY(terminal("generation-edit-disabled"));
+    QCOMPARE(messages.last().value("code").toString(), QString("model-unavailable"));
+    QVERIFY(editingCatalog.configure(generationId,
+        KiraService::Protocol::defaultModelOptions("image-generation"), nullptr, {}, {}, true));
+    submitGenerationEdit("generation-edit-enabled");
+    QTRY_VERIFY(std::any_of(messages.cbegin(), messages.cend(), [](const auto& message) {
+        return message.value("type") == "upload-required" && message.value("jobId") == "generation-edit-enabled";
+    }));
+    socket.sendBinaryMessage(image);
+    QTRY_VERIFY(terminal("generation-edit-enabled"));
+    QTRY_COMPARE(images.count(), 2);
+    const auto generationEditArgs = arguments();
+    QVERIFY(generationEditArgs.contains("--ref-image"));
+    QCOMPARE(generationEditArgs.value(generationEditArgs.indexOf("--model") + 1), QDir(root).filePath("model.gguf"));
+    QCOMPARE(generationEditArgs.value(generationEditArgs.indexOf("--vae") + 1), QDir(root).filePath(companion));
+    images.removeLast(); // Preserve the following conditioning cases' image counts.
+    QVERIFY(editingCatalog.configure(generationId,
+        KiraService::Protocol::defaultModelOptions("image-generation"), nullptr, {}, {}, false));
+    submitGenerationEdit("generation-edit-revoked");
+    QTRY_VERIFY(terminal("generation-edit-revoked"));
+    QCOMPARE(messages.last().value("code").toString(), QString("model-unavailable"));
     const QString visionPath = QDir(root).filePath("clip_vision/vision.safetensors");
     const QString adapterPath = QDir(root).filePath("ip-adapter/adapter.safetensors");
     const QString auxiliaryPath = QDir(root).filePath("ip-adapter/companions/adapter.safetensors/lora/auxiliary.safetensors");
@@ -924,6 +955,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(images.last().first().toByteArray(), image);
     auto args = arguments();
     QCOMPARE(args.count("--offload-to-cpu"), 1);
+    QCOMPARE(args.count("--diffusion-fa"), 1);
     QVERIFY(!args.contains("--ip-adapter"));
     QVERIFY(!args.contains("--clip_vision"));
     QVERIFY(!args.contains("--sampling-method"));
@@ -1155,7 +1187,16 @@ void ServiceTest::validatesRecommendedOptions()
     ModelCatalog restarted(directory.path(), false);
     QCOMPARE(restarted.models(ModelCategory::Inpaint).size(), 1);
     QCOMPARE(restarted.modelById(id)->recommendedOptions, inpaint);
-    QCOMPARE(defaultModelOptions("inpaint"), defaultModelOptions("image-generation"));
+    auto legacyInpaint = defaultModelOptions("image-generation");
+    QVERIFY(validateModelOptions("inpaint", legacyInpaint));
+    legacyInpaint.remove("width");
+    legacyInpaint.remove("height");
+    legacyInpaint.insert("strength", 0.65);
+    QCOMPARE(defaultModelOptions("inpaint"), legacyInpaint);
+    legacyInpaint.insert("strength", 1.01);
+    QVERIFY(!validateModelOptions("inpaint", legacyInpaint));
+    legacyInpaint.insert("strength", "0.65");
+    QVERIFY(!validateModelOptions("inpaint", legacyInpaint));
     QCOMPARE(ModelCatalog::categoryFromName("inpaint"), std::optional<ModelCategory>(ModelCategory::Inpaint));
     QCOMPARE(ModelCatalog::companionRole(ModelCategory::Inpaint), QString("vae"));
     for (auto category : {"image-generation", "inpaint", "edition", "llm-chat", "upscaler", "ip-adapter", "ip_adapter", "clip_vision", "photomaker", "prompt-enhancer"}) {
@@ -1214,12 +1255,23 @@ void ServiceTest::persistsOptionsAndLegacyMetadata()
     ModelCatalog catalog(directory.path(), true); const QString id = "image-generation:legacy.gguf";
     QVERIFY(catalog.modelById(id)); QVERIFY(catalog.modelById(id)->recommendedOptions.isEmpty());
     QVERIFY(!catalog.modelById(id)->explicitContent);
+    QVERIFY(!catalog.modelById(id)->canEdit);
+    QVERIFY(catalog.models(ModelCategory::Edition).isEmpty());
     const auto options = KiraService::Protocol::defaultModelOptions("image-generation"); QString error;
-    QVERIFY2(catalog.configure(id, options, &error, true), qPrintable(error));
+    QVERIFY2(catalog.configure(id, options, &error, true, {}, true), qPrintable(error));
+    QVERIFY(catalog.modelById(id)->canEdit);
+    QCOMPARE(catalog.models(ModelCategory::Edition).size(), 1);
+    QCOMPARE(catalog.models(ModelCategory::Edition).first().id, id);
+    QCOMPARE(catalog.models(ModelCategory::Edition).first().companionFiles,
+        catalog.modelById(id)->companionFiles);
     QVERIFY(catalog.modelById(id)->explicitContent);
     QVERIFY(catalog.configure(id, options, &error));
     QVERIFY(catalog.modelById(id)->explicitContent);
     ModelCatalog restored(directory.path(), true); QCOMPARE(restored.modelById(id)->recommendedOptions, options);
+    QVERIFY(restored.modelById(id)->canEdit);
+    QVERIFY(restored.configure(id, options, &error, {}, {}, false));
+    QVERIFY(!catalog.modelById(id)->canEdit);
+    QVERIFY(catalog.models(ModelCategory::Edition).isEmpty());
     QVERIFY(restored.modelById(id)->explicitContent);
     QVERIFY(restored.configure(id, options, &error, false));
     QVERIFY(!catalog.modelById(id)->explicitContent);
@@ -1283,9 +1335,20 @@ void ServiceTest::configuresModelsOverProtocol()
     const auto send = [&client](const QJsonObject &object) { client.sendTextMessage(QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact))); };
     send({{"type", "authenticate"}, {"version", 3}}); QTRY_VERIFY(received.count() >= 2); received.clear();
     const auto options = KiraService::Protocol::defaultModelOptions("image-generation");
-    send({{"type", "models.configure"}, {"id", "image-generation:test.gguf"}, {"recommendedOptions", options}, {"explicitContent", true}}); QTRY_COMPARE(received.count(), 1);
+    KiraService::ServiceClient observer;
+    observer.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(service.serverPort())), {});
+    observer.connectToService();
+    QTRY_VERIFY(observer.modelListAvailable());
+    QVERIFY(observer.models(KiraService::ModelCategory::Edition).isEmpty());
+    send({{"type", "models.configure"}, {"id", "image-generation:test.gguf"}, {"recommendedOptions", options}, {"explicitContent", true}, {"canEdit", true}}); QTRY_COMPARE(received.count(), 2);
     auto response = QJsonDocument::fromJson(received.takeFirst().first().toString().toUtf8()).object(); QCOMPARE(response.value("type").toString(), QString("models.configure.completed")); QCOMPARE(response.value("model").toObject().value("recommendedOptions").toObject(), options); QVERIFY(!response.value("model").toObject().contains("filePath"));
     QVERIFY(response.value("model").toObject().value("explicitContent").toBool());
+    QVERIFY(response.value("model").toObject().value("canEdit").toBool());
+    QCOMPARE(QJsonDocument::fromJson(received.takeFirst().first().toString().toUtf8()).object().value("type").toString(), QString("models.changed"));
+    QTRY_COMPARE(observer.models(KiraService::ModelCategory::Edition).size(), 1);
+    QCOMPARE(observer.models(KiraService::ModelCategory::Edition).first().id, QString("image-generation:test.gguf"));
+    QVERIFY(observer.models(KiraService::ModelCategory::Edition).first().canEdit);
+    QVERIFY(observer.models(KiraService::ModelCategory::ImageGeneration).first().canEdit);
     send({{"type", "models.list"}}); QTRY_COMPARE(received.count(), 1); response = QJsonDocument::fromJson(received.takeFirst().first().toString().toUtf8()).object();
     QCOMPARE(response.value("categories").toArray().first().toObject().value("models").toArray().first().toObject().value("recommendedOptions").toObject(), options);
     QVERIFY(response.value("categories").toArray().first().toObject().value("models").toArray().first().toObject().value("explicitContent").toBool());
@@ -1293,6 +1356,14 @@ void ServiceTest::configuresModelsOverProtocol()
     QTRY_COMPARE(received.count(), 1);
     response = QJsonDocument::fromJson(received.takeFirst().first().toString().toUtf8()).object();
     QCOMPARE(response.value("code").toString(), QString("invalid-model-configure"));
+    send({{"type", "models.configure"}, {"id", "image-generation:test.gguf"}, {"recommendedOptions", options}, {"canEdit", "true"}});
+    QTRY_COMPARE(received.count(), 1);
+    response = QJsonDocument::fromJson(received.takeFirst().first().toString().toUtf8()).object();
+    QCOMPARE(response.value("code").toString(), QString("invalid-model-configure"));
+    QVERIFY(observer.configureModel("image-generation:test.gguf", options, {}, {}, false));
+    QTRY_VERIFY(observer.models(KiraService::ModelCategory::Edition).isEmpty());
+    QTRY_COMPARE(received.count(), 1);
+    received.clear();
     send({{"type", "models.configure"}, {"id", "image-generation:test.gguf"}, {"recommendedOptions", true}}); QTRY_COMPARE(received.count(), 1); response = QJsonDocument::fromJson(received.takeFirst().first().toString().toUtf8()).object(); QCOMPARE(response.value("type").toString(), QString("error"));
     QTcpServer stalledDownload; QVERIFY(stalledDownload.listen(QHostAddress::LocalHost));
     const QString url = QString("https://127.0.0.1:%1/one.gguf").arg(stalledDownload.serverPort());

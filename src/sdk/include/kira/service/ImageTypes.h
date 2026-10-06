@@ -41,6 +41,7 @@ struct ModelInfo
     bool explicitContent = false;
     QList<PromptStyle> styles;
     QString displayName;
+    bool canEdit = false;
     QString displayLabel() const { return displayName.trimmed().isEmpty() ? fileName : displayName.trimmed(); }
 };
 

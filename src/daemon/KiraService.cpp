@@ -201,6 +201,7 @@ KiraServiceDaemon::KiraServiceDaemon(KiraServiceConfiguration configuration, QOb
         QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
                                 {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
         modelObject.insert("explicitContent", model.explicitContent);
+        modelObject.insert("canEdit", model.canEdit);
         modelObject.insert("displayName", model.displayName);
         if (!model.recommendedOptions.isEmpty()) modelObject.insert("recommendedOptions", model.recommendedOptions);
         modelObject.insert("companionFiles", model.companionFiles);
@@ -211,6 +212,10 @@ KiraServiceDaemon::KiraServiceDaemon(KiraServiceConfiguration configuration, QOb
         }
         send(client, {{QStringLiteral("type"), QStringLiteral("models.install.completed")},
                       {QStringLiteral("installId"), installId}, {QStringLiteral("model"), modelObject}});
+        if (model.canEdit) {
+            for (auto it = m_authenticatedClients.cbegin(); it != m_authenticatedClients.cend(); ++it)
+                if (it.value()) send(it.key(), {{"type", "models.changed"}, {"id", model.id}});
+        }
     });
     connect(m_models.get(), &ModelCatalog::installCanceled, this, [this](const QString &id) {
         const auto client = m_installClients.take(id);
@@ -583,6 +588,7 @@ void KiraServiceDaemon::listModels(QWebSocket *socket) const
             QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
                                     {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
             modelObject.insert("explicitContent", model.explicitContent);
+            modelObject.insert("canEdit", model.canEdit);
             modelObject.insert("displayName", model.displayName);
             if (category == ModelCategory::ImageGeneration)
                 modelObject.insert("styles", KiraService::Protocol::promptStylesToJson(model.styles));
@@ -643,6 +649,13 @@ void KiraServiceDaemon::installModel(QWebSocket *socket, const QJsonObject &mess
         }
         request.explicitContent = message.value("explicitContent").toBool();
     }
+    if (message.contains("canEdit")) {
+        if (!message.value("canEdit").isBool()) {
+            send(socket, {{"type", "error"}, {"code", "invalid-model-install"}, {"installId", installId},
+                {"message", tr("Can edit must be a boolean")}}); return;
+        }
+        request.canEdit = message.value("canEdit").toBool();
+    }
     request.companionUrls = message.value("companionUrls").toObject();
     if (!request.existingModelId.isEmpty()) {
         const auto model = m_models->model(*category, request.existingModelId);
@@ -688,13 +701,20 @@ void KiraServiceDaemon::configureModel(QWebSocket *socket, const QJsonObject &me
     }
     const std::optional<bool> explicitContent = message.contains("explicitContent")
         ? std::optional<bool>(message.value("explicitContent").toBool()) : std::nullopt;
-    if (!message.value("recommendedOptions").isObject() || !m_models->configure(id, message.value("recommendedOptions").toObject(), &error, explicitContent, displayName)) {
+    if (message.contains("canEdit") && !message.value("canEdit").isBool()) {
+        send(socket, {{"type", "error"}, {"code", "invalid-model-configure"}, {"id", id},
+            {"message", tr("Can edit must be a boolean")}}); return;
+    }
+    const std::optional<bool> canEdit = message.contains("canEdit")
+        ? std::optional<bool>(message.value("canEdit").toBool()) : std::nullopt;
+    if (!message.value("recommendedOptions").isObject() || !m_models->configure(id, message.value("recommendedOptions").toObject(), &error, explicitContent, displayName, canEdit)) {
         send(socket, {{"type", "error"}, {"code", "invalid-model-configure"}, {"id", id}, {"message", error.isEmpty() ? tr("Recommended options must be an object") : error}});
         return;
     }
     const auto model = *m_models->modelById(id);
     QJsonObject value{{"id", model.id}, {"name", model.name}, {"fileName", model.fileName}, {"bytes", model.fileSize}, {"recommendedOptions", model.recommendedOptions}};
     value.insert("explicitContent", model.explicitContent);
+    value.insert("canEdit", model.canEdit);
     value.insert("displayName", model.displayName);
     value.insert("companionFiles", model.companionFiles);
     value.insert("modelType", model.modelType);
@@ -703,6 +723,10 @@ void KiraServiceDaemon::configureModel(QWebSocket *socket, const QJsonObject &me
         value.insert("companionRole", model.companionRole);
     }
     send(socket, {{"type", "models.configure.completed"}, {"id", id}, {"model", value}});
+    if (canEdit) {
+        for (auto it = m_authenticatedClients.cbegin(); it != m_authenticatedClients.cend(); ++it)
+            if (it.value()) send(it.key(), {{"type", "models.changed"}, {"id", id}});
+    }
 }
 
 void KiraServiceDaemon::configureModelStyles(QWebSocket *socket, const QJsonObject &message)

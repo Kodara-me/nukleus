@@ -25,6 +25,18 @@
 
 ## Manager UI and recommended options
 
+Generation models have an optional top-level canEdit boolean, default false,
+persisted atomically in their original category metadata through install/configure.
+Manager's shared add/edit form exposes Can edit images only for generation models.
+Eligible models also appear in Edition lists with their original opaque IDs,
+recommendations, model type and companions. image.edit accepts these models through
+the same execution path as Edition weights; never copy or relocate weights.
+Unchecking revokes editing availability, preserving generation. Omission preserves
+the saved flag. Reject nonboolean values and the flag on other model categories.
+SDK and Manager refresh on additive protocol-v3 models.changed notifications.
+Attach/remove companions and configure/delete models through their original IDs
+and category; Edition listing is an availability view, not a second installation.
+
 Inpaint uses category `inpaint` and models/inpaint storage. It shares Image
 generation recommended options, primary weight formats, model types and optional
 companions. image.inpaint accepts a source PNG followed by a same-size mask PNG,
@@ -46,7 +58,13 @@ the opaque PhotoMaker model ID; reject combining PhotoMaker and IP-Adapter.
 Bound all input bytes together. Stage portraits/embeddings under a separate
 private identity directory so source and mask are never identity references.
 Pass --photo-maker, --pm-id-images-dir, --pm-id-embed-path and explicit style
-strength; Canvas uses 10. Preserve all pending/queued/active model protection.
+strength; Canvas uses the PhotoMaker model's saved style_strength (12 when absent).
+Manager exposes Inpaint strength in model recommendations (default 0.65, 0–1),
+without a resolution field or width/height recommendations. Accept legacy stored
+dimensions for compatibility; inpainting always uses the source image dimensions.
+alongside the existing PhotoMaker style strength. Accept legacy Inpaint options
+without strength. Canvas submits these recommendations explicitly; daemon defaults
+and other clients remain unchanged. Preserve all pending/queued/active model protection.
 No extraction/Python subprocess is needed to reuse packaged embeddings.
 
 Face parsing uses category `face-parsing` and models/face-parsing storage.
@@ -178,6 +196,9 @@ source history and normalizing returned output to source resolution if needed.
 Reference-image editing also supplies `--flow-shift 3 --offload-to-cpu --diffusion-fa --model-args qwen_image_zero_cond_t=true`. Fatal/error-level Vulkan `ErrorOutOfDeviceMemory`/`ErrorOutOfHostMemory` output aborts the active generation process; the daemon waits for process termination and returns the command and memory diagnostic as a job error, releasing the queue. Warnings, including pinned-memory allocation failures that fall back to CPU buffers, are not treated as failures.
 
 Image generation and reference-image editing both pass `--offload-to-cpu` to sd-cli.
+Temporary testing override: the shared image generation runner passes
+`--diffusion-fa` exactly once for generation, editing and inpainting.
+Per-model configuration is deferred; do not add Manager controls in this slice.
 
 Linux remote updates use `scripts/update-kira-service.sh` as the checkout owner:
 fetch and fast-forward the configured upstream, configure/build/test, then invoke
