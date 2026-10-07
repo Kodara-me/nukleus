@@ -32,6 +32,7 @@ bool validateModelRouting(const ModelRouting &routing, QString *error)
         }
         return true;
     };
+    const auto identityViewsValid = [](int views) { return views == 1 || views == 2 || views == 4; };
     bool valid = routing.presets.size() == fixed.presets.size() && assignmentValid(routing.editing);
     if (valid)
         for (int i = 0; i < routing.presets.size(); ++i)
@@ -40,7 +41,7 @@ bool validateModelRouting(const ModelRouting &routing, QString *error)
             const auto &expected = fixed.presets.at(i);
             if (p.id != expected.id || p.name != expected.name || p.nameFr != expected.nameFr ||
                 !assignmentValid(p.model) || p.positivePrefix.size() > 65536 || p.negativePrefix.size() > 65536 ||
-                !flowValid(p.promptFlow))
+                !flowValid(p.promptFlow) || !identityViewsValid(p.identityViews))
             {
                 valid = false;
                 break;
@@ -48,7 +49,7 @@ bool validateModelRouting(const ModelRouting &routing, QString *error)
         }
     if (!valid && error)
         *error = QStringLiteral("Presets and bilingual labels are fixed. Steps must be 1–200, CFG 0–100 and "
-                                "prefixes at most 65536 characters. Prompt flows allow at most 4 steps with unique "
+                                "prefixes at most 65536 characters. Identity views must be 1, 2 or 4. Prompt flows allow at most 4 steps with unique "
                                 "IDs, bilingual names and instructions of at most 65536 characters.");
     return valid;
 }
@@ -78,9 +79,10 @@ QJsonObject modelRoutingToJson(const ModelRouting &routing)
                                             {"nameFr", p.nameFr},
                                             {"positivePrefix", p.positivePrefix},
                                             {"negativePrefix", p.negativePrefix},
-                                            {"promptFlow", flow}}));
+                                            {"promptFlow", flow},
+                                            {"identityViews", p.identityViews}}));
     }
-    return {{"version", 4}, {"presets", presets}, {"editing", assignment(routing.editing, {})}};
+    return {{"version", 5}, {"presets", presets}, {"editing", assignment(routing.editing, {})}};
 }
 
 std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QString *error)
@@ -91,7 +93,7 @@ std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QStr
         return std::nullopt;
     };
     const int version = object.value("version").toInt();
-    if (!object.value("version").isDouble() || version < 1 || version > 4 || !object.value("presets").isArray())
+    if (!object.value("version").isDouble() || version < 1 || version > 5 || !object.value("presets").isArray())
         return fail();
     const bool legacy = version == 1;
     // Versions 1–3 stored Fast/Balanced/Quality tiers; only the Fast tier carries over.
@@ -179,6 +181,14 @@ std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QStr
                                           s.value("nameFr").toString(), s.value("modelId").toString(),
                                           s.value("instructions").toString()});
             }
+        }
+        // Versions 1–4 predate identity views and load with a single view.
+        if (version >= 5)
+        {
+            const double views = p.value("identityViews").toDouble(-1);
+            if (!p.value("identityViews").isDouble() || (views != 1 && views != 2 && views != 4))
+                return fail();
+            preset.identityViews = int(views);
         }
         routing.presets.append(preset);
     }

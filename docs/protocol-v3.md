@@ -263,6 +263,11 @@ shell-quoted text for diagnosis; execution still uses QProcess argument lists.
 
 ### Preset prompt flows
 
+Each `model-routing` preset (routing document version 5) carries an integer
+`identityViews` of 1, 2 or 4: the number of identity portraits clients request
+sequentially with that preset. The service only stores and validates it;
+documents of versions 1–4 load with 1.
+
 An `image.generate` with a `presetId` is routed: the service uses the preset's
 assigned model and fills omitted `steps`/`cfgScale` from its saved snapshot. An
 unassigned preset fails with `model-routing-unavailable`. Presets have no

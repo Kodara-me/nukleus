@@ -173,9 +173,13 @@ including manual edits; catalogue refresh must not replace them. Unassigned
 clears the assignment and snapshot.
 Keep only Save/Cancel buttons; await acknowledgment and discard drafts on Cancel.
 
-Store version-4 model-routing.json beside model metadata through QSaveFile:
+Store version-5 model-routing.json beside model metadata through QSaveFile:
 presets carry modelId/steps/cfgScale and the top-level `editing` object carries
 the editing assignment.
+Each preset carries `identityViews` (1, 2 or 4; default 1): the number of
+sequential identity portraits clients request with it. The service does not use
+it for generation. Manager edits it as "Identity portraits" on the preset page
+(hidden for Editing). Versions 1–4 load with 1.
 Each generation preset carries an ordered `promptFlow` of at most 4 LLM steps
 (id, name, nameFr, modelId, instructions). Step IDs are unique within the preset,
 bilingual names are nonblank, instructions are at most 65536 characters and
@@ -195,7 +199,7 @@ and Editing's Fast (`photo-low`, `illustration-low`, `edit-low`) tier as its
 assignment and drop the other tiers and permanent flags. Version-1 reads project
 known preset IDs onto the fixed structure, retaining known prefixes. Missing
 parameters are initialized from model recommendations.
-Do not write during reads; Save writes version 4 and retires legacy entries.
+Do not write during reads; Save writes version 5 and retires legacy entries.
 Reject malformed/unreadable storage without overwriting. Block mapped-model
 deletion and disabling required capabilities, including companion installs.
 External disappearance leaves assignments intact.

@@ -83,7 +83,8 @@ Generation has exactly **Photorealism / Photoréalisme** and **Illustration**.
 Names, order and counts are fixed; no add/remove/rename or drag/drop is available.
 Manager displays preset names in English regardless of its system locale.
 Select a preset to choose its eligible model, edit **Steps** and **CFG Scale**
-and its optional positive/negative prefixes. Select **Editing** to choose the
+and its optional positive/negative prefixes, and choose how many **Identity
+portraits** (1, 2 or 4, default 1) Canvas generates with it. Select **Editing** to choose the
 editing model and its Steps/CFG (editing has no prefixes). Selecting a model
 snapshots its recommended values (shared defaults when absent); Save persists
 that pair, including manual reductions in steps. Catalogue refreshes never
@@ -96,14 +97,15 @@ or remove steps, then edit each step's English and French names, its LLM
 Mappings start unassigned and require explicit setup before Canvas can submit.
 Save waits for acknowledgment; Cancel discards all draft edits. Assigned models
 cannot be deleted or lose required capabilities until unassigned.
-Version-4 `models/model-routing.json` stores both English and French labels,
+Version-5 `models/model-routing.json` stores both English and French labels,
 each preset's and editing's model with Steps/CFG, and each preset's prompt flow
-(up to four LLM steps) atomically. Canvas chooses the system locale, falling back
+(up to four LLM steps) and identity portrait count atomically; versions 1–4 load
+with one identity portrait. Canvas chooses the system locale, falling back
 to English. Versions 1–3 stored Fast/Balanced/Quality tiers: they load with each
 preset's and editing's **Fast** (`-low`) tier as its assignment, dropping the
 other tiers and permanent flags; versions 1–2 load with empty prompt flows.
 Missing parameters are initialized from model recommendations, and the file is
-rewritten (as version 4) only on explicit Save.
+rewritten (as version 5) only on explicit Save.
 Legacy custom entries are not exposed in the fixed UI. Unreadable/malformed
 configuration is never overwritten. Deploy Service before updated Canvas.
 Legacy per-model style protocol/metadata remain compatible with older clients,

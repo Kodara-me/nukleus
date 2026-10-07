@@ -240,16 +240,17 @@ void ServiceTest::fixedRoutingLabelsAndLegacyMigration()
     migrated = KiraService::Protocol::modelRoutingFromJson(version2);
     QVERIFY(migrated.has_value());
     QVERIFY(migrated->presets[0].promptFlow.isEmpty());
+    QCOMPARE(migrated->presets[0].identityViews, 1);
     QCOMPARE(migrated->presets[0].model.modelId, QString("image-generation:photo-low"));
     QCOMPARE(KiraService::Protocol::modelRoutingFromJson(KiraService::Protocol::modelRoutingToJson(fixed)),
         std::optional<KiraService::ModelRouting>(fixed));
     auto withFlow = fixed;
     withFlow.presets[0].promptFlow = {{"enhance", "Enhance", "Améliorer", "llm-chat:chat.gguf", "Improve."}};
     const auto flowJson = KiraService::Protocol::modelRoutingToJson(withFlow);
-    QCOMPARE(flowJson.value("version").toInt(), 4);
+    QCOMPARE(flowJson.value("version").toInt(), 5);
     QCOMPARE(KiraService::Protocol::modelRoutingFromJson(flowJson), std::optional<KiraService::ModelRouting>(withFlow));
     QCOMPARE(withFlow.presets[0].promptFlow[0].displayLabel(QLocale("fr_CA")), QString("Améliorer"));
-    auto unknownVersion = flowJson; unknownVersion.insert("version", 5);
+    auto unknownVersion = flowJson; unknownVersion.insert("version", 6);
     QVERIFY(!KiraService::Protocol::modelRoutingFromJson(unknownVersion));
     auto missingFlow = flowJson;
     auto flowPresets = missingFlow.value("presets").toArray();
@@ -317,7 +318,7 @@ void ServiceTest::fixedRoutingLabelsAndLegacyMigration()
     QVERIFY(file.open(QIODevice::ReadOnly));
     const auto saved = QJsonDocument::fromJson(file.readAll()).object();
     file.close();
-    QCOMPARE(saved.value("version").toInt(), 4);
+    QCOMPARE(saved.value("version").toInt(), 5);
     QVERIFY(!saved.contains("editingQualities"));
     QCOMPARE(saved.value("presets").toArray()[0].toObject().value("steps").toInt(), 4);
 }

@@ -93,9 +93,31 @@ private slots:
         routing.presets[0].model = {"image-generation:photo.gguf", 30, 6.5};
         routing.editing = {"image-generation:edit.gguf", 12, 2.25};
         const auto json = KiraService::Protocol::modelRoutingToJson(routing);
-        QCOMPARE(json.value("version").toInt(), 4);
+        QCOMPARE(json.value("version").toInt(), 5);
         QVERIFY(!json.contains("editingQualities"));
         QCOMPARE(KiraService::Protocol::modelRoutingFromJson(json), std::optional(routing));
+        QCOMPARE(routing.presets[1].identityViews, 1); // Presets default to a single portrait.
+        routing.presets[0].identityViews = 4;
+        const auto viewsJson = KiraService::Protocol::modelRoutingToJson(routing);
+        QCOMPARE(viewsJson.value("presets").toArray()[0].toObject().value("identityViews").toInt(), 4);
+        QCOMPARE(KiraService::Protocol::modelRoutingFromJson(viewsJson), std::optional(routing));
+        auto version4 = viewsJson; // Version 4 predates identity views and loads with one.
+        version4.insert("version", 4);
+        QCOMPARE(KiraService::Protocol::modelRoutingFromJson(version4)->presets[0].identityViews, 1);
+        auto invalidViews = viewsJson;
+        auto viewPresets = invalidViews.value("presets").toArray();
+        auto viewPreset = viewPresets[0].toObject();
+        viewPreset.insert("identityViews", 3);
+        viewPresets[0] = viewPreset;
+        invalidViews.insert("presets", viewPresets);
+        QVERIFY(!KiraService::Protocol::modelRoutingFromJson(invalidViews));
+        viewPreset.remove("identityViews");
+        viewPresets[0] = viewPreset;
+        invalidViews.insert("presets", viewPresets);
+        QVERIFY(!KiraService::Protocol::modelRoutingFromJson(invalidViews));
+        routing.presets[0].identityViews = 3;
+        QVERIFY(!KiraService::Protocol::validateModelRouting(routing));
+        routing.presets[0].identityViews = 4;
         routing.editing.steps = 0;
         QVERIFY(!KiraService::Protocol::validateModelRouting(routing));
         routing.editing.steps = 12;

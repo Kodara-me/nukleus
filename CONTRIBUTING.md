@@ -68,7 +68,8 @@ selecting Editing shows Model/Steps/CFG only. Model changes initialize the pair
 from recommendations or shared defaults; catalogue refresh preserves it. Save
 persists manual values; Cancel discards them.
 
-Store version-4 JSON atomically beside model metadata. Versions 1–3 stored
+Store version-5 JSON atomically beside model metadata; each preset's
+`identityViews` (1, 2 or 4) defaults to 1 for versions 1–4. Versions 1–3 stored
 Fast/Balanced/Quality tiers; parsing keeps each group's Fast (`-low`) tier as its
 assignment and drops the rest. Version-1 parsing maps known preset IDs into the
 fixed catalogue and preserves prefixes; missing parameters are filled from

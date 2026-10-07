@@ -43,7 +43,8 @@ enum Role
     ModelRole,
     StepsRole,
     CfgRole,
-    FlowRole
+    FlowRole,
+    IdentityViewsRole
 };
 QStandardItem *entry(const QString &name, Kind kind, const QString &id = {})
 {
@@ -111,6 +112,7 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
         auto *item = entry(preset.name, Preset, preset.id);
         item->setData(preset.positivePrefix, PositiveRole);
         item->setData(preset.negativePrefix, NegativeRole);
+        item->setData(preset.identityViews, IdentityViewsRole);
         setAssignment(item, preset.model);
         m_generation->appendRow(item);
         QJsonArray flow;
@@ -154,10 +156,18 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
     form->addRow(tr("Steps:"), m_steps);
     form->addRow(tr("CFG Scale:"), m_cfg);
     assignmentLayout->addLayout(form);
-    // Editing has no prefixes, so it only shows the model form.
+    // Editing has no prefixes or identity views, so it only shows the model form.
     m_prefixes = new QWidget(assignment);
     auto *prefixLayout = new QVBoxLayout(m_prefixes);
     prefixLayout->setContentsMargins(0, 0, 0, 0);
+    m_identityViews = new QComboBox(m_prefixes);
+    m_identityViews->setObjectName("presetIdentityViews");
+    m_identityViews->addItem(tr("1 portrait"), 1);
+    m_identityViews->addItem(tr("2 portraits"), 2);
+    m_identityViews->addItem(tr("4 portraits"), 4);
+    auto *presetForm = new QFormLayout;
+    presetForm->addRow(tr("Identity portraits:"), m_identityViews);
+    prefixLayout->addLayout(presetForm);
     m_positive = new KiraUi::PlainTextEdit(m_prefixes);
     m_positive->setObjectName("presetPositive");
     m_negative = new KiraUi::PlainTextEdit(m_prefixes);
@@ -250,6 +260,11 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
         if (!m_showing)
             if (auto *item = selectedItem(); item && item->data(KindRole).toInt() == Preset)
                 item->setData(m_negative->toPlainText(), NegativeRole);
+    });
+    connect(m_identityViews, &QComboBox::currentIndexChanged, this, [this] {
+        if (!m_showing)
+            if (auto *item = selectedItem(); item && item->data(KindRole).toInt() == Preset)
+                item->setData(m_identityViews->currentData(), IdentityViewsRole);
     });
     connect(m_assignment, &QComboBox::currentIndexChanged, this, [this] {
         if (m_showing)
@@ -383,6 +398,8 @@ void ModelRoutingDialog::showSelection()
     m_flowSteps->clear(); // A newly selected flow starts at its first step.
     m_positive->setPlainText(kind == Preset ? item->data(PositiveRole).toString() : QString());
     m_negative->setPlainText(kind == Preset ? item->data(NegativeRole).toString() : QString());
+    m_identityViews->setCurrentIndex(
+        qMax(0, m_identityViews->findData(kind == Preset ? item->data(IdentityViewsRole).toInt() : 1)));
     refreshModels();
     m_showing = true;
     const auto defaults = KiraService::Protocol::defaultModelOptions("image-generation");
@@ -511,6 +528,7 @@ KiraService::ModelRouting ModelRoutingDialog::configuration() const
         auto &preset = routing.presets[row];
         preset.positivePrefix = item->data(PositiveRole).toString();
         preset.negativePrefix = item->data(NegativeRole).toString();
+        preset.identityViews = item->data(IdentityViewsRole).toInt();
         assignment(preset.model, item);
         for (int child = 0; child < item->rowCount(); ++child)
             if (item->child(child)->data(KindRole).toInt() == PromptFlow)

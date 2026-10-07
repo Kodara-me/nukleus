@@ -50,6 +50,7 @@ private:
     QWidget *m_prefixes;
     QPlainTextEdit *m_positive;
     QPlainTextEdit *m_negative;
+    QComboBox *m_identityViews;
     QComboBox *m_assignment;
     QSpinBox *m_steps;
     QDoubleSpinBox *m_cfg;

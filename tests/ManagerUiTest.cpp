@@ -199,7 +199,11 @@ class ManagerUiTest final : public QObject
         auto *steps = dialog.findChild<QSpinBox *>("routingSteps");
         auto *cfg = dialog.findChild<QDoubleSpinBox *>("routingCfg");
         auto *save = dialog.findChild<QPushButton *>("saveRouting");
+        auto *identityViews = dialog.findChild<QComboBox *>("presetIdentityViews");
         QVERIFY(positive->isVisible()); QVERIFY(negative->isVisible()); QVERIFY(assignment->isVisible());
+        QVERIFY(identityViews->isVisible());
+        QCOMPARE(identityViews->currentData().toInt(), 1);
+        identityViews->setCurrentIndex(identityViews->findData(4));
         positive->setPlainText("line one\nline two");
         QVERIFY(!steps->isEnabled()); QVERIFY(!cfg->isEnabled());
         QCOMPARE(assignment->currentData().toString(), QString());
@@ -278,7 +282,7 @@ class ManagerUiTest final : public QObject
         QVERIFY(save->isEnabled()); save->click();
         QTRY_VERIFY(m_messages.last().value("type") == "model-routing.configure");
         const auto sent = m_messages.last().value("routing").toObject();
-        QCOMPARE(sent.value("version").toInt(), 4);
+        QCOMPARE(sent.value("version").toInt(), 5);
         const auto presets = sent.value("presets").toArray();
         QCOMPARE(presets.size(), 2);
         const auto savedPreset = presets.first().toObject();
@@ -296,6 +300,8 @@ class ManagerUiTest final : public QObject
         QCOMPARE(flow[1].name, QString("Enhanced"));
         QCOMPARE(flow[1].instructions, QString("Translate to English."));
         QVERIFY(parsed->presets[0].promptFlow.isEmpty());
+        QCOMPARE(parsed->presets[0].identityViews, 4);
+        QCOMPARE(parsed->presets[1].identityViews, 1);
         QCOMPARE(parsed->presets[0].model.modelId, assignedModelId);
         QCOMPARE(parsed->presets[0].model.steps, std::optional<int>(4));
         QCOMPARE(parsed->presets[0].model.cfgScale, std::optional<double>(1.0));

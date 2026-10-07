@@ -39,6 +39,8 @@ struct GenerationPreset
     ModelAssignment model;
     QString nameFr = {};
     QList<PromptFlowStep> promptFlow = {};
+    // Number of identity portraits (1, 2 or 4) a client requests with this preset.
+    int identityViews = 1;
     QString displayLabel(const QLocale &locale = QLocale()) const
     {
         return locale.language() == QLocale::French && !nameFr.isEmpty() ? nameFr : name;
