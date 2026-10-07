@@ -9,20 +9,13 @@
 
 namespace KiraService
 {
-struct ModelQuality
+// A model with its saved Steps/CFG snapshot, assigned to a preset or to editing.
+struct ModelAssignment
 {
-    QString id;
-    QString name;
     QString modelId;
     std::optional<int> steps = {};
     std::optional<double> cfgScale = {};
-    QString nameFr = {};
-    bool permanent = false;
-    QString displayLabel(const QLocale &locale = QLocale()) const
-    {
-        return locale.language() == QLocale::French && !nameFr.isEmpty() ? nameFr : name;
-    }
-    bool operator==(const ModelQuality &) const = default;
+    bool operator==(const ModelAssignment &) const = default;
 };
 struct PromptFlowStep
 {
@@ -43,7 +36,7 @@ struct GenerationPreset
     QString name;
     QString positivePrefix;
     QString negativePrefix;
-    QList<ModelQuality> qualities;
+    ModelAssignment model;
     QString nameFr = {};
     QList<PromptFlowStep> promptFlow = {};
     QString displayLabel(const QLocale &locale = QLocale()) const
@@ -55,7 +48,7 @@ struct GenerationPreset
 struct ModelRouting
 {
     QList<GenerationPreset> presets;
-    QList<ModelQuality> editingQualities;
+    ModelAssignment editing;
     bool operator==(const ModelRouting &) const = default;
 };
 namespace Protocol

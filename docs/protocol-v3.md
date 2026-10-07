@@ -263,6 +263,12 @@ shell-quoted text for diagnosis; execution still uses QProcess argument lists.
 
 ### Preset prompt flows
 
+An `image.generate` with a `presetId` is routed: the service uses the preset's
+assigned model and fills omitted `steps`/`cfgScale` from its saved snapshot. An
+unassigned preset fails with `model-routing-unavailable`. Presets have no
+quality tiers; `qualityId` is not accepted. `image.edit` is never routed and
+rejects `presetId`; clients submit the editing assignment's `modelId`.
+
 A routed `image.generate` whose preset has a non-empty `promptFlow` runs its LLM
 steps in order inside the same job, before image generation. Every step must
 have an installed GGUF `llm-chat` model and `llama-completion` must be available;

@@ -44,7 +44,7 @@ bool validGenerationOptions(const QJsonObject &options)
 {
     const QStringList allowed{"modelId", "prompt", "negativePrompt", "width", "height",
         "steps", "cfgScale", "clipSkip", "seed", "sampler", "scheduler",
-        "hasInput", "inputCount", "baseImageStrength", "styleId", "presetId", "qualityId"};
+        "hasInput", "inputCount", "baseImageStrength", "styleId", "presetId"};
     for (const auto& key : options.keys())
         if (!allowed.contains(key)) return false;
     const auto optionalString = [&options](const QString &key) {
@@ -365,44 +365,33 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         return;
     }
     const ModelCategory category = (generate || edit) ? ModelCategory::ImageGeneration : ModelCategory::Upscaler;
-    const bool routed = options.contains("presetId") || options.contains("qualityId");
     std::optional<KiraService::GenerationPreset> preset;
-    std::optional<KiraService::ModelQuality> quality;
     PromptFlowRun flow;
-    if (routed) {
-        if ((!generate && !edit) || !options.value("qualityId").isString() || options.value("qualityId").toString().isEmpty()
-            || (generate && (!options.value("presetId").isString() || options.value("presetId").toString().isEmpty()))
-            || (edit && options.contains("presetId")) || !options.value("styleId").toString().isEmpty()
+    if (options.contains("presetId")) {
+        if (!generate || !options.value("presetId").isString() || options.value("presetId").toString().isEmpty()
+            || !options.value("styleId").toString().isEmpty()
             || (options.contains("styleId") && !options.value("styleId").isString())
             || (options.contains("modelId") && !options.value("modelId").isString())) {
-            sendError(socket, "invalid-request", tr("Invalid preset/quality selection"), jobId); return;
+            sendError(socket, "invalid-request", tr("Invalid preset selection"), jobId); return;
         }
         QString error;
         const auto routing = m_models->routing(&error);
         if (!routing) { sendError(socket, "model-routing-unavailable", error, jobId); return; }
-        QList<KiraService::ModelQuality> qualities = routing->editingQualities;
-        if (generate) {
-            for (const auto &p : routing->presets)
-                if (p.id == options.value("presetId").toString()) { preset = p; break; }
-            if (!preset) { sendError(socket, "model-routing-unavailable", tr("The preset is unavailable"), jobId); return; }
-            qualities = preset->qualities;
-        }
-        QString modelId;
-        for (const auto &q : qualities)
-            if (q.id == options.value("qualityId").toString()) { modelId = q.modelId; quality = q; break; }
-        if (modelId.isEmpty()) { sendError(socket, "model-routing-unavailable", tr("The quality has no assigned model"), jobId); return; }
+        for (const auto &p : routing->presets)
+            if (p.id == options.value("presetId").toString()) { preset = p; break; }
+        if (!preset) { sendError(socket, "model-routing-unavailable", tr("The preset is unavailable"), jobId); return; }
+        const QString modelId = preset->model.modelId;
+        if (modelId.isEmpty()) { sendError(socket, "model-routing-unavailable", tr("The preset has no assigned model"), jobId); return; }
         const auto supplied = options.value("modelId").toString();
         if (!supplied.isEmpty() && supplied != modelId) {
-            sendError(socket, "invalid-request", tr("The supplied model conflicts with the quality assignment"), jobId); return;
+            sendError(socket, "invalid-request", tr("The supplied model conflicts with the preset assignment"), jobId); return;
         }
         options.insert("modelId", modelId);
-        if (preset) {
-            if (options.contains("skipPromptFlow") && !options.value("skipPromptFlow").isBool()) {
-                sendError(socket, "invalid-request", tr("Invalid prompt flow option"), jobId); return;
-            }
-            flow.routed = true;
-            if (!options.take("skipPromptFlow").toBool() && !preparePromptFlow(socket, jobId, *preset, flow)) return;
+        if (options.contains("skipPromptFlow") && !options.value("skipPromptFlow").isBool()) {
+            sendError(socket, "invalid-request", tr("Invalid prompt flow option"), jobId); return;
         }
+        flow.routed = true;
+        if (!options.take("skipPromptFlow").toBool() && !preparePromptFlow(socket, jobId, *preset, flow)) return;
     }
     const std::optional<ModelInfo> model = m_models->model(category, options.value(QStringLiteral("modelId")).toString());
     if (!model.has_value()) { sendError(socket, QStringLiteral("model-unavailable"), tr("The requested model is unavailable"), jobId); return; }
@@ -426,9 +415,9 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
             tr("Reference images are only supported for image editing and generation without a base image"), jobId);
         return;
     }
-    if (quality) {
-        if (!options.contains("steps") && quality->steps) options.insert("steps", *quality->steps);
-        if (!options.contains("cfgScale") && quality->cfgScale) options.insert("cfgScale", *quality->cfgScale);
+    if (preset) {
+        if (!options.contains("steps") && preset->model.steps) options.insert("steps", *preset->model.steps);
+        if (!options.contains("cfgScale") && preset->model.cfgScale) options.insert("cfgScale", *preset->model.cfgScale);
     }
     if (options.contains("styleId") && (!options.value("styleId").isString()
         || (!generate && !options.value("styleId").toString().isEmpty()))) {

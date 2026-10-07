@@ -5,7 +5,6 @@
 #include <KiraUi/PrimaryButton.h>
 #include <KiraUi/TreeView.h>
 #include <QComboBox>
-#include <QCheckBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -32,7 +31,6 @@ enum Kind
     Generation,
     Editing,
     Preset,
-    Quality,
     PromptFlow
 };
 constexpr int MaximumFlowSteps = 4;
@@ -45,7 +43,6 @@ enum Role
     ModelRole,
     StepsRole,
     CfgRole,
-    PermanentRole,
     FlowRole
 };
 QStandardItem *entry(const QString &name, Kind kind, const QString &id = {})
@@ -55,6 +52,11 @@ QStandardItem *entry(const QString &name, Kind kind, const QString &id = {})
     item->setData(id, IdRole);
     item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
     return item;
+}
+// Presets and the Editing node each carry one model assignment.
+bool assignable(const QStandardItem *item)
+{
+    return item && (item->data(KindRole).toInt() == Preset || item->data(KindRole).toInt() == Editing);
 }
 
 } // namespace
@@ -80,18 +82,16 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
     m_model->appendRow(m_generation);
     m_model->appendRow(m_editing);
     const auto routing = client->modelRouting().value_or(KiraService::Protocol::starterModelRouting());
-    const auto appendQuality = [this](QStandardItem *parentItem, const KiraService::ModelQuality &quality) {
-        auto *item = entry(quality.name, Quality, quality.id);
-        item->setData(quality.modelId, ModelRole);
-        item->setData(quality.permanent, PermanentRole);
-        auto steps = quality.steps;
-        auto cfg = quality.cfgScale;
-        if (!quality.modelId.isEmpty())
+    const auto setAssignment = [this](QStandardItem *item, const KiraService::ModelAssignment &assignment) {
+        item->setData(assignment.modelId, ModelRole);
+        auto steps = assignment.steps;
+        auto cfg = assignment.cfgScale;
+        if (!assignment.modelId.isEmpty())
         {
             const auto defaults = KiraService::Protocol::defaultModelOptions("image-generation");
             QJsonObject options;
             for (const auto &model : m_client->models("image-generation"))
-                if (model.id == quality.modelId)
+                if (model.id == assignment.modelId)
                 {
                     options = model.recommendedOptions;
                     break;
@@ -105,17 +105,14 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
             item->setData(*steps, StepsRole);
         if (cfg)
             item->setData(*cfg, CfgRole);
-        parentItem->appendRow(item);
     };
     for (const auto &preset : routing.presets)
     {
         auto *item = entry(preset.name, Preset, preset.id);
         item->setData(preset.positivePrefix, PositiveRole);
         item->setData(preset.negativePrefix, NegativeRole);
+        setAssignment(item, preset.model);
         m_generation->appendRow(item);
-        for (const auto &quality : preset.qualities)
-            appendQuality(item, quality);
-        // The flow follows the fixed qualities so their rows keep stable positions.
         QJsonArray flow;
         for (const auto &step : preset.promptFlow)
             flow.append(QJsonObject{{"id", step.id},
@@ -127,53 +124,49 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
         item->appendRow(flowItem);
         setFlow(flowItem, flow);
     }
-    for (const auto &quality : routing.editingQualities)
-        appendQuality(m_editing, quality);
+    setAssignment(m_editing, routing.editing);
     m_tree->expandAll();
 
     m_editor = new QStackedWidget(splitter);
     auto *empty = new QLabel(
-        tr("Select a preset to edit its prefixes, a quality to choose its model, or a prompt flow to edit its steps."),
+        tr("Select a preset or Editing to choose its model and settings, or a prompt flow to edit its steps."),
         m_editor);
     empty->setWordWrap(true);
     empty->setAlignment(Qt::AlignCenter);
     m_editor->addWidget(empty);
-    auto *prefixes = new QWidget(m_editor);
-    auto *prefixLayout = new QVBoxLayout(prefixes);
-    prefixLayout->setContentsMargins(0, 0, 0, 0);
-    m_positive = new KiraUi::PlainTextEdit(prefixes);
-    m_positive->setObjectName("presetPositive");
-    m_negative = new KiraUi::PlainTextEdit(prefixes);
-    m_negative->setObjectName("presetNegative");
-    prefixLayout->addWidget(new QLabel(tr("Positive prefix"), prefixes));
-    prefixLayout->addWidget(m_positive, 1);
-    prefixLayout->addWidget(new QLabel(tr("Negative prefix"), prefixes));
-    prefixLayout->addWidget(m_negative, 1);
-    m_editor->addWidget(prefixes);
     auto *assignment = new QWidget(m_editor);
     auto *assignmentLayout = new QVBoxLayout(assignment);
     assignmentLayout->setContentsMargins(0, 0, 0, 0);
     m_assignment = new QComboBox(assignment);
-    m_assignment->setObjectName("qualityModel");
+    m_assignment->setObjectName("routingModel");
     m_assignment->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_assignment->setMinimumContentsLength(12);
     auto *form = new QFormLayout;
     form->addRow(tr("Model:"), m_assignment);
     m_steps = new QSpinBox(assignment);
-    m_steps->setObjectName("qualitySteps");
+    m_steps->setObjectName("routingSteps");
     m_steps->setRange(1, 200);
     m_cfg = new QDoubleSpinBox(assignment);
-    m_cfg->setObjectName("qualityCfg");
+    m_cfg->setObjectName("routingCfg");
     m_cfg->setRange(0, 100);
     m_cfg->setDecimals(4);
     m_cfg->setSingleStep(0.5);
     form->addRow(tr("Steps:"), m_steps);
     form->addRow(tr("CFG Scale:"), m_cfg);
-    m_permanent = new QCheckBox(tr("Permanent quality"), assignment);
-    m_permanent->setObjectName("qualityPermanent");
-    m_permanent->setToolTip(tr("Use this quality in Canvas and hide the quality slider for this group."));
-    form->addRow(m_permanent);
     assignmentLayout->addLayout(form);
+    // Editing has no prefixes, so it only shows the model form.
+    m_prefixes = new QWidget(assignment);
+    auto *prefixLayout = new QVBoxLayout(m_prefixes);
+    prefixLayout->setContentsMargins(0, 0, 0, 0);
+    m_positive = new KiraUi::PlainTextEdit(m_prefixes);
+    m_positive->setObjectName("presetPositive");
+    m_negative = new KiraUi::PlainTextEdit(m_prefixes);
+    m_negative->setObjectName("presetNegative");
+    prefixLayout->addWidget(new QLabel(tr("Positive prefix"), m_prefixes));
+    prefixLayout->addWidget(m_positive, 1);
+    prefixLayout->addWidget(new QLabel(tr("Negative prefix"), m_prefixes));
+    prefixLayout->addWidget(m_negative, 1);
+    assignmentLayout->addWidget(m_prefixes, 1);
     assignmentLayout->addStretch();
     m_editor->addWidget(assignment);
     auto *flowPage = new QWidget(m_editor);
@@ -262,7 +255,7 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
         if (m_showing)
             return;
         auto *item = selectedItem();
-        if (!item || item->data(KindRole).toInt() != Quality)
+        if (!assignable(item))
             return;
         const auto id = m_assignment->currentData().toString();
         item->setData(id, ModelRole);
@@ -287,12 +280,12 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
     });
     connect(m_steps, &QSpinBox::valueChanged, this, [this](int steps) {
         if (!m_showing)
-            if (auto *item = selectedItem(); item && item->data(KindRole).toInt() == Quality)
+            if (auto *item = selectedItem(); assignable(item))
                 item->setData(steps, StepsRole);
     });
     connect(m_cfg, &QDoubleSpinBox::valueChanged, this, [this](double cfg) {
         if (!m_showing)
-            if (auto *item = selectedItem(); item && item->data(KindRole).toInt() == Quality)
+            if (auto *item = selectedItem(); assignable(item))
                 item->setData(cfg, CfgRole);
     });
     connect(m_flowSteps, &QListWidget::currentRowChanged, this, [this](int row) {
@@ -343,17 +336,6 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
         showFlow(qMin(row, int(flow.size()) - 1));
     });
     connect(m_cancel, &QPushButton::clicked, this, &ModelRoutingDialog::reject);
-    connect(m_permanent, &QCheckBox::toggled, this, [this](bool checked) {
-        if (m_showing)
-            return;
-        auto *item = selectedItem();
-        if (!item || item->data(KindRole).toInt() != Quality)
-            return;
-        if (checked)
-            for (int row = 0; row < item->parent()->rowCount(); ++row)
-                item->parent()->child(row)->setData(false, PermanentRole);
-        item->setData(checked, PermanentRole);
-    });
     connect(m_save, &QPushButton::clicked, this, [this] {
         if (!m_client->configureModelRouting(configuration()))
         {
@@ -395,21 +377,22 @@ void ModelRoutingDialog::showSelection()
     m_showing = true;
     auto *item = selectedItem();
     const int kind = item ? item->data(KindRole).toInt() : -1;
-    m_editor->setCurrentIndex(kind == Preset ? 1 : kind == Quality ? 2 : kind == PromptFlow ? 3 : 0);
+    const bool model = assignable(item);
+    m_editor->setCurrentIndex(model ? 1 : kind == PromptFlow ? 2 : 0);
+    m_prefixes->setVisible(kind == Preset);
     m_flowSteps->clear(); // A newly selected flow starts at its first step.
     m_positive->setPlainText(kind == Preset ? item->data(PositiveRole).toString() : QString());
     m_negative->setPlainText(kind == Preset ? item->data(NegativeRole).toString() : QString());
     refreshModels();
     m_showing = true;
     const auto defaults = KiraService::Protocol::defaultModelOptions("image-generation");
-    m_steps->setValue(kind == Quality && item->data(StepsRole).isValid() ? item->data(StepsRole).toInt()
-                                                                         : defaults.value("steps").toInt());
-    m_cfg->setValue(kind == Quality && item->data(CfgRole).isValid() ? item->data(CfgRole).toDouble()
-                                                                     : defaults.value("cfgScale").toDouble());
-    const bool assigned = kind == Quality && !item->data(ModelRole).toString().isEmpty();
+    m_steps->setValue(model && item->data(StepsRole).isValid() ? item->data(StepsRole).toInt()
+                                                               : defaults.value("steps").toInt());
+    m_cfg->setValue(model && item->data(CfgRole).isValid() ? item->data(CfgRole).toDouble()
+                                                           : defaults.value("cfgScale").toDouble());
+    const bool assigned = model && !item->data(ModelRole).toString().isEmpty();
     m_steps->setEnabled(assigned);
     m_cfg->setEnabled(assigned);
-    m_permanent->setChecked(kind == Quality && item->data(PermanentRole).toBool());
     m_showing = false;
     updateActions();
 }
@@ -420,9 +403,9 @@ void ModelRoutingDialog::refreshModels()
     m_assignment->clear();
     m_assignment->addItem(tr("Unassigned"), QString());
     auto *item = selectedItem();
-    if (item && item->data(KindRole).toInt() == Quality)
+    if (assignable(item))
     {
-        const bool editing = item->parent() == m_editing;
+        const bool editing = item == m_editing;
         for (const auto &model : m_client->models("image-generation"))
             if (model.recommendedOptions.value(editing ? "canEdit" : "canGenerate").toBool(true))
                 m_assignment->addItem(model.displayLabel(), model.id);
@@ -513,20 +496,12 @@ void ModelRoutingDialog::editStep(const QString &key, const QString &value)
 KiraService::ModelRouting ModelRoutingDialog::configuration() const
 {
     auto routing = KiraService::Protocol::starterModelRouting();
-    const auto qualities = [](QList<KiraService::ModelQuality> &result, const QStandardItem *parent) {
-        for (int row = 0; row < result.size(); ++row)
-        {
-            const auto *item = parent->child(row);
-            if (!item)
-                continue;
-            auto &q = result[row];
-            q.modelId = item->data(ModelRole).toString();
-            q.permanent = item->data(PermanentRole).toBool();
-            if (item->data(StepsRole).isValid())
-                q.steps = item->data(StepsRole).toInt();
-            if (item->data(CfgRole).isValid())
-                q.cfgScale = item->data(CfgRole).toDouble();
-        }
+    const auto assignment = [](KiraService::ModelAssignment &a, const QStandardItem *item) {
+        a.modelId = item->data(ModelRole).toString();
+        if (item->data(StepsRole).isValid())
+            a.steps = item->data(StepsRole).toInt();
+        if (item->data(CfgRole).isValid())
+            a.cfgScale = item->data(CfgRole).toDouble();
     };
     for (int row = 0; row < routing.presets.size(); ++row)
     {
@@ -536,7 +511,7 @@ KiraService::ModelRouting ModelRoutingDialog::configuration() const
         auto &preset = routing.presets[row];
         preset.positivePrefix = item->data(PositiveRole).toString();
         preset.negativePrefix = item->data(NegativeRole).toString();
-        qualities(preset.qualities, item);
+        assignment(preset.model, item);
         for (int child = 0; child < item->rowCount(); ++child)
             if (item->child(child)->data(KindRole).toInt() == PromptFlow)
                 for (const auto &value : item->child(child)->data(FlowRole).toJsonArray())
@@ -547,7 +522,7 @@ KiraService::ModelRouting ModelRoutingDialog::configuration() const
                                               step.value("instructions").toString()});
                 }
     }
-    qualities(routing.editingQualities, m_editing);
+    assignment(routing.editing, m_editing);
     return routing;
 }
 

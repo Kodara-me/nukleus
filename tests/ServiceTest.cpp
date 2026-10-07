@@ -124,7 +124,8 @@ void ServiceTest::persistsAndProtectsModelRouting()
     QVERIFY2(routing.has_value(), qPrintable(error));
     QCOMPARE(routing->presets.size(), 2);
     QCOMPARE(routing->presets.first().name, QString("Photorealism"));
-    QCOMPARE(routing->presets.first().qualities.size(), 3);
+    QVERIFY(routing->presets.first().model.modelId.isEmpty());
+    QVERIFY(routing->editing.modelId.isEmpty());
     QVERIFY(routing->presets.first().positivePrefix.isEmpty());
     QVERIFY(!QFileInfo::exists(directory.filePath("model-routing.json")));
     QFile model(directory.filePath("test.gguf"));
@@ -133,15 +134,16 @@ void ServiceTest::persistsAndProtectsModelRouting()
     auto options = KiraService::Protocol::defaultModelOptions("image-generation");
     options.insert("steps", 37); options.insert("cfgScale", 5.75);
     QVERIFY2(catalog.configure(id, options, &error, {}, "Test"), qPrintable(error));
-    routing->presets[0].qualities[0].modelId = id;
-    routing->presets[0].qualities[1].modelId = id;
-    routing->editingQualities[1].modelId = id;
+    routing->presets[0].model.modelId = id;
+    routing->presets[1].model.modelId = id;
+    routing->editing.modelId = id;
     QVERIFY2(catalog.configureRouting(*routing, &error), qPrintable(error));
     routing = catalog.routing(&error);
-    QCOMPARE(routing->presets[0].qualities[0].steps, std::optional<int>(37));
-    QCOMPARE(routing->presets[0].qualities[0].cfgScale, std::optional<double>(5.75));
-    routing->presets[0].qualities[0].steps = 4;
-    routing->presets[0].qualities[0].cfgScale = 1.0;
+    QCOMPARE(routing->presets[0].model.steps, std::optional<int>(37));
+    QCOMPARE(routing->presets[0].model.cfgScale, std::optional<double>(5.75));
+    QCOMPARE(routing->editing.steps, std::optional<int>(37));
+    routing->presets[0].model.steps = 4;
+    routing->presets[0].model.cfgScale = 1.0;
     QVERIFY(catalog.configureRouting(*routing, &error));
     QCOMPARE(catalog.routing(), routing);
     QVERIFY(!catalog.remove(id, &error));
@@ -166,12 +168,12 @@ void ServiceTest::persistsAndProtectsModelRouting()
     QVERIFY(catalog.configureRouting(*routing, &error));
     QVERIFY2(catalog.remove(llmId, &error), qPrintable(error));
     auto invalid = *routing;
-    invalid.editingQualities[0].name = "Medium";
+    invalid.presets[0].name = "Renamed";
     QVERIFY(!catalog.configureRouting(invalid, &error));
-    invalid = *routing; invalid.presets[0].qualities[0].modelId = "image-generation:missing.gguf";
+    invalid = *routing; invalid.presets[0].model.modelId = "image-generation:missing.gguf";
     QVERIFY(!catalog.configureRouting(invalid, &error));
-    invalid = *routing; invalid.editingQualities[0].id = invalid.presets[0].id;
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    invalid = *routing; invalid.editing.modelId = "image-generation:missing.gguf";
+    QVERIFY(!catalog.configureRouting(invalid, &error));
     QVERIFY(model.remove());
     QCOMPARE(catalog.routing(), routing); // External disappearance preserves the assignment.
     QVERIFY(!catalog.configureRouting({}, &error));
@@ -205,51 +207,50 @@ void ServiceTest::fixedRoutingLabelsAndLegacyMigration()
     QCOMPARE(fixed.presets[0].displayLabel(QLocale("fr_CA")), QString("Photoréalisme"));
     QCOMPARE(fixed.presets[0].displayLabel(QLocale("en_US")), QString("Photorealism"));
     QCOMPARE(fixed.presets[1].displayLabel(QLocale("fr_FR")), QString("Illustration"));
-    QCOMPARE(fixed.presets[0].qualities[0].displayLabel(QLocale("fr_CA")), QString("Rapide"));
-    QCOMPARE(fixed.presets[0].qualities[1].displayLabel(QLocale("fr_CA")), QString("Équilibré"));
-    QCOMPARE(fixed.presets[0].qualities[2].displayLabel(QLocale("en_US")), QString("Quality"));
-    auto previousLabels = fixed;
-    previousLabels.presets[0].positivePrefix = "saved prefix";
-    previousLabels.presets[0].negativePrefix = "saved negative";
-    const QStringList oldEnglish{"Low — faster", "Medium", "High — slower"};
-    const QStringList oldFrench{"Basse — plus rapide", "Moyenne", "Haute — plus lente"};
-    const auto oldNames = [&](QList<KiraService::ModelQuality> &qualities) {
-        for (int i = 0; i < qualities.size(); ++i) {
-            qualities[i].name = oldEnglish[i]; qualities[i].nameFr = oldFrench[i];
-            qualities[i].modelId = "image-generation:existing.gguf";
-            qualities[i].steps = 4 + i; qualities[i].cfgScale = 1.25 + i;
-        }
+    // Versions 2 and 3 stored Fast/Balanced/Quality tiers; only the Fast tier carries over.
+    const auto tiers = [](const QString &prefix, const QString &model) {
+        QJsonArray list;
+        const QStringList levels{"low", "medium", "high"};
+        for (int i = 0; i < levels.size(); ++i)
+            list.append(QJsonObject{{"id", prefix + "-" + levels[i]}, {"name", levels[i]}, {"nameFr", levels[i]},
+                                    {"modelId", model + levels[i]}, {"permanent", i == 1},
+                                    {"steps", 4 + i}, {"cfgScale", 1.25 + i}});
+        return list;
     };
-    for (auto &preset : previousLabels.presets) oldNames(preset.qualities);
-    oldNames(previousLabels.editingQualities);
-    const auto renamed = KiraService::Protocol::modelRoutingFromJson(KiraService::Protocol::modelRoutingToJson(previousLabels));
-    QVERIFY(renamed.has_value());
-    QCOMPARE(renamed->presets[0].positivePrefix, previousLabels.presets[0].positivePrefix);
-    QCOMPARE(renamed->presets[0].negativePrefix, previousLabels.presets[0].negativePrefix);
-    const auto checkRenamed = [&](const QList<KiraService::ModelQuality> &actual,
-        const QList<KiraService::ModelQuality> &old, const QList<KiraService::ModelQuality> &labels) {
-        for (int i = 0; i < actual.size(); ++i) {
-            QCOMPARE(actual[i].id, old[i].id);
-            QCOMPARE(actual[i].modelId, old[i].modelId);
-            QCOMPARE(actual[i].steps, old[i].steps);
-            QCOMPARE(actual[i].cfgScale, old[i].cfgScale);
-            QCOMPARE(actual[i].name, labels[i].name);
-            QCOMPARE(actual[i].nameFr, labels[i].nameFr);
-        }
-    };
-    for (int i = 0; i < renamed->presets.size(); ++i)
-        checkRenamed(renamed->presets[i].qualities, previousLabels.presets[i].qualities, fixed.presets[i].qualities);
-    checkRenamed(renamed->editingQualities, previousLabels.editingQualities, fixed.editingQualities);
+    const QJsonObject tiered{{"version", 3},
+        {"presets", QJsonArray{
+            QJsonObject{{"id", "photorealism"}, {"name", "Photorealism"}, {"nameFr", "Photoréalisme"},
+                        {"positivePrefix", "saved prefix"}, {"negativePrefix", "saved negative"},
+                        {"qualities", tiers("photo", "image-generation:photo-")},
+                        {"promptFlow", QJsonArray{QJsonObject{{"id", "enhance"}, {"name", "Enhance"},
+                            {"nameFr", "Améliorer"}, {"modelId", "llm-chat:chat.gguf"}, {"instructions", "Improve."}}}}},
+            QJsonObject{{"id", "illustration"}, {"name", "Illustration"}, {"nameFr", "Illustration"},
+                        {"positivePrefix", ""}, {"negativePrefix", ""},
+                        {"qualities", tiers("illustration", "image-generation:drawn-")}, {"promptFlow", QJsonArray{}}}}},
+        {"editingQualities", tiers("edit", "image-generation:edit-")}};
+    auto migrated = KiraService::Protocol::modelRoutingFromJson(tiered);
+    QVERIFY(migrated.has_value());
+    QCOMPARE(migrated->presets[0].positivePrefix, QString("saved prefix"));
+    QCOMPARE(migrated->presets[0].negativePrefix, QString("saved negative"));
+    QCOMPARE(migrated->presets[0].model, (KiraService::ModelAssignment{"image-generation:photo-low", 4, 1.25}));
+    QCOMPARE(migrated->presets[1].model, (KiraService::ModelAssignment{"image-generation:drawn-low", 4, 1.25}));
+    QCOMPARE(migrated->editing, (KiraService::ModelAssignment{"image-generation:edit-low", 4, 1.25}));
+    QCOMPARE(migrated->presets[0].promptFlow.size(), 1);
+    auto version2 = tiered; version2.insert("version", 2); // Earlier versions load with empty flows.
+    migrated = KiraService::Protocol::modelRoutingFromJson(version2);
+    QVERIFY(migrated.has_value());
+    QVERIFY(migrated->presets[0].promptFlow.isEmpty());
+    QCOMPARE(migrated->presets[0].model.modelId, QString("image-generation:photo-low"));
     QCOMPARE(KiraService::Protocol::modelRoutingFromJson(KiraService::Protocol::modelRoutingToJson(fixed)),
         std::optional<KiraService::ModelRouting>(fixed));
     auto withFlow = fixed;
     withFlow.presets[0].promptFlow = {{"enhance", "Enhance", "Améliorer", "llm-chat:chat.gguf", "Improve."}};
     const auto flowJson = KiraService::Protocol::modelRoutingToJson(withFlow);
-    QCOMPARE(flowJson.value("version").toInt(), 3);
+    QCOMPARE(flowJson.value("version").toInt(), 4);
     QCOMPARE(KiraService::Protocol::modelRoutingFromJson(flowJson), std::optional<KiraService::ModelRouting>(withFlow));
     QCOMPARE(withFlow.presets[0].promptFlow[0].displayLabel(QLocale("fr_CA")), QString("Améliorer"));
-    auto version2 = flowJson; version2.insert("version", 2); // Earlier versions load with empty flows.
-    QCOMPARE(KiraService::Protocol::modelRoutingFromJson(version2), std::optional<KiraService::ModelRouting>(fixed));
+    auto unknownVersion = flowJson; unknownVersion.insert("version", 5);
+    QVERIFY(!KiraService::Protocol::modelRoutingFromJson(unknownVersion));
     auto missingFlow = flowJson;
     auto flowPresets = missingFlow.value("presets").toArray();
     auto flowPreset = flowPresets[1].toObject(); flowPreset.remove("promptFlow"); flowPresets[1] = flowPreset;
@@ -269,17 +270,16 @@ void ServiceTest::fixedRoutingLabelsAndLegacyMigration()
     QVERIFY(KiraService::Protocol::validateModelRouting(invalidFlow));
     auto invalid = fixed; invalid.presets.swapItemsAt(0, 1);
     QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
-    invalid = fixed; invalid.presets[0].qualities.append(invalid.presets[0].qualities.first());
+    invalid = fixed; invalid.presets[0].model.steps = 201;
     QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
-    invalid = fixed; invalid.editingQualities[0].steps = 0;
+    invalid = fixed; invalid.editing.steps = 0;
     QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
-    invalid = fixed; invalid.editingQualities[0].cfgScale = 101;
+    invalid = fixed; invalid.editing.cfgScale = 101;
     QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
     for (const QJsonValue bad : {QJsonValue(1.5), QJsonValue("4"), QJsonValue(false)}) {
         auto json = KiraService::Protocol::modelRoutingToJson(fixed);
-        auto qualities = json.value("editingQualities").toArray();
-        auto quality = qualities[0].toObject(); quality.insert("steps", bad); qualities[0] = quality;
-        json.insert("editingQualities", qualities);
+        auto editing = json.value("editing").toObject(); editing.insert("steps", bad);
+        json.insert("editing", editing);
         QVERIFY(!KiraService::Protocol::modelRoutingFromJson(json));
     }
     QTemporaryDir directory;
@@ -292,8 +292,9 @@ void ServiceTest::fixedRoutingLabelsAndLegacyMigration()
     QVERIFY2(catalog.configure("image-generation:legacy.gguf", options, &error, {}, "Legacy"), qPrintable(error));
     const QJsonObject legacy{{"version", 1}, {"presets", QJsonArray{QJsonObject{
         {"id", "photorealism"}, {"name", "Old name"}, {"positivePrefix", "realism"}, {"negativePrefix", "cartoon"},
-        {"qualities", QJsonArray{QJsonObject{{"id", "photo-medium"}, {"name", "Medium"}, {"modelId", "image-generation:legacy.gguf"}}}}}}},
-        {"editingQualities", QJsonArray{QJsonObject{{"id", "edit-medium"}, {"name", "Medium"}, {"modelId", "image-generation:legacy.gguf"}}}}};
+        {"qualities", QJsonArray{QJsonObject{{"id", "photo-low"}, {"name", "Low"}, {"modelId", "image-generation:legacy.gguf"}},
+                                 QJsonObject{{"id", "photo-medium"}, {"name", "Medium"}, {"modelId", "image-generation:other.gguf"}}}}}}},
+        {"editingQualities", QJsonArray{QJsonObject{{"id", "edit-low"}, {"name", "Low"}, {"modelId", "image-generation:legacy.gguf"}}}}};
     QFile file(directory.filePath("model-routing.json"));
     const auto bytes = QJsonDocument(legacy).toJson();
     QVERIFY(file.open(QIODevice::WriteOnly)); file.write(bytes); file.close();
@@ -302,43 +303,23 @@ void ServiceTest::fixedRoutingLabelsAndLegacyMigration()
     QCOMPARE(upgraded->presets.size(), 2);
     QCOMPARE(upgraded->presets[0].nameFr, QString("Photoréalisme"));
     QCOMPARE(upgraded->presets[0].positivePrefix, QString("realism"));
-    QCOMPARE(upgraded->presets[0].qualities[1].steps, std::optional<int>(37));
-    QCOMPARE(upgraded->editingQualities[1].cfgScale, std::optional<double>(5.75));
-    QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), bytes); file.close();
-    upgraded->presets[0].qualities[1].steps = 4;
+    QCOMPARE(upgraded->presets[0].model.modelId, QString("image-generation:legacy.gguf"));
+    QCOMPARE(upgraded->presets[0].model.steps, std::optional<int>(37));
+    QVERIFY(upgraded->presets[1].model.modelId.isEmpty());
+    QCOMPARE(upgraded->editing.cfgScale, std::optional<double>(5.75));
+    QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), bytes); file.close(); // Reading never rewrites.
+    upgraded->presets[0].model.steps = 4;
     QVERIFY(catalog.configureRouting(*upgraded, &error));
     options.insert("steps", 88); options.insert("cfgScale", 9.25);
     QVERIFY(catalog.configure("image-generation:legacy.gguf", options, &error, {}, "Legacy"));
-    QCOMPARE(catalog.routing()->presets[0].qualities[1].steps, std::optional<int>(4));
-    QCOMPARE(catalog.routing()->editingQualities[1].steps, std::optional<int>(37));
-    QVERIFY(file.open(QIODevice::ReadOnly));
-    QCOMPARE(QJsonDocument::fromJson(file.readAll()).object().value("version").toInt(), 3);
-    file.close();
-    // Renaming previous version-2 labels is read-only and preserves saved values.
-    auto oldSaved = *catalog.routing();
-    for (auto &preset : oldSaved.presets)
-        for (int i = 0; i < preset.qualities.size(); ++i) {
-            preset.qualities[i].name = oldEnglish[i]; preset.qualities[i].nameFr = oldFrench[i];
-        }
-    for (int i = 0; i < oldSaved.editingQualities.size(); ++i) {
-        oldSaved.editingQualities[i].name = oldEnglish[i]; oldSaved.editingQualities[i].nameFr = oldFrench[i];
-    }
-    const auto savedBytes = QJsonDocument(KiraService::Protocol::modelRoutingToJson(oldSaved)).toJson();
-    QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate)); file.write(savedBytes); file.close();
-    const auto restored = catalog.routing(&error);
-    QVERIFY2(restored.has_value(), qPrintable(error));
-    QCOMPARE(restored->presets[0].qualities[1].name, QString("Balanced"));
-    QCOMPARE(restored->presets[0].qualities[1].steps, std::optional<int>(4));
-    QCOMPARE(restored->editingQualities[1].steps, std::optional<int>(37));
-    QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), savedBytes); file.close();
-    QVERIFY(catalog.configureRouting(*restored, &error));
+    QCOMPARE(catalog.routing()->presets[0].model.steps, std::optional<int>(4));
+    QCOMPARE(catalog.routing()->editing.steps, std::optional<int>(37));
     QVERIFY(file.open(QIODevice::ReadOnly));
     const auto saved = QJsonDocument::fromJson(file.readAll()).object();
-    const auto balanced = saved.value("presets").toArray()[0].toObject().value("qualities").toArray()[1].toObject();
-    QCOMPARE(balanced.value("name").toString(), QString("Balanced"));
-    QCOMPARE(balanced.value("nameFr").toString(), QString("Équilibré"));
-    QCOMPARE(balanced.value("id").toString(), QString("photo-medium"));
-    QCOMPARE(balanced.value("steps").toInt(), 4);
+    file.close();
+    QCOMPARE(saved.value("version").toInt(), 4);
+    QVERIFY(!saved.contains("editingQualities"));
+    QCOMPARE(saved.value("presets").toArray()[0].toObject().value("steps").toInt(), 4);
 }
 
 void ServiceTest::configuresModelRoutingThroughSdk()
@@ -917,14 +898,10 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     auto routing = KiraService::Protocol::starterModelRouting();
     routing.presets[0].positivePrefix = "  realism  ";
     routing.presets[0].negativePrefix = "  cartoon  ";
-    routing.presets[0].qualities[1].modelId = "image-generation:plain.gguf";
-    routing.presets[0].qualities[1].steps = 4;
-    routing.presets[0].qualities[1].cfgScale = 1.0;
-    routing.editingQualities[1].modelId = "image-generation:edit.gguf";
-    routing.editingQualities[1].steps = 12;
-    routing.editingQualities[1].cfgScale = 2.25;
+    routing.presets[0].model = {"image-generation:plain.gguf", 4, 1.0};
+    routing.editing = {"image-generation:edit.gguf", 12, 2.25};
     QVERIFY(styleCatalog.configureRouting(routing, &error));
-    const QJsonObject routed{{"presetId", "photorealism"}, {"qualityId", "photo-medium"},
+    const QJsonObject routed{{"presetId", "photorealism"},
         {"prompt", "  subject  "}, {"negativePrompt", "  noise  "}, {"hasInput", true}};
     messages.clear(); send("routing-snapshot", routed);
     const auto requestedUpload = [&](const QString &id) {
@@ -934,9 +911,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     };
     QTRY_VERIFY(requestedUpload("routing-snapshot"));
     routing.presets[0].positivePrefix = "changed";
-    routing.presets[0].qualities[1].modelId = "image-generation:model.gguf";
-    routing.presets[0].qualities[1].steps = 50;
-    routing.presets[0].qualities[1].cfgScale = 8.0;
+    routing.presets[0].model = {"image-generation:model.gguf", 50, 8.0};
     QVERIFY(styleCatalog.configureRouting(routing, &error));
     socket.sendBinaryMessage(image);
     QTRY_VERIFY(terminal("routing-snapshot"));
@@ -949,7 +924,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(args.value(args.indexOf("--negative-prompt") + 1), QString("cartoon, noise"));
     QCOMPARE(args.value(args.indexOf("--model") + 1), QDir(root).filePath("plain.gguf"));
     for (const auto &field : QList<QPair<QString, QJsonValue>>{
-        {"prompt", " "}, {"qualityId", ""}, {"qualityId", 42}, {"presetId", false},
+        {"prompt", " "}, {"qualityId", "photo-medium"}, {"presetId", ""}, {"presetId", false},
         {"presetId", "missing"}, {"styleId", "cinematic"}, {"modelId", "image-generation:plain.gguf"},
         {"steps", 0}, {"cfgScale", 101}}) {
         auto invalidRoute = routed; invalidRoute.insert(field.first, field.second);
@@ -957,24 +932,16 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
         QTRY_VERIFY(terminal("invalid-route"));
         QCOMPARE(messages.last().value("type").toString(), QString("error"));
     }
-    messages.clear();
-    socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
-        {"type", "submit"}, {"operation", "image.edit"}, {"jobId", "routed-edit"},
-        {"options", QJsonObject{{"qualityId", "edit-medium"}, {"prompt", "change background"}, {"hasInput", true}}}}).toJson()));
-    QTRY_VERIFY(requestedUpload("routed-edit"));
-    routing.editingQualities[1].modelId = "image-generation:plain.gguf";
-    routing.editingQualities[1].steps = 50;
-    routing.editingQualities[1].cfgScale = 8.0;
-    QVERIFY(styleCatalog.configureRouting(routing, &error));
-    socket.sendBinaryMessage(image);
-    QTRY_VERIFY(terminal("routed-edit"));
-    ++completed;
-    QTRY_COMPARE(images.count(), completed);
-    args = arguments();
-    QCOMPARE(args.value(args.indexOf("--prompt") + 1), QString("change background"));
-    QCOMPARE(args.value(args.indexOf("--steps") + 1), QString("12"));
-    QCOMPARE(args.value(args.indexOf("--cfg-scale") + 1), QString("2.25"));
-    QCOMPARE(args.value(args.indexOf("--model") + 1), QDir(root).filePath("edit.gguf"));
+    // Editing is unrouted: clients submit the editing assignment's model directly.
+    for (const auto &field : QList<QPair<QString, QJsonValue>>{{"qualityId", "edit-medium"}, {"presetId", "photorealism"}}) {
+        messages.clear();
+        socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+            {"type", "submit"}, {"operation", "image.edit"}, {"jobId", "routed-edit"},
+            {"options", QJsonObject{{"modelId", "image-generation:edit.gguf"}, {field.first, field.second},
+                                    {"prompt", "change background"}, {"hasInput", true}}}}).toJson()));
+        QTRY_VERIFY(terminal("routed-edit"));
+        QCOMPARE(messages.last().value("code").toString(), QString("invalid-request"));
+    }
     QVERIFY(styleCatalog.configureRouting(KiraService::Protocol::starterModelRouting(), &error));
 
     QVERIFY(executable.open(QIODevice::WriteOnly | QIODevice::Truncate));
@@ -1452,7 +1419,7 @@ void ServiceTest::runsPresetPromptFlowBeforeGeneration()
         KiraService::Protocol::defaultModelOptions("llm-chat"), &error), qPrintable(error));
     auto routing = KiraService::Protocol::starterModelRouting();
     routing.presets[1].positivePrefix = "illustration";
-    routing.presets[1].qualities[1].modelId = "image-generation:image.gguf";
+    routing.presets[1].model.modelId = "image-generation:image.gguf";
     routing.presets[1].promptFlow = {{"enhance", "Enhance", "Améliorer", "llm-chat:chat.gguf", "Translate to English."},
                                      {"specialist", "Specialist", "Spécialiste", "llm-chat:chat.gguf", ""}};
     QVERIFY2(catalog.configureRouting(routing, &error), qPrintable(error));
@@ -1472,7 +1439,6 @@ void ServiceTest::runsPresetPromptFlowBeforeGeneration()
     KiraService::ImageGenerationRequest request;
     request.prompt = "  un chat roux  ";
     request.presetId = "illustration";
-    request.qualityId = "illustration-medium";
     request.width = 512; request.height = 512;
     const auto read = [&](const QString &name) {
         QFile file(directory.filePath(name));

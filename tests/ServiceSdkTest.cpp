@@ -87,29 +87,23 @@ class ServiceSdkTest final : public QObject
 {
     Q_OBJECT
 private slots:
-    void permanentQualityRoutingValidation()
+    void presetAndEditingAssignmentValidation()
     {
         auto routing = KiraService::Protocol::starterModelRouting();
-        routing.editingQualities[0].permanent = true;
-        routing.presets[0].qualities[1].permanent = true;
-        routing.presets[1].qualities[2].permanent = true;
+        routing.presets[0].model = {"image-generation:photo.gguf", 30, 6.5};
+        routing.editing = {"image-generation:edit.gguf", 12, 2.25};
         const auto json = KiraService::Protocol::modelRoutingToJson(routing);
+        QCOMPARE(json.value("version").toInt(), 4);
+        QVERIFY(!json.contains("editingQualities"));
         QCOMPARE(KiraService::Protocol::modelRoutingFromJson(json), std::optional(routing));
-        routing.editingQualities[1].permanent = true;
+        routing.editing.steps = 0;
         QVERIFY(!KiraService::Protocol::validateModelRouting(routing));
-        QVERIFY(!KiraService::Protocol::modelRoutingFromJson(KiraService::Protocol::modelRoutingToJson(routing)));
-        routing.editingQualities[1].permanent = false;
-        routing.presets[0].qualities[0].permanent = true;
+        routing.editing.steps = 12;
+        routing.presets[1].model.cfgScale = 101;
         QVERIFY(!KiraService::Protocol::validateModelRouting(routing));
-        auto oldJson = KiraService::Protocol::modelRoutingToJson(KiraService::Protocol::starterModelRouting());
-        auto editing = oldJson.value("editingQualities").toArray();
-        auto quality = editing[0].toObject();
-        quality.remove("permanent"); editing[0] = quality;
-        oldJson.insert("editingQualities", editing);
-        QVERIFY(KiraService::Protocol::modelRoutingFromJson(oldJson));
-        quality.insert("permanent", "true"); editing[0] = quality;
-        oldJson.insert("editingQualities", editing);
-        QVERIFY(!KiraService::Protocol::modelRoutingFromJson(oldJson));
+        auto missing = json;
+        missing.remove("editing");
+        QVERIFY(!KiraService::Protocol::modelRoutingFromJson(missing));
     }
     void validatesPromptStyles();
     void configuresAndCancelsModels();

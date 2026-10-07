@@ -91,7 +91,6 @@ struct ImageGenerationRequest
     QString modelId;
     QString styleId;
     QString presetId;
-    QString qualityId;
     // Submit the prompts as the preset's final prompts, bypassing its prompt flow.
     bool skipPromptFlow = false;
 };

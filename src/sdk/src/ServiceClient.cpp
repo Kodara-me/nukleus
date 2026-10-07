@@ -205,8 +205,7 @@ bool ServiceClient::deleteModel(const QString &id)
 
 QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
 {
-    if ((!request.presetId.isEmpty() || !request.qualityId.isEmpty())
-        && (!m_capabilities.modelRouting || request.presetId.isEmpty() || request.qualityId.isEmpty() || !request.styleId.isEmpty())) return {};
+    if (!request.presetId.isEmpty() && (!m_capabilities.modelRouting || !request.styleId.isEmpty())) return {};
     if (!request.referenceImages.isEmpty() && (!request.baseImageData.isEmpty() || request.referenceImages.size() > 8
         || request.referenceImages.contains(QByteArray()))) return {};
     QJsonObject options{{QStringLiteral("prompt"), request.prompt},
@@ -224,7 +223,6 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
                               {QStringLiteral("modelId"), request.modelId}};
     if (!request.styleId.isEmpty()) options.insert("styleId", request.styleId);
     if (!request.presetId.isEmpty()) options.insert("presetId", request.presetId);
-    if (!request.qualityId.isEmpty()) options.insert("qualityId", request.qualityId);
     if (request.skipPromptFlow) options.insert("skipPromptFlow", true);
     if (!request.referenceImages.isEmpty()) {
         options.insert("inputCount", int(request.referenceImages.size()));
@@ -235,14 +233,12 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
 
 QString ServiceClient::submitEdit(const ImageGenerationRequest &request)
 {
-    if (!request.styleId.isEmpty() || !request.presetId.isEmpty()
-        || (!request.qualityId.isEmpty() && !m_capabilities.modelRouting)) return {};
+    if (!request.styleId.isEmpty() || !request.presetId.isEmpty()) return {};
     if (request.editImages.isEmpty() || request.editImages.size() > 8 || request.editImages.contains(QByteArray()) || request.prompt.trimmed().isEmpty()) return {};
     QJsonObject options{{"modelId", request.modelId}, {"inputCount", int(request.editImages.size())}, {"prompt", request.prompt},
          {"width", request.width}, {"height", request.height}, {"steps", request.steps},
          {"cfgScale", request.cfgScale}, {"sampler", request.sampler},
          {"scheduler", request.scheduler}, {"clipSkip", request.clipSkip}};
-    if (!request.qualityId.isEmpty()) options.insert("qualityId", request.qualityId);
     return submit(ImageOperation::Edit, options, request.editImages);
 }
 
@@ -303,14 +299,9 @@ QString ServiceClient::runPromptFlow(const PromptFlowRequest& request)
 QString ServiceClient::submit(ImageOperation operation, const QJsonObject &options, const QList<QByteArray> &inputImages)
 {
     QString modelId = options.value("modelId").toString();
-    if (modelId.isEmpty() && m_routing && options.contains("qualityId")) {
-        QList<ModelQuality> qualities = m_routing->editingQualities;
-        if (operation == ImageOperation::Generate)
-            for (const auto &preset : m_routing->presets)
-                if (preset.id == options.value("presetId").toString()) { qualities = preset.qualities; break; }
-        for (const auto &quality : qualities)
-            if (quality.id == options.value("qualityId").toString()) { modelId = quality.modelId; break; }
-    }
+    if (modelId.isEmpty() && m_routing && operation == ImageOperation::Generate && options.contains("presetId"))
+        for (const auto &preset : m_routing->presets)
+            if (preset.id == options.value("presetId").toString()) { modelId = preset.model.modelId; break; }
     if (!canSubmit(operation, modelId)) return {};
     const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     PendingJob job;

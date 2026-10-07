@@ -80,35 +80,30 @@ trusted LAN or VPN. Browse imports remain local-only. CLI commands still use loo
 
 **Presets…** opens a service-wide tree with fixed Generation and Editing branches.
 Generation has exactly **Photorealism / Photoréalisme** and **Illustration**.
-Each has **Fast / Rapide**, **Balanced / Équilibré** and
-**Quality / Qualité**; editing has the same three qualities.
 Names, order and counts are fixed; no add/remove/rename or drag/drop is available.
-Manager displays preset/quality names in English regardless of its system locale.
-Previous Low/Medium/High labels in version-1/2 settings are accepted on read;
-only labels change, retaining IDs, assignments, Steps/CFG and prefixes. Reads do
-not rewrite storage; Save persists the updated bilingual labels.
-Select a preset to edit its optional positive/negative prefixes. Select a quality
-to choose an eligible model and edit **Steps** and **CFG Scale**. Selecting a
-model snapshots its recommended values (shared defaults when absent); Save
-persists that pair, including manual reductions in steps. Catalogue refreshes
-never replace saved quality values. Models can be reused across qualities.
-Check **Permanent quality** to make Canvas use that profile and hide its quality
-slider. Only one quality can be permanent within Editing or each individual
-preset; checking another clears the previous choice in that group. Uncheck it
-to restore the slider. Save persists the choices; Cancel discards them.
-Each generation preset also lists a **Prompt flow** after its qualities: an
+Manager displays preset names in English regardless of its system locale.
+Select a preset to choose its eligible model, edit **Steps** and **CFG Scale**
+and its optional positive/negative prefixes. Select **Editing** to choose the
+editing model and its Steps/CFG (editing has no prefixes). Selecting a model
+snapshots its recommended values (shared defaults when absent); Save persists
+that pair, including manual reductions in steps. Catalogue refreshes never
+replace saved values. Models can be reused across presets and editing.
+Save persists the choices; Cancel discards them.
+Each generation preset also lists a **Prompt flow** below it: an
 ordered list of up to four LLM steps run before image generation. Add, reorder
 or remove steps, then edit each step's English and French names, its LLM
 (Unassigned allowed) and its instructions.
 Mappings start unassigned and require explicit setup before Canvas can submit.
 Save waits for acknowledgment; Cancel discards all draft edits. Assigned models
 cannot be deleted or lose required capabilities until unassigned.
-Version-3 `models/model-routing.json` stores both English and French labels,
-per-quality parameters and each preset's prompt flow (up to four LLM steps)
-atomically. Version-2 files load with empty prompt flows. Canvas chooses the system locale, falling back
-to English. Version-1 settings load into the fixed structure by stable ID,
-retaining known assignments/prefixes and initializing missing quality parameters
-from model recommendations; the file is rewritten only on explicit Save.
+Version-4 `models/model-routing.json` stores both English and French labels,
+each preset's and editing's model with Steps/CFG, and each preset's prompt flow
+(up to four LLM steps) atomically. Canvas chooses the system locale, falling back
+to English. Versions 1–3 stored Fast/Balanced/Quality tiers: they load with each
+preset's and editing's **Fast** (`-low`) tier as its assignment, dropping the
+other tiers and permanent flags; versions 1–2 load with empty prompt flows.
+Missing parameters are initialized from model recommendations, and the file is
+rewritten (as version 4) only on explicit Save.
 Legacy custom entries are not exposed in the fixed UI. Unreadable/malformed
 configuration is never overwritten. Deploy Service before updated Canvas.
 Legacy per-model style protocol/metadata remain compatible with older clients,

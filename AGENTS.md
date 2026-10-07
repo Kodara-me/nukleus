@@ -159,57 +159,57 @@ tests and retain existing installer configuration/model-preservation behavior.
 Sibling checkouts and sd-cli are not updated by this script.
 
 
-## Service-owned presets and qualities
+## Service-owned presets
 
 Manager Presets… uses a shared KiraUi tree with fixed Generation and Editing roots.
-Generation presets are Photorealism / Photoréalisme and Illustration. Each preset
-and Editing have fixed Fast / Rapide, Balanced / Équilibré and
-Quality / Qualité qualities, with stable IDs and order.
+Generation presets are Photorealism / Photoréalisme and Illustration, with stable
+IDs and order. There is no quality layer: each preset and Editing carry exactly
+one ModelAssignment (modelId plus optional Steps/CFG snapshot).
 No addition, removal, rename, drag/drop or reparenting is permitted.
-Preset selection edits optional positive/negative prefixes; quality selection
-edits Model, Steps and CFG. Choosing a model snapshots its recommendations, or
-shared defaults when absent. Save persists those values including manual edits;
-catalogue refresh must not replace them. None clears the assignment and snapshot.
+Preset selection edits Model, Steps, CFG and optional positive/negative prefixes;
+Editing selection edits only Model, Steps and CFG. Choosing a model snapshots its
+recommendations, or shared defaults when absent. Save persists those values
+including manual edits; catalogue refresh must not replace them. Unassigned
+clears the assignment and snapshot.
 Keep only Save/Cancel buttons; await acknowledgment and discard drafts on Cancel.
-Each quality exposes a Permanent quality checkbox, saved as an optional boolean
-`permanent` (default false) in routing. Permit at most one checked
-quality independently within each preset and Editing. Checking another clears
-the previous choice only in that group. Canvas uses the permanent profile and
-hides that group's slider; no checked quality restores normal selection.
 
-Store version-3 model-routing.json beside model metadata through QSaveFile.
+Store version-4 model-routing.json beside model metadata through QSaveFile:
+presets carry modelId/steps/cfgScale and the top-level `editing` object carries
+the editing assignment.
 Each generation preset carries an ordered `promptFlow` of at most 4 LLM steps
 (id, name, nameFr, modelId, instructions). Step IDs are unique within the preset,
 bilingual names are nonblank, instructions are at most 65536 characters and
 modelId is an installed `llm-chat` model or empty (unassigned). Assigned flow
 LLMs cannot be deleted; reconfiguring them is allowed. Versions 1 and 2 load
-with empty flows. In Manager, a "Prompt flow (n steps)" node follows each
-preset's fixed qualities; its page lists steps with Add/Move up/Move down/Remove
+with empty flows. In Manager, a "Prompt flow (n steps)" node is each
+preset's child; its page lists steps with Add/Move up/Move down/Remove
 icon buttons (Add disabled at 4) above the selected step's English/French names,
 LLM selector (Unassigned, installed llm-chat models, Unavailable — id) and
 instructions. New steps get a generated unique ID and default names; flow edits
 follow the same Save/Cancel draft rules.
-Transmit name (English) and nameFr for every preset/quality. SDK displayLabel
+Transmit name (English) and nameFr for every preset. SDK displayLabel
 uses French for French locales, English otherwise. Validate fixed IDs, ordering
 and bilingual labels plus numeric bounds (Steps 1–200, finite CFG 0–100).
-Version-1 reads project known IDs onto the fixed structure, retaining known
-prefixes/assignments and initializing missing parameters from model recommendations.
-Do not write during reads; Save writes version 3 and retires legacy custom entries.
+Versions 1–3 stored Fast/Balanced/Quality tiers: reads keep only each preset's
+and Editing's Fast (`photo-low`, `illustration-low`, `edit-low`) tier as its
+assignment and drop the other tiers and permanent flags. Version-1 reads project
+known preset IDs onto the fixed structure, retaining known prefixes. Missing
+parameters are initialized from model recommendations.
+Do not write during reads; Save writes version 4 and retires legacy entries.
 Reject malformed/unreadable storage without overwriting. Block mapped-model
 deletion and disabling required capabilities, including companion installs.
 External disappearance leaves assignments intact.
-Manager displays preset/quality names in English explicitly. Keep existing
-low/medium/high IDs when renaming labels to Fast/Balanced/Quality. Accept previous
-version-2 labels on read and normalize only names; retain model assignments,
-Steps/CFG, prefixes and selection IDs. Do not write until explicit Save.
+Manager displays preset names in English explicitly.
 
 Additive protocol-v3 model-routing.get/configure return .completed with routing;
 broadcast model-routing.changed on Save and advertise model-routing capability.
-Generation routing requires presetId/qualityId; editing requires only qualityId.
+Generation routing requires only presetId; `qualityId` is no longer accepted.
+Editing is unrouted: clients submit the editing assignment's modelId and
+Steps/CFG directly, and image.edit rejects presetId.
 Resolve the model on the service and reject conflicting modelId or mixed styleId.
 Validate the original prompt, compose generation prefixes once, and snapshot before
-upload/queueing. Omitted job Steps/CFG use quality snapshots; explicit valid job
-values take precedence. Direct-model requests retain their prior behavior.
+upload/queueing. Omitted job Steps/CFG use the preset's snapshot; explicit valid
+job values take precedence. Direct-model requests retain their prior behavior.
 A routed generation runs its preset's prompt flow first, as described in
 docs/protocol-v3.md: each step's LLM receives/returns `{positive, negative}`
 JSON through llama-completion, progress uses stage `enhancing-prompt`, failures

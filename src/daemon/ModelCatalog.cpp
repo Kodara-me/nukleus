@@ -474,41 +474,37 @@ std::optional<KiraService::ModelRouting> ModelCatalog::routing(QString *error) c
 void ModelCatalog::initializeRoutingOptions(KiraService::ModelRouting &routing) const
 {
     const auto defaults = KiraService::Protocol::defaultModelOptions("image-generation");
-    const auto initialize = [&](QList<KiraService::ModelQuality> &qualities) {
-        for (auto &q : qualities) {
-            if (q.modelId.isEmpty()) continue;
-            const auto info = model(ModelCategory::ImageGeneration, q.modelId);
-            const auto options = info ? info->recommendedOptions : QJsonObject{};
-            if (!q.steps) q.steps = options.value("steps").toInt(defaults.value("steps").toInt());
-            if (!q.cfgScale) q.cfgScale = options.value("cfgScale").toDouble(defaults.value("cfgScale").toDouble());
-        }
+    const auto initialize = [&](KiraService::ModelAssignment &a) {
+        if (a.modelId.isEmpty()) return;
+        const auto info = model(ModelCategory::ImageGeneration, a.modelId);
+        const auto options = info ? info->recommendedOptions : QJsonObject{};
+        if (!a.steps) a.steps = options.value("steps").toInt(defaults.value("steps").toInt());
+        if (!a.cfgScale) a.cfgScale = options.value("cfgScale").toDouble(defaults.value("cfgScale").toDouble());
     };
-    for (auto &preset : routing.presets) initialize(preset.qualities);
-    initialize(routing.editingQualities);
+    for (auto &preset : routing.presets) initialize(preset.model);
+    initialize(routing.editing);
 }
 
 bool ModelCatalog::validateRoutingReferences(const KiraService::ModelRouting &routing, QString *error) const
 {
-    const auto validate = [&](const QList<KiraService::ModelQuality> &qualities, const QString &capability) {
-        for (const auto &q : qualities) {
-            if (q.modelId.isEmpty()) continue;
-            const auto info = model(ModelCategory::ImageGeneration, q.modelId);
-            if (!info || !info->recommendedOptions.value(capability).toBool(true)) {
-                if (error) *error = tr("Quality %1 must select an installed model supporting %2, or Unassigned").arg(q.name, capability);
-                return false;
-            }
+    const auto validate = [&](const KiraService::ModelAssignment &a, const QString &name, const QString &capability) {
+        if (a.modelId.isEmpty()) return true;
+        const auto info = model(ModelCategory::ImageGeneration, a.modelId);
+        if (!info || !info->recommendedOptions.value(capability).toBool(true)) {
+            if (error) *error = tr("%1 must select an installed model supporting %2, or Unassigned").arg(name, capability);
+            return false;
         }
         return true;
     };
     for (const auto &p : routing.presets) {
-        if (!validate(p.qualities, "canGenerate")) return false;
+        if (!validate(p.model, p.name, "canGenerate")) return false;
         for (const auto &step : p.promptFlow)
             if (!step.modelId.isEmpty() && !model(ModelCategory::LlmChat, step.modelId)) {
                 if (error) *error = tr("Prompt flow step %1 must select an installed LLM, or Unassigned").arg(step.name);
                 return false;
             }
     }
-    return validate(routing.editingQualities, "canEdit");
+    return validate(routing.editing, tr("Editing"), "canEdit");
 }
 
 bool ModelCatalog::configureRouting(const KiraService::ModelRouting &value, QString *error)
@@ -547,17 +543,16 @@ bool ModelCatalog::protectRouting(const QString &id, const QJsonObject *options,
                 }
         return true;
     }
-    const auto permitted = [&](const QList<KiraService::ModelQuality> &qualities, const QString &capability) {
-        for (const auto &q : qualities)
-            if (q.modelId == id && (!options || !options->value(capability).toBool(true))) {
-                if (error) *error = tr("This model is assigned to a quality tier; clear its assignment first");
-                return false;
-            }
+    const auto permitted = [&](const KiraService::ModelAssignment &a, const QString &capability) {
+        if (a.modelId == id && (!options || !options->value(capability).toBool(true))) {
+            if (error) *error = tr("This model is assigned to a preset or to editing; clear its assignment first");
+            return false;
+        }
         return true;
     };
     for (const auto &p : value->presets)
-        if (!permitted(p.qualities, "canGenerate")) return false;
-    return permitted(value->editingQualities, "canEdit");
+        if (!permitted(p.model, "canGenerate")) return false;
+    return permitted(value->editing, "canEdit");
 }
 
 QString ModelCatalog::rootPath() const

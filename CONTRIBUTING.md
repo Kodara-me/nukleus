@@ -58,19 +58,22 @@ The legacy VAE GUI exposes this via Optional files; the compatibility CLI expose
 
 ## Shared manager UI
 
-ModelRouting Protocol types carry fixed English/French labels, preset prefixes,
-quality/model assignments and optional Steps/CFG snapshots. Use the shared
-KiraUi TreeView with fixed Generation/Editing branches: Photorealism and
-Illustration each have Fast, Balanced, Quality; editing has those
-three qualities without style prefixes. The tree cannot rename, add, remove,
-reorder or reparent entries. Selection shows preset prefixes or Model/Steps/CFG.
-Model changes initialize the quality pair from recommendations or shared defaults;
-catalogue refresh preserves it. Save persists manual values; Cancel discards them.
+ModelRouting Protocol types carry fixed English/French labels, preset prefixes
+and one ModelAssignment (model plus optional Steps/CFG snapshot) per preset and
+for editing. Use the shared KiraUi TreeView with fixed Generation/Editing
+branches: Photorealism and Illustration under Generation, each with its prompt
+flow; Editing has no prefixes. The tree cannot rename, add, remove, reorder or
+reparent entries. Selecting a preset shows Model/Steps/CFG and its prefixes;
+selecting Editing shows Model/Steps/CFG only. Model changes initialize the pair
+from recommendations or shared defaults; catalogue refresh preserves it. Save
+persists manual values; Cancel discards them.
 
-Store version-2 JSON atomically beside model metadata. Version-1 parsing maps
-known IDs into the fixed catalogue, preserves assignments/prefixes and fills
-missing parameters from models. Read/migration never writes; explicit Save
-replaces the file with the fixed structure, omitting retired custom entries.
+Store version-4 JSON atomically beside model metadata. Versions 1–3 stored
+Fast/Balanced/Quality tiers; parsing keeps each group's Fast (`-low`) tier as its
+assignment and drops the rest. Version-1 parsing maps known preset IDs into the
+fixed catalogue and preserves prefixes; missing parameters are filled from
+models. Read/migration never writes; explicit Save replaces the file with the
+fixed structure, omitting retired entries.
 Validate the fixed IDs/order/labels and finite numeric bounds (Steps 1–200,
 CFG 0–100); protect assignments and capabilities, including attachment installs.
 Tests cover bilingual labels, legacy reading, persistence, snapshots, fixed-tree
@@ -78,17 +81,15 @@ behavior and draft Save/Cancel with disposable files and local sockets.
 
 Protocol v3 advertises `model-routing`; `model-routing.get/configure` return
 completion messages with `routing`, and saves broadcast `model-routing.changed`.
-Generation accepts presetId + qualityId; editing accepts only qualityId.
+Generation is routed by presetId alone; `qualityId` is rejected. Editing is
+unrouted: clients submit the editing assignment's modelId and Steps/CFG.
 Resolve models server-side, reject conflicting modelId and legacy styleId mixing,
-validate original prompts, then snapshot prefixes and quality defaults before
-upload/queueing. Fill omitted Steps/CFG from the selected quality; explicit valid
+validate original prompts, then snapshot prefixes and preset defaults before
+upload/queueing. Fill omitted Steps/CFG from the preset's snapshot; explicit valid
 job values take precedence. Direct-model requests retain their existing defaults.
 Editing adds no preset prefixes. Labels include `name` (English) and `nameFr`;
 SDK displayLabel uses French for French locales, English otherwise.
-Manager uses English names explicitly, even with a French system locale. Keep
-existing low/medium/high IDs and select Balanced by ID rather than display text.
-Accept the previous version-2 bilingual labels on read, normalizing only labels;
-preserve assignments, parameters and prefixes without writing until Save.
+Manager uses English names explicitly, even with a French system locale.
 The Protocol target propagates MSVC's /utf-8 source encoding so bilingual labels
 and consumer tests compile consistently on Windows.
 Preserve legacy per-model style APIs/metadata without their management UI.

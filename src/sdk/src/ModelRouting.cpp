@@ -1,6 +1,5 @@
 #include <QJsonArray>
 #include <QSet>
-#include <QStringList>
 #include <cmath>
 #include <kira/service/ModelRouting.h>
 
@@ -8,36 +7,17 @@ namespace KiraService::Protocol
 {
 ModelRouting starterModelRouting()
 {
-    const auto qualities = [](const QString &prefix) {
-        // IDs are persisted selection keys; renaming labels must never change them.
-        return QList<ModelQuality>{{prefix + "-low", "Fast", {}, {}, {}, "Rapide"},
-                                   {prefix + "-medium", "Balanced", {}, {}, {}, "Équilibré"},
-                                   {prefix + "-high", "Quality", {}, {}, {}, "Qualité"}};
-    };
-    return {{{"photorealism", "Photorealism", {}, {}, qualities("photo"), "Photoréalisme"},
-             {"illustration", "Illustration", {}, {}, qualities("illustration"), "Illustration"}},
-            qualities("edit")};
+    return {{{"photorealism", "Photorealism", {}, {}, {}, "Photoréalisme"},
+             {"illustration", "Illustration", {}, {}, {}, "Illustration"}},
+            {}};
 }
 
 bool validateModelRouting(const ModelRouting &routing, QString *error)
 {
     const auto fixed = starterModelRouting();
-    const auto qualitiesValid = [](const QList<ModelQuality> &actual, const QList<ModelQuality> &expected) {
-        if (actual.size() != expected.size())
-            return false;
-        int permanentCount = 0;
-        for (int i = 0; i < actual.size(); ++i)
-        {
-            const auto &q = actual.at(i);
-            if (q.permanent && ++permanentCount > 1)
-                return false;
-            const auto &label = expected.at(i);
-            if (q.id != label.id || q.name != label.name || q.nameFr != label.nameFr ||
-                (q.steps && (*q.steps < 1 || *q.steps > 200)) ||
-                (q.cfgScale && (!std::isfinite(*q.cfgScale) || *q.cfgScale < 0 || *q.cfgScale > 100)))
-                return false;
-        }
-        return true;
+    const auto assignmentValid = [](const ModelAssignment &a) {
+        return (!a.steps || (*a.steps >= 1 && *a.steps <= 200)) &&
+               (!a.cfgScale || (std::isfinite(*a.cfgScale) && *a.cfgScale >= 0 && *a.cfgScale <= 100));
     };
     const auto flowValid = [](const QList<PromptFlowStep> &steps) {
         if (steps.size() > 4)
@@ -52,44 +32,36 @@ bool validateModelRouting(const ModelRouting &routing, QString *error)
         }
         return true;
     };
-    bool valid = routing.presets.size() == fixed.presets.size() &&
-                 qualitiesValid(routing.editingQualities, fixed.editingQualities);
+    bool valid = routing.presets.size() == fixed.presets.size() && assignmentValid(routing.editing);
     if (valid)
         for (int i = 0; i < routing.presets.size(); ++i)
         {
             const auto &p = routing.presets.at(i);
             const auto &expected = fixed.presets.at(i);
             if (p.id != expected.id || p.name != expected.name || p.nameFr != expected.nameFr ||
-                !qualitiesValid(p.qualities, expected.qualities) || p.positivePrefix.size() > 65536 ||
-                p.negativePrefix.size() > 65536 || !flowValid(p.promptFlow))
+                !assignmentValid(p.model) || p.positivePrefix.size() > 65536 || p.negativePrefix.size() > 65536 ||
+                !flowValid(p.promptFlow))
             {
                 valid = false;
                 break;
             }
         }
     if (!valid && error)
-        *error = QStringLiteral("Presets, qualities and bilingual labels are fixed. Steps must be 1–200, CFG 0–100 and "
-                                "prefixes at most 65536 characters. Only one quality per group may be permanent. "
-                                "Prompt flows allow at most 4 steps with unique IDs, bilingual names and "
-                                "instructions of at most 65536 characters.");
+        *error = QStringLiteral("Presets and bilingual labels are fixed. Steps must be 1–200, CFG 0–100 and "
+                                "prefixes at most 65536 characters. Prompt flows allow at most 4 steps with unique "
+                                "IDs, bilingual names and instructions of at most 65536 characters.");
     return valid;
 }
 
 QJsonObject modelRoutingToJson(const ModelRouting &routing)
 {
-    const auto qualities = [](const QList<ModelQuality> &list) {
-        QJsonArray array;
-        for (const auto &q : list)
-        {
-            QJsonObject item{{"id", q.id}, {"name", q.name}, {"nameFr", q.nameFr}, {"modelId", q.modelId}};
-            item.insert("permanent", q.permanent);
-            if (q.steps)
-                item.insert("steps", *q.steps);
-            if (q.cfgScale)
-                item.insert("cfgScale", *q.cfgScale);
-            array.append(item);
-        }
-        return array;
+    const auto assignment = [](const ModelAssignment &a, QJsonObject item) {
+        item.insert("modelId", a.modelId);
+        if (a.steps)
+            item.insert("steps", *a.steps);
+        if (a.cfgScale)
+            item.insert("cfgScale", *a.cfgScale);
+        return item;
     };
     QJsonArray presets;
     for (const auto &p : routing.presets)
@@ -101,15 +73,14 @@ QJsonObject modelRoutingToJson(const ModelRouting &routing)
                                     {"nameFr", step.nameFr},
                                     {"modelId", step.modelId},
                                     {"instructions", step.instructions}});
-        presets.append(QJsonObject{{"id", p.id},
-                                   {"name", p.name},
-                                   {"nameFr", p.nameFr},
-                                   {"positivePrefix", p.positivePrefix},
-                                   {"negativePrefix", p.negativePrefix},
-                                   {"qualities", qualities(p.qualities)},
-                                   {"promptFlow", flow}});
+        presets.append(assignment(p.model, {{"id", p.id},
+                                            {"name", p.name},
+                                            {"nameFr", p.nameFr},
+                                            {"positivePrefix", p.positivePrefix},
+                                            {"negativePrefix", p.negativePrefix},
+                                            {"promptFlow", flow}}));
     }
-    return {{"version", 3}, {"presets", presets}, {"editingQualities", qualities(routing.editingQualities)}};
+    return {{"version", 4}, {"presets", presets}, {"editing", assignment(routing.editing, {})}};
 }
 
 std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QString *error)
@@ -119,57 +90,55 @@ std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QStr
             *error = QStringLiteral("Malformed model routing configuration");
         return std::nullopt;
     };
-    const bool legacy = object.value("version") == QJsonValue(1);
-    const bool flows = object.value("version") == QJsonValue(3);
-    if ((!legacy && !flows && object.value("version") != QJsonValue(2)) || !object.value("presets").isArray() ||
-        !object.value("editingQualities").isArray())
+    const int version = object.value("version").toInt();
+    if (!object.value("version").isDouble() || version < 1 || version > 4 || !object.value("presets").isArray())
         return fail();
-    QSet<QString> ids;
-    const auto parseQualities = [&](const QJsonValue &value, QList<ModelQuality> &list) {
-        if (!value.isArray())
+    const bool legacy = version == 1;
+    // Versions 1–3 stored Fast/Balanced/Quality tiers; only the Fast tier carries over.
+    const bool tiered = version < 4;
+    const bool flows = version >= 3;
+    const auto parseAssignment = [](const QJsonObject &o, ModelAssignment &a) {
+        if (!o.value("modelId").isString())
             return false;
-        QSet<QString> names;
-        for (const auto &item : value.toArray())
+        a.modelId = o.value("modelId").toString();
+        if (o.contains("steps"))
         {
-            if (!item.isObject())
+            const double number = o.value("steps").toDouble(-1);
+            if (!o.value("steps").isDouble() || !std::isfinite(number) || number != std::floor(number) ||
+                number < 1 || number > 200)
                 return false;
-            const auto q = item.toObject();
-            if (!q.value("id").isString() || !q.value("name").isString() || !q.value("modelId").isString() ||
-                (!legacy && !q.value("nameFr").isString()))
+            a.steps = int(number);
+        }
+        if (o.contains("cfgScale"))
+        {
+            const double number = o.value("cfgScale").toDouble(-1);
+            if (!o.value("cfgScale").isDouble() || !std::isfinite(number) || number < 0 || number > 100)
                 return false;
-            ModelQuality quality{q.value("id").toString(), q.value("name").toString(), q.value("modelId").toString()};
-            quality.nameFr = q.value("nameFr").toString();
-            if (q.contains("permanent") && !q.value("permanent").isBool())
-                return false;
-            quality.permanent = q.value("permanent").toBool(false);
-            if (quality.id.trimmed().isEmpty() || ids.contains(quality.id) || quality.name.trimmed().isEmpty() ||
-                names.contains(quality.name.trimmed().toCaseFolded()))
-                return false;
-            ids.insert(quality.id);
-            names.insert(quality.name.trimmed().toCaseFolded());
-            if (q.contains("steps"))
-            {
-                const double number = q.value("steps").toDouble(-1);
-                if (!q.value("steps").isDouble() || !std::isfinite(number) || number != std::floor(number) ||
-                    number < 1 || number > 200)
-                    return false;
-                quality.steps = int(number);
-            }
-            if (q.contains("cfgScale"))
-            {
-                const double number = q.value("cfgScale").toDouble(-1);
-                if (!q.value("cfgScale").isDouble() || !std::isfinite(number) || number < 0 || number > 100)
-                    return false;
-                quality.cfgScale = number;
-            }
-            list.append(quality);
+            a.cfgScale = number;
         }
         return true;
     };
+    const auto parseFastTier = [&](const QJsonValue &value, const QString &lowId, ModelAssignment &a) {
+        if (!value.isArray())
+            return false;
+        for (const auto &item : value.toArray())
+        {
+            if (!item.isObject() || !item.toObject().value("id").isString())
+                return false;
+            if (item.toObject().value("id").toString() == lowId)
+                return parseAssignment(item.toObject(), a);
+        }
+        return true;
+    };
+    const auto lowTierId = [](const QString &presetId) {
+        return presetId == QStringLiteral("photorealism") ? QStringLiteral("photo-low") : presetId + "-low";
+    };
     ModelRouting routing;
-    if (!parseQualities(object.value("editingQualities"), routing.editingQualities))
+    if (tiered ? !parseFastTier(object.value("editingQualities"), "edit-low", routing.editing)
+               : (!object.value("editing").isObject() ||
+                  !parseAssignment(object.value("editing").toObject(), routing.editing)))
         return fail();
-    QSet<QString> names;
+    QSet<QString> ids;
     for (const auto &item : object.value("presets").toArray())
     {
         if (!item.isObject())
@@ -186,13 +155,12 @@ std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QStr
                                 p.value("negativePrefix").toString(),
                                 {}};
         preset.nameFr = p.value("nameFr").toString();
-        if (preset.id.trimmed().isEmpty() || ids.contains(preset.id) || preset.name.trimmed().isEmpty() ||
-            names.contains(preset.name.trimmed().toCaseFolded()) || preset.positivePrefix.size() > 65536 ||
+        if (preset.id.trimmed().isEmpty() || ids.contains(preset.id) || preset.positivePrefix.size() > 65536 ||
             preset.negativePrefix.size() > 65536)
             return fail();
         ids.insert(preset.id);
-        names.insert(preset.name.trimmed().toCaseFolded());
-        if (!parseQualities(p.value("qualities"), preset.qualities))
+        if (tiered ? !parseFastTier(p.value("qualities"), lowTierId(preset.id), preset.model)
+                   : !parseAssignment(p, preset.model))
             return fail();
         // Versions 1 and 2 predate prompt flows and load with an empty flow.
         if (flows)
@@ -217,50 +185,17 @@ std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QStr
     if (legacy)
     {
         auto fixed = starterModelRouting();
-        const auto copyQualities = [](QList<ModelQuality> &target, const QList<ModelQuality> &previous) {
-            for (auto &q : target)
-                for (const auto &old : previous)
-                    if (q.id == old.id)
-                    {
-                        q.modelId = old.modelId;
-                        q.steps = old.steps;
-                        q.cfgScale = old.cfgScale;
-                        q.permanent = old.permanent;
-                        break;
-                    }
-        };
         for (auto &p : fixed.presets)
             for (const auto &old : routing.presets)
                 if (p.id == old.id)
                 {
                     p.positivePrefix = old.positivePrefix;
                     p.negativePrefix = old.negativePrefix;
-                    copyQualities(p.qualities, old.qualities);
+                    p.model = old.model;
                     break;
                 }
-        copyQualities(fixed.editingQualities, routing.editingQualities);
+        fixed.editing = routing.editing;
         routing = fixed;
-    }
-    else
-    {
-        // Accept the previous version-2 labels without rewriting storage on read.
-        const auto fixed = starterModelRouting();
-        const QStringList previousEnglish{"Low — faster", "Medium", "High — slower"};
-        const QStringList previousFrench{"Basse — plus rapide", "Moyenne", "Haute — plus lente"};
-        const auto rename = [&](QList<ModelQuality> &qualities, const QList<ModelQuality> &expected) {
-            for (auto &q : qualities)
-                for (int i = 0; i < expected.size(); ++i)
-                    if (q.id == expected.at(i).id && q.name == previousEnglish.at(i)
-                        && q.nameFr == previousFrench.at(i)) {
-                        q.name = expected.at(i).name;
-                        q.nameFr = expected.at(i).nameFr;
-                        break;
-                    }
-        };
-        for (auto &preset : routing.presets)
-            for (const auto &expected : fixed.presets)
-                if (preset.id == expected.id) rename(preset.qualities, expected.qualities);
-        rename(routing.editingQualities, fixed.editingQualities);
     }
     if (!validateModelRouting(routing, error))
         return std::nullopt;
