@@ -44,6 +44,10 @@ never overwrite weights and keep companions scoped to the final primary name.
   maxTokens recommendations or shared LLM defaults. Per-job overrides accept these
   fields and a string systemPrompt up to 64 KiB, without changing model metadata.
   Unknown/invalid fields fail before queueing. Empty text requests a new description.
+  Send instructions (systemPrompt or flow step instructions) at the start of the
+  single user message, never through `--system-prompt-file`: llama-completion
+  formats a system prompt alone, and templates requiring a user query (Qwen3.5
+  and similar) abort on it.
   Preserve timeout/output limits, error recovery and disconnect cancellation.
 
 - Link only the manager/UI tests to KiraUi::Widgets 0.2. Default to the sibling

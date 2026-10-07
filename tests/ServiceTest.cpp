@@ -1410,8 +1410,9 @@ void ServiceTest::runsPresetPromptFlowBeforeGeneration()
     // The first step answers inside code fences; the second omits negative, which is kept.
     writeScript("completion", "#!/bin/sh\nroot=$(dirname \"$0\")\nprintf '%s\\n' \"$@\" > \"$root/llm-args\"\n"
                               "previous=\nfor argument in \"$@\"; do\n"
-                              "if [ \"$previous\" = --file ]; then cat \"$argument\" >> \"$root/inputs\"; echo >> \"$root/inputs\"; fi\n"
-                              "if [ \"$previous\" = --system-prompt-file ]; then cat \"$argument\" > \"$root/system\"; fi\n"
+                              // The instructions open the message; the JSON input is its last line.
+                              "if [ \"$previous\" = --file ]; then cat \"$argument\" > \"$root/system\"; "
+                              "tail -n 1 \"$argument\" >> \"$root/inputs\"; echo >> \"$root/inputs\"; fi\n"
                               "previous=\"$argument\"\ndone\n"
                               "if [ -f \"$root/bad\" ]; then printf 'not json'; exit 0; fi\n"
                               "if [ -f \"$root/first-done\" ]; then rm \"$root/first-done\"; printf '{\"positive\": \"specialised\"}'; exit 0; fi\n"
@@ -1476,7 +1477,10 @@ void ServiceTest::runsPresetPromptFlowBeforeGeneration()
     QCOMPARE(inputs.size(), 2);
     QCOMPARE(QJsonDocument::fromJson(inputs[0].toUtf8()).object(), (QJsonObject{{"positive", "un chat roux"}, {"negative", ""}}));
     QCOMPARE(QJsonDocument::fromJson(inputs[1].toUtf8()).object(), (QJsonObject{{"positive", "enhanced"}, {"negative", "blurry"}}));
+    QVERIFY(read("system").startsWith("Improve the image-generation prompts."));
     QVERIFY(read("system").contains("{\"positive\": string, \"negative\": string}"));
+    // Templates such as Qwen3.5 reject a system prompt formatted without a user query.
+    QVERIFY(!read("llm-args").contains("--system-prompt-file"));
     // Flow steps disable the repetition penalty, which would also penalize the instructions.
     QVERIFY(read("llm-args").contains("--repeat-penalty\n1.0\n"));
     QVERIFY(read("llm-args").contains("--repeat-last-n\n0\n"));
@@ -1556,7 +1560,6 @@ void ServiceTest::enhancesPromptThroughSdk()
         "#!/bin/sh\nroot=$(dirname \"$0\")\nprintf '%s\\n' \"$@\" > \"$root/args\"\n"
         "previous=\nfor argument in \"$@\"; do\n"
         "if [ \"$previous\" = --file ]; then cat \"$argument\" > \"$root/input\"; fi\n"
-        "if [ \"$previous\" = --system-prompt-file ]; then cat \"$argument\" > \"$root/system\"; fi\n"
         "if [ \"$previous\" = --repeat-last-n ] && [ \"$argument\" -lt 0 ]; then exit 1; fi\n"
         "previous=\"$argument\"\ndone\n"
         "if [ -f \"$root/wait\" ]; then exec sleep 30; fi\n"
@@ -1604,9 +1607,9 @@ void ServiceTest::enhancesPromptThroughSdk()
     QVERIFY(arguments.contains("--top-k\n20\n"));
     QVERIFY(arguments.contains("--single-turn\n"));
     QVERIFY(arguments.contains("--no-display-prompt\n"));
-    QCOMPARE(QString::fromUtf8(read("input")), prompt);
-    QVERIFY(read("system").contains("Keep the description in French."));
-    QCOMPARE(read("system"), QByteArray("Keep the description in French."));
+    // The instructions open the single user message, followed by the prompt.
+    QCOMPARE(QString::fromUtf8(read("input")), "Keep the description in French.\n\n" + prompt);
+    QVERIFY(!arguments.contains("--system-prompt-file"));
     const auto expectFailure = [&](const KiraService::PromptEnhancementRequest& request, const QString& code) {
         QVERIFY(!client.enhancePrompt(request).isEmpty());
         QTRY_COMPARE(finished.count(), 1);

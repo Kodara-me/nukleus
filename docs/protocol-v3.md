@@ -262,9 +262,10 @@ steps in order inside the same job, before image generation. Every step must
 have an installed GGUF `llm-chat` model and `llama-completion` must be available;
 otherwise submission fails with `model-routing-unavailable` (naming the step),
 `llm-format-unsupported` or `backend-not-ready`. Each step receives the JSON
-object `{"positive": string, "negative": string}` (the trimmed prompts) as the
-user message, with its instructions plus a fixed JSON reply contract as the
-system prompt, and must reply with an object of the same shape; surrounding text
+object `{"positive": string, "negative": string}` (the trimmed prompts) in a
+single user message, after its instructions plus a fixed JSON reply contract
+(no separate system prompt, which some chat templates reject without a user
+query), and must reply with an object of the same shape; surrounding text
 or code fences are ignored, and an omitted `negative` keeps the previous value.
 Preset prefixes are composed once onto the final prompts after the last step.
 Before each step the job emits `progress` with stage `enhancing-prompt`,

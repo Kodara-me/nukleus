@@ -860,8 +860,8 @@ void KiraServiceDaemon::startPromptFlowStep()
     const QString instructions = step.instructions.trimmed().isEmpty()
         ? QStringLiteral("Improve the image-generation prompts.") : step.instructions.trimmed();
     const QString system = instructions + QStringLiteral(
-        "\n\nThe user message is a JSON object {\"positive\": string, \"negative\": string} holding the positive and "
-        "negative image-generation prompts. Reply with only a JSON object of the same shape, without explanations, "
+        "\n\nThe input after these instructions is a JSON object {\"positive\": string, \"negative\": string} holding "
+        "the positive and negative image-generation prompts. Reply with only a JSON object of the same shape, without explanations, "
         "headings or code fences.");
     const QString input = QString::fromUtf8(QJsonDocument(QJsonObject{
         {"positive", job->flow.prompt}, {"negative", job->flow.negativePrompt}}).toJson(QJsonDocument::Compact));
@@ -1092,10 +1092,10 @@ void KiraServiceDaemon::startPromptEnhancement()
     const auto parameters = job->options;
     QString system = parameters.value("systemPrompt").toString();
     if (system.trimmed().isEmpty())
-        system = QStringLiteral("Enhance the user's image-generation prompt. Return only the enhanced prompt, without explanations, headings, quotation marks or reasoning.");
+        system = QStringLiteral("Enhance the image-generation prompt that follows these instructions. Return only the enhanced prompt, without explanations, headings, quotation marks or reasoning.");
     const auto input = parameters.value("prompt").toString();
     if (!startLlm(job->modelPath, parameters, system, input.trimmed().isEmpty()
-        ? QStringLiteral("Generate a new description according to the system instructions.") : input)) {
+        ? QStringLiteral("Generate a new description according to the instructions above.") : input)) {
         sendError(job->client, "storage-error", tr("Could not prepare prompt enhancement"), job->id);
         m_activeJob.reset(); startNextJob();
     }
@@ -1106,15 +1106,16 @@ bool KiraServiceDaemon::startLlm(const QString &modelPath, const QJsonObject &pa
 {
     const auto job = m_activeJob;
     const QString promptPath = job->directory->filePath("prompt.txt");
-    const QString systemPath = job->directory->filePath("system.txt");
-    const auto write = [](const QString& path, const QString& text) {
-        QFile file(path);
-        const auto bytes = text.toUtf8();
-        return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
-    };
-    if (!job->directory->isValid() || !write(promptPath, input) || !write(systemPath, system)) return false;
-    QStringList arguments{"--model", modelPath, "--file", promptPath, "--system-prompt-file", systemPath,
-        "--single-turn", "--conversation", "--jinja", "--no-display-prompt", "--simple-io", "--color", "off",
+    // llama-completion formats a system prompt on its own before the user turn, and chat
+    // templates that require a user query (Qwen3.5 and similar) abort on it. Send the
+    // instructions at the start of the single user message instead.
+    const QString message = system.trimmed().isEmpty() ? input : system.trimmed() + QStringLiteral("\n\n") + input;
+    QFile prompt(promptPath);
+    const auto bytes = message.toUtf8();
+    if (!job->directory->isValid() || !prompt.open(QIODevice::WriteOnly) || prompt.write(bytes) != bytes.size())
+        return false;
+    prompt.close();
+    QStringList arguments{"--model", modelPath, "--file", promptPath, "--single-turn", "--conversation", "--jinja", "--no-display-prompt", "--simple-io", "--color", "off",
         "--reasoning", "off", "--no-context-shift", "--ctx-size", QString::number(parameters.value("contextLength").toInt()),
         "--n-predict", QString::number(parameters.value("maxTokens").toInt()),
         // llama.cpp also penalizes prompt tokens. Flow steps repeat their instructions'
