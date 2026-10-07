@@ -1,5 +1,6 @@
 #pragma once
 
+#include <kira/service/ModelRouting.h>
 #include <kira/service/ServiceProtocol.h>
 
 #include <QHostAddress>
@@ -42,7 +43,8 @@ public:
     quint16 serverPort() const;
 
 private:
-    enum class Operation { Generate, Upscale, Edit, PromptEnhance };
+    enum class Operation { Generate, Upscale, Edit, PromptEnhance, PromptFlow };
+    struct PromptFlowRun;
     struct Submission;
     struct Job;
 
@@ -62,12 +64,18 @@ private:
     void deleteCompanion(QWebSocket* socket, const QJsonObject& message);
     void enqueue(std::shared_ptr<Job> job);
     void startNextJob();
+    void runActiveJob();
+    void startPromptFlowStep();
+    bool startLlm(const QString &modelPath, const QJsonObject &parameters, const QString &system, const QString &input);
     void cancelJobsFor(QWebSocket *socket);
     void broadcastQueuePositions();
     void handleGenerationFinished(const SdCliGenerationResult &result);
     void handleUpscaleFinished(const SdCliUpscaleResult &result);
     bool isPromptEnhancementReady() const;
     void submitPromptEnhancement(QWebSocket* socket, const QJsonObject& message);
+    void submitPromptFlow(QWebSocket *socket, const QJsonObject &message);
+    bool preparePromptFlow(QWebSocket *socket, const QString &jobId, const KiraService::GenerationPreset &preset,
+                           PromptFlowRun &flow) const;
     void startPromptEnhancement();
     void handlePromptEnhancementFinished(int exitCode, QProcess::ExitStatus status);
     void sendCapabilities(QWebSocket *socket) const;

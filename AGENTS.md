@@ -206,6 +206,14 @@ Resolve the model on the service and reject conflicting modelId or mixed styleId
 Validate the original prompt, compose generation prefixes once, and snapshot before
 upload/queueing. Omitted job Steps/CFG use quality snapshots; explicit valid job
 values take precedence. Direct-model requests retain their prior behavior.
+A routed generation runs its preset's prompt flow first, as described in
+docs/protocol-v3.md: each step's LLM receives/returns `{positive, negative}`
+JSON through llama-completion, progress uses stage `enhancing-prompt`, failures
+use `prompt-flow-failed`, and prefixes are composed after the last step instead
+of at submission. Results return the final unprefixed prompts; `skipPromptFlow`
+bypasses the flow. Validate every step's LLM at submission. The
+`prompt-flow.run` operation previews a preset's flow through the same job queue
+and returns only the final prompts.
 Editing adds no prefixes. Preserve legacy style APIs/metadata for old clients,
 without Manager UI. Canvas consumes this configuration; deploy service first.
 

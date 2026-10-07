@@ -223,6 +223,7 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
     if (!request.styleId.isEmpty()) options.insert("styleId", request.styleId);
     if (!request.presetId.isEmpty()) options.insert("presetId", request.presetId);
     if (!request.qualityId.isEmpty()) options.insert("qualityId", request.qualityId);
+    if (request.skipPromptFlow) options.insert("skipPromptFlow", true);
     return submit(ImageOperation::Generate, options, request.baseImageData.isEmpty() ? QList<QByteArray>{} : QList<QByteArray>{request.baseImageData});
 }
 
@@ -264,6 +265,32 @@ QString ServiceClient::enhancePrompt(const PromptEnhancementRequest& request)
     if (!request.parameters.isEmpty()) options.insert("parameters", request.parameters);
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
         {"type", "submit"}, {"jobId", jobId}, {"operation", "prompt.enhance"}, {"options", options}}).toJson(QJsonDocument::Compact)));
+    return jobId;
+}
+
+bool ServiceClient::canRunPromptFlow(const QString& presetId) const
+{
+    if (!m_authenticated || !m_capabilities.promptFlow || !m_routing) return false;
+    for (const auto& preset : m_routing->presets)
+        if (preset.id == presetId)
+            return !preset.promptFlow.isEmpty()
+                && std::all_of(preset.promptFlow.cbegin(), preset.promptFlow.cend(), [this](const PromptFlowStep& step) {
+                       return containsModel(step.modelId, ModelCategory::LlmChat);
+                   });
+    return false;
+}
+
+QString ServiceClient::runPromptFlow(const PromptFlowRequest& request)
+{
+    if (!canRunPromptFlow(request.presetId)) return {};
+    const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    PendingJob job;
+    job.promptFlow = true;
+    m_pendingJobs.insert(jobId, job);
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"type", "submit"}, {"jobId", jobId}, {"operation", "prompt-flow.run"},
+        {"options", QJsonObject{{"presetId", request.presetId}, {"prompt", request.prompt},
+                                {"negativePrompt", request.negativePrompt}}}}).toJson(QJsonDocument::Compact)));
     return jobId;
 }
 
@@ -315,7 +342,8 @@ void ServiceClient::handleTextMessage(const QString &message)
     if (type == QStringLiteral("capabilities")) {
         const QJsonArray operations = object.value(QStringLiteral("operations")).toArray();
         updateCapabilities({operations.contains("image.generate"), operations.contains("image.upscale"),
-            operations.contains("image.edit"), operations.contains("prompt.enhance"), operations.contains("model-routing")});
+            operations.contains("image.edit"), operations.contains("prompt.enhance"), operations.contains("model-routing"),
+            operations.contains("prompt-flow.run")});
         if (m_capabilities.modelRouting) requestModelRouting();
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
@@ -460,7 +488,22 @@ void ServiceClient::handleTextMessage(const QString &message)
             emit promptEnhancementFinished({jobId, true, object.value("prompt").toString(), {}, {}});
             return;
         }
-        m_pendingJobs[jobId].mimeType = object.value(QStringLiteral("mimeType")).toString();
+        if (m_pendingJobs.value(jobId).promptFlow) {
+            if (object.value("operation") != "prompt-flow.run" || !object.value("prompt").isString()
+                || object.value("prompt").toString().trimmed().isEmpty() || !object.value("negativePrompt").isString()) {
+                failJob(jobId, "invalid-result", tr("The service returned an invalid prompt flow result"));
+                return;
+            }
+            m_pendingJobs.remove(jobId);
+            emit jobStateChanged(jobId, JobState::Completed, -1);
+            emit promptFlowFinished({jobId, true, object.value("prompt").toString(),
+                                     object.value("negativePrompt").toString(), {}, {}});
+            return;
+        }
+        auto &job = m_pendingJobs[jobId];
+        job.mimeType = object.value(QStringLiteral("mimeType")).toString();
+        job.prompt = object.value(QStringLiteral("prompt")).toString();
+        job.negativePrompt = object.value(QStringLiteral("negativePrompt")).toString();
         m_resultJobs.enqueue(jobId);
     }
 }
@@ -471,7 +514,7 @@ void ServiceClient::handleBinaryMessage(const QByteArray &data)
     const QString jobId = m_resultJobs.dequeue();
     const PendingJob job = m_pendingJobs.take(jobId);
     emit jobStateChanged(jobId, JobState::Completed, -1);
-    emit imageJobFinished({jobId, job.operation, true, data, job.mimeType, {}, {}});
+    emit imageJobFinished({jobId, job.operation, true, data, job.mimeType, {}, {}, job.prompt, job.negativePrompt});
 }
 
 void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
@@ -479,6 +522,7 @@ void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
     if (m_capabilities.imageGeneration == capabilities.imageGeneration && m_capabilities.imageUpscale == capabilities.imageUpscale && m_capabilities.imageEdit == capabilities.imageEdit
         && m_capabilities.promptEnhancement == capabilities.promptEnhancement
         && m_capabilities.modelRouting == capabilities.modelRouting
+        && m_capabilities.promptFlow == capabilities.promptFlow
 ) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
@@ -535,6 +579,7 @@ void ServiceClient::failJob(const QString &jobId, const QString &errorCode, cons
     m_resultJobs.removeAll(jobId);
     emit jobStateChanged(jobId, JobState::Failed, -1);
     if (job.promptEnhancement) emit promptEnhancementFinished({jobId, false, {}, errorCode, message});
+    else if (job.promptFlow) emit promptFlowFinished({jobId, false, {}, {}, errorCode, message});
     else emit imageJobFinished({jobId, job.operation, false, {}, job.mimeType, errorCode, message});
 }
 

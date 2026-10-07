@@ -90,6 +90,8 @@ struct ImageGenerationRequest
     QString styleId;
     QString presetId;
     QString qualityId;
+    // Submit the prompts as the preset's final prompts, bypassing its prompt flow.
+    bool skipPromptFlow = false;
 };
 
 struct ImageUpscaleRequest
@@ -107,6 +109,9 @@ struct ImageJobResult
     QString mimeType;
     QString errorCode;
     QString message;
+    // Routed generation: final prompts after the prompt flow, without preset prefixes.
+    QString prompt = {};
+    QString negativePrompt = {};
 };
 
 struct ServiceCapabilities
@@ -116,6 +121,25 @@ struct ServiceCapabilities
     bool imageEdit = false;
     bool promptEnhancement = false;
     bool modelRouting = false;
+    bool promptFlow = false;
+};
+
+// Runs a generation preset's prompt flow without generating an image.
+struct PromptFlowRequest
+{
+    QString presetId;
+    QString prompt;
+    QString negativePrompt;
+};
+
+struct PromptFlowResult
+{
+    QString jobId;
+    bool succeeded = false;
+    QString prompt;
+    QString negativePrompt;
+    QString errorCode;
+    QString message;
 };
 
 struct PromptEnhancementRequest
@@ -160,6 +184,7 @@ Q_DECLARE_METATYPE(KiraService::ImageUpscaleRequest)
 Q_DECLARE_METATYPE(KiraService::ImageJobResult)
 Q_DECLARE_METATYPE(KiraService::PromptEnhancementRequest)
 Q_DECLARE_METATYPE(KiraService::PromptEnhancementResult)
+Q_DECLARE_METATYPE(KiraService::PromptFlowResult)
 Q_DECLARE_METATYPE(KiraService::ServiceCapabilities)
 Q_DECLARE_METATYPE(KiraService::ServiceConnectionState)
 Q_DECLARE_METATYPE(KiraService::JobState)

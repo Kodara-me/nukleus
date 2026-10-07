@@ -255,6 +255,40 @@ shell-quoted text for diagnosis; execution still uses QProcess argument lists.
 
 `capabilities.operations` includes `image.edit` when the image backend is ready. Submit an installed Image-generation `modelId`, nonblank `prompt`, source `width`/`height`, and generation options through `submit` with operation `image.edit`. The service requires source bytes through the `upload-required` binary upload flow, even if `hasInput` is omitted. Optional `inputCount` (1–8, edit only, default 1) sets the number of images: the service sends one `upload-required` per image (`inputIndex` 0…n-1; role `source` for index 0, `reference` otherwise) and the client answers each with one binary frame in order. The first image is the one to edit; all are passed to sd-cli as repeated `-r` arguments in that order. Validation, queue/progress, result bytes and job errors follow the generation lifecycle. Results identify `image.edit`. Optional installed LLM, VAE and mmproj companions are resolved by the daemon; clients never supply paths. SDK clients use `submitEdit(ImageGenerationRequest)` and `ServiceCapabilities::imageEdit`.
 
+### Preset prompt flows
+
+A routed `image.generate` whose preset has a non-empty `promptFlow` runs its LLM
+steps in order inside the same job, before image generation. Every step must
+have an installed GGUF `llm-chat` model and `llama-completion` must be available;
+otherwise submission fails with `model-routing-unavailable` (naming the step),
+`llm-format-unsupported` or `backend-not-ready`. Each step receives the JSON
+object `{"positive": string, "negative": string}` (the trimmed prompts) as the
+user message, with its instructions plus a fixed JSON reply contract as the
+system prompt, and must reply with an object of the same shape; surrounding text
+or code fences are ignored, and an omitted `negative` keeps the previous value.
+Preset prefixes are composed once onto the final prompts after the last step.
+Before each step the job emits `progress` with stage `enhancing-prompt`,
+`percentage` 0, `statusText` (step name), 1-based `flowStep`, `flowSteps` and
+`flowStepName`/`flowStepNameFr`. A failing step, timeout or unparsable reply
+ends the job with `prompt-flow-failed`, naming the step.
+
+The routed generation `result` message carries `prompt` and `negativePrompt`:
+the final prompts without preset prefixes. Optional boolean `skipPromptFlow`
+(routed generation only) submits the prompts as final prompts and runs no step.
+SDK clients set `ImageGenerationRequest::skipPromptFlow` and read
+`ImageJobResult::prompt`/`negativePrompt` and the `GenerationProgress` flow
+fields.
+
+`capabilities.operations` includes `prompt-flow.run` with `prompt.enhance`.
+Submit operation `prompt-flow.run` with exactly `presetId`, `prompt` and optional
+`negativePrompt` (strings of at most 64 KiB) to preview a preset's flow without
+generating an image. It shares the single job queue, step validation, progress
+and `prompt-flow-failed` errors; a preset without steps fails with
+`prompt-flow-empty`. Success sends `{type: "result", operation:
+"prompt-flow.run", prompt, negativePrompt}` with the final unprefixed prompts.
+SDK clients use `canRunPromptFlow(presetId)`, `runPromptFlow(PromptFlowRequest)`,
+`promptFlowFinished(PromptFlowResult)` and `ServiceCapabilities::promptFlow`.
+
 
 
 ## Local identity portrait packages

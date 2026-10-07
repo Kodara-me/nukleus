@@ -83,6 +83,7 @@ private slots:
     void configuresModelRoutingThroughSdk();
     void persistsPromptStyles();
     void enhancesPromptThroughSdk();
+    void runsPresetPromptFlowBeforeGeneration();
     void configuresStylesOverProtocol();
     void generatesWithValidatedOptionsAndVae();
     void validatesRecommendedOptions();
@@ -1379,6 +1380,157 @@ void ServiceTest::installsModelAtomically()
     QVERIFY(!restored.modelById("upscaler:model.gguf")->explicitContent);
     const QString finalPath = directory.filePath(QStringLiteral("upscale/model.gguf"));
     QVERIFY(QFileInfo::exists(finalPath)); QVERIFY(!QFileInfo::exists(finalPath + QStringLiteral(".part")));
+}
+
+void ServiceTest::runsPresetPromptFlowBeforeGeneration()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli and llama-completion fixtures require a POSIX shell.");
+#endif
+    QTemporaryDir directory;
+    const QByteArray oldPath = qgetenv("PATH");
+    const auto restore = qScopeGuard([oldPath] { qputenv("PATH", oldPath); });
+    qputenv("PATH", directory.path().toUtf8() + ':' + oldPath);
+    QFile image(directory.filePath("fixture.png"));
+    QVERIFY(image.open(QIODevice::WriteOnly));
+    image.write(QByteArray::fromBase64(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1kAAAAASUVORK5CYII="));
+    image.close();
+    const auto writeScript = [&](const QString &name, const QByteArray &body) {
+        QFile script(directory.filePath(name));
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write(body);
+        script.close();
+        QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    };
+    writeScript("sd-cli", "#!/bin/sh\nroot=$(dirname \"$0\")\nprintf '%s\\n' \"$@\" > \"$root/sd-args\"\nprevious=\n"
+                          "for argument in \"$@\"; do\n"
+                          "if [ \"$previous\" = --output ]; then cp \"$root/fixture.png\" \"$argument\"; fi\n"
+                          "previous=\"$argument\"\ndone\n");
+    // The first step answers inside code fences; the second omits negative, which is kept.
+    writeScript("completion", "#!/bin/sh\nroot=$(dirname \"$0\")\nprevious=\nfor argument in \"$@\"; do\n"
+                              "if [ \"$previous\" = --file ]; then cat \"$argument\" >> \"$root/inputs\"; echo >> \"$root/inputs\"; fi\n"
+                              "if [ \"$previous\" = --system-prompt-file ]; then cat \"$argument\" > \"$root/system\"; fi\n"
+                              "previous=\"$argument\"\ndone\n"
+                              "if [ -f \"$root/bad\" ]; then printf 'not json'; exit 0; fi\n"
+                              "if [ -f \"$root/first-done\" ]; then rm \"$root/first-done\"; printf '{\"positive\": \"specialised\"}'; exit 0; fi\n"
+                              "touch \"$root/first-done\"\n"
+                              "printf '```json\\n{\"positive\": \"enhanced\", \"negative\": \"blurry\"}\\n```\\n[end of text]\\n'\n");
+    const QString root = directory.filePath("models");
+    QVERIFY(QDir().mkpath(QDir(root).filePath("llm")));
+    for (const auto &name : {QString("image.gguf"), QString("llm/chat.gguf")}) {
+        QFile file(QDir(root).filePath(name));
+        QVERIFY(file.open(QIODevice::WriteOnly)); file.write("fixture");
+    }
+    ModelCatalog catalog(root, false);
+    QString error;
+    QVERIFY2(configureNamed(catalog, "image-generation:image.gguf",
+        KiraService::Protocol::defaultModelOptions("image-generation"), &error), qPrintable(error));
+    QVERIFY2(configureNamed(catalog, "llm-chat:chat.gguf",
+        KiraService::Protocol::defaultModelOptions("llm-chat"), &error), qPrintable(error));
+    auto routing = KiraService::Protocol::starterModelRouting();
+    routing.presets[1].positivePrefix = "illustration";
+    routing.presets[1].qualities[1].modelId = "image-generation:image.gguf";
+    routing.presets[1].promptFlow = {{"enhance", "Enhance", "Améliorer", "llm-chat:chat.gguf", "Translate to English."},
+                                     {"specialist", "Specialist", "Spécialiste", "llm-chat:chat.gguf", ""}};
+    QVERIFY2(catalog.configureRouting(routing, &error), qPrintable(error));
+    KiraServiceConfiguration configuration;
+    configuration.port = 0; configuration.modelRootPath = root;
+    configuration.llamaCompletion = directory.filePath("completion");
+    KiraServiceDaemon daemon(configuration);
+    QVERIFY2(daemon.start(&error), qPrintable(error));
+    KiraService::ServiceClient client;
+    client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
+    QSignalSpy finished(&client, &KiraService::ServiceClient::imageJobFinished);
+    QList<KiraService::GenerationProgress> progress;
+    connect(&client, &KiraService::ServiceClient::generationProgressChanged, this,
+            [&](const QString &, const KiraService::GenerationProgress &value) { progress.append(value); });
+    client.connectToService();
+    QTRY_VERIFY(client.modelRouting().has_value() && client.canSubmit(KiraService::ImageOperation::Generate, "image-generation:image.gguf"));
+    KiraService::ImageGenerationRequest request;
+    request.prompt = "  un chat roux  ";
+    request.presetId = "illustration";
+    request.qualityId = "illustration-medium";
+    request.width = 512; request.height = 512;
+    const auto read = [&](const QString &name) {
+        QFile file(directory.filePath(name));
+        return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString();
+    };
+    const auto argument = [&](const QString &name) {
+        const auto args = read("sd-args").split('\n');
+        return args.value(args.indexOf(name) + 1);
+    };
+    const auto takeResult = [&] {
+        [&] { QTRY_COMPARE(finished.count(), 1); }();
+        return qvariant_cast<KiraService::ImageJobResult>(finished.takeFirst().at(0));
+    };
+    QVERIFY(!client.submitGeneration(request).isEmpty());
+    auto result = takeResult();
+    QVERIFY2(result.succeeded, qPrintable(result.message));
+    QCOMPARE(result.prompt, QString("specialised"));
+    QCOMPARE(result.negativePrompt, QString("blurry"));
+    QCOMPARE(argument("--prompt"), QString("illustration, specialised")); // Prefixes follow the last step.
+    QCOMPARE(argument("--negative-prompt"), QString("blurry"));
+    const auto inputs = read("inputs").split('\n', Qt::SkipEmptyParts);
+    QCOMPARE(inputs.size(), 2);
+    QCOMPARE(QJsonDocument::fromJson(inputs[0].toUtf8()).object(), (QJsonObject{{"positive", "un chat roux"}, {"negative", ""}}));
+    QCOMPARE(QJsonDocument::fromJson(inputs[1].toUtf8()).object(), (QJsonObject{{"positive", "enhanced"}, {"negative", "blurry"}}));
+    QVERIFY(read("system").contains("{\"positive\": string, \"negative\": string}"));
+    QList<int> steps;
+    for (const auto &value : progress)
+        if (value.stage == KiraService::GenerationProgressStage::EnhancingPrompt) {
+            QCOMPARE(value.flowSteps, std::optional<int>(2));
+            steps.append(value.flowStep.value_or(0));
+        }
+    QCOMPARE(steps, (QList<int>{1, 2}));
+    const auto names = std::find_if(progress.cbegin(), progress.cend(), [](const auto &value) { return value.flowStep == 2; });
+    QCOMPARE(names->flowStepName, QString("Specialist"));
+    QCOMPARE(names->flowStepNameFr, QString("Spécialiste"));
+    // Skipping the flow submits the prompts as final prompts without LLM calls.
+    request.prompt = "final words";
+    request.skipPromptFlow = true;
+    QVERIFY(!client.submitGeneration(request).isEmpty());
+    result = takeResult();
+    QVERIFY2(result.succeeded, qPrintable(result.message));
+    QCOMPARE(result.prompt, QString("final words"));
+    QCOMPARE(argument("--prompt"), QString("illustration, final words"));
+    QCOMPARE(read("inputs").split('\n', Qt::SkipEmptyParts).size(), 2);
+    request.skipPromptFlow = false;
+    // A flow preview runs the same steps and returns the final prompts without an image.
+    QSignalSpy previews(&client, &KiraService::ServiceClient::promptFlowFinished);
+    QVERIFY(client.capabilities().promptFlow);
+    QVERIFY(client.canRunPromptFlow("illustration"));
+    QVERIFY(!client.canRunPromptFlow("photorealism")); // Its flow is empty.
+    QVERIFY(client.runPromptFlow({"photorealism", "chat", {}}).isEmpty());
+    QVERIFY(!client.runPromptFlow({"illustration", "un chien", "flou"}).isEmpty());
+    QTRY_COMPARE(previews.count(), 1);
+    auto preview = qvariant_cast<KiraService::PromptFlowResult>(previews.takeFirst().at(0));
+    QVERIFY2(preview.succeeded, qPrintable(preview.message));
+    QCOMPARE(preview.prompt, QString("specialised"));
+    QCOMPARE(preview.negativePrompt, QString("blurry"));
+    QCOMPARE(QJsonDocument::fromJson(read("inputs").split('\n', Qt::SkipEmptyParts).value(2).toUtf8()).object(),
+             (QJsonObject{{"positive", "un chien"}, {"negative", "flou"}}));
+    QCOMPARE(finished.count(), 0);
+    QFile bad(directory.filePath("bad"));
+    QVERIFY(bad.open(QIODevice::WriteOnly)); bad.close();
+    QVERIFY(!client.runPromptFlow({"illustration", "un chien", {}}).isEmpty());
+    QTRY_COMPARE(previews.count(), 1);
+    preview = qvariant_cast<KiraService::PromptFlowResult>(previews.takeFirst().at(0));
+    QVERIFY(!preview.succeeded);
+    QCOMPARE(preview.errorCode, QString("prompt-flow-failed"));
+    QVERIFY(!client.submitGeneration(request).isEmpty());
+    result = takeResult();
+    QVERIFY(!result.succeeded);
+    QCOMPARE(result.errorCode, QString("prompt-flow-failed"));
+    QVERIFY(result.message.contains("Enhance"));
+    QVERIFY(bad.remove());
+    routing.presets[1].promptFlow[1].modelId.clear();
+    QVERIFY2(catalog.configureRouting(routing, &error), qPrintable(error));
+    QVERIFY(!client.submitGeneration(request).isEmpty());
+    result = takeResult();
+    QVERIFY(!result.succeeded);
+    QCOMPARE(result.errorCode, QString("model-routing-unavailable"));
+    QVERIFY(result.message.contains("Specialist"));
 }
 
 void ServiceTest::enhancesPromptThroughSdk()
