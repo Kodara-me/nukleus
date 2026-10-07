@@ -622,7 +622,8 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QTRY_VERIFY(terminal("edit-test"));
     QTRY_COMPARE(images.count(), 1);
     const auto editArgs = arguments();
-    QVERIFY(editArgs.contains("--ref-image"));
+    QCOMPARE(editArgs.count("-r"), 1);
+    QVERIFY(!editArgs.contains("--ref-image"));
     QCOMPARE(editArgs.count("--offload-to-cpu"), 1);
     QCOMPARE(editArgs.count("--diffusion-fa"), 1);
     QCOMPARE(editArgs.value(editArgs.indexOf("--model-args") + 1), QString("qwen_image_zero_cond_t=true"));
@@ -634,6 +635,20 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(editArgs.value(editArgs.indexOf("--vae") + 1), QDir(editRoot).filePath("companions/edit.gguf/vae.safetensors"));
     QVERIFY(!editArgs.contains("--llm_vision"));
     QCOMPARE(messages.last().value("operation").toString(), QString("image.edit"));
+    images.clear();
+    messages.clear();
+    editOptions.insert("inputCount", 3);
+    socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"type", "submit"}, {"operation", "image.edit"}, {"jobId", "edit-multi"},
+        {"options", editOptions}}).toJson()));
+    for (int index = 0; index < 3; ++index) {
+        QTRY_COMPARE(std::count_if(messages.cbegin(), messages.cend(), [](const QJsonObject &message) {
+            return message.value("type") == "upload-required" && message.value("jobId") == "edit-multi"; }), index + 1);
+        socket.sendBinaryMessage(image);
+    }
+    QTRY_VERIFY(terminal("edit-multi"));
+    QTRY_COMPARE(images.count(), 1);
+    QCOMPARE(arguments().count("-r"), 3);
     images.clear();
     messages.clear();
     send("automatic", valid);

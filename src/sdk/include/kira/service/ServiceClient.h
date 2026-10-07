@@ -66,11 +66,11 @@ private:
     struct PendingJob
     {
         ImageOperation operation = ImageOperation::Generate;
-        QByteArray inputData;
+        QList<QByteArray> inputImages;
         QString mimeType;
         bool promptEnhancement = false;
     };
-    QString submit(ImageOperation operation, const QJsonObject& options, const QByteArray& inputData);
+    QString submit(ImageOperation operation, const QJsonObject& options, const QList<QByteArray>& inputImages);
     void authenticate();
     void handleTextMessage(const QString &message);
     void handleBinaryMessage(const QByteArray &data);

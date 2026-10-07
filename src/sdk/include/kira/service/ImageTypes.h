@@ -2,6 +2,7 @@
 
 #include <QByteArray>
 #include <QJsonObject>
+#include <QList>
 #include <QMetaType>
 #include <QString>
 #include <QUrl>
@@ -83,6 +84,7 @@ struct ImageGenerationRequest
     int clipSkip = -1;
     int seed = -1;
     QByteArray baseImageData;
+    QList<QByteArray> editImages;
     double baseImageStrength = 0.55;
     QString modelId;
     QString styleId;

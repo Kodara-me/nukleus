@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include <QStringList>
 
 struct GenerationRequest
 {
@@ -14,7 +15,7 @@ struct GenerationRequest
     double cfgScale = 7.0;
     int clipSkip = -1;
     int seed = -1;
-    QString referenceImagePath;
+    QStringList referenceImagePaths;
     QString baseImagePath;
     double baseImageStrength = 0.55;
     QString outputPath;

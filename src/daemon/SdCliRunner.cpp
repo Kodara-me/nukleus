@@ -116,10 +116,11 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
     if (!request.llmVisionPath.isEmpty()) arguments.append({QStringLiteral("--llm_vision"), request.llmVisionPath});
     if (!request.clipLPath.isEmpty()) arguments.append({QStringLiteral("--clip_l"), request.clipLPath});
     if (!request.clipGPath.isEmpty()) arguments.append({QStringLiteral("--clip_g"), request.clipGPath});
-    if (!request.referenceImagePath.isEmpty())
-        arguments.append({QStringLiteral("--ref-image"), request.referenceImagePath,
-            QStringLiteral("--flow-shift"), QStringLiteral("3"),
+    if (!request.referenceImagePaths.isEmpty()) {
+        for (const QString &path : request.referenceImagePaths) arguments.append({QStringLiteral("-r"), path});
+        arguments.append({QStringLiteral("--flow-shift"), QStringLiteral("3"),
             QStringLiteral("--model-args"), QStringLiteral("qwen_image_zero_cond_t=true")});
+    }
     if (!request.baseImagePath.isEmpty()) {
         arguments.append({QStringLiteral("--init-img"), request.baseImagePath,
                           QStringLiteral("--strength"), QString::number(request.baseImageStrength, 'g', 17)});

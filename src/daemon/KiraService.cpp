@@ -26,6 +26,7 @@
 namespace
 {
 constexpr int MaximumQueuedJobs = 8;
+constexpr int MaximumEditImages = 8;
 
 bool validNumber(const QJsonObject &object, const QString &name, double minimum, double maximum,
                  bool integer, bool required = true)
@@ -41,7 +42,7 @@ bool validGenerationOptions(const QJsonObject &options)
 {
     const QStringList allowed{"modelId", "prompt", "negativePrompt", "width", "height",
         "steps", "cfgScale", "clipSkip", "seed", "sampler", "scheduler",
-        "hasInput", "baseImageStrength", "styleId", "presetId", "qualityId"};
+        "hasInput", "inputCount", "baseImageStrength", "styleId", "presetId", "qualityId"};
     for (const auto& key : options.keys())
         if (!allowed.contains(key)) return false;
     const auto optionalString = [&options](const QString &key) {
@@ -52,6 +53,7 @@ bool validGenerationOptions(const QJsonObject &options)
     };
     return options.value("prompt").isString() && !options.value("prompt").toString().trimmed().isEmpty()
         && optionalString("negativePrompt")
+        && validNumber(options, "inputCount", 1, MaximumEditImages, true, false)
         && validNumber(options, "width", 64, 4096, true, false)
         && validNumber(options, "height", 64, 4096, true, false)
         && validNumber(options, "steps", 1, 200, true, false)
@@ -80,7 +82,8 @@ struct KiraServiceDaemon::Submission
     QString clipGPath;
     bool diffusionModel = false;
     QPointer<QWebSocket> client;
-    QByteArray inputData;
+    int expectedInputs = 1;
+    QList<QByteArray> inputs;
 };
 
 struct KiraServiceDaemon::Job
@@ -97,7 +100,7 @@ struct KiraServiceDaemon::Job
     bool diffusionModel = false;
     QPointer<QWebSocket> client;
     std::unique_ptr<QTemporaryDir> directory = std::make_unique<QTemporaryDir>();
-    QString inputPath;
+    QStringList inputPaths;
     QString outputPath;
 };
 
@@ -364,6 +367,10 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         sendError(socket, QStringLiteral("invalid-request"), tr("Invalid generation options"), jobId);
         return;
     }
+    if (!edit && options.contains("inputCount")) {
+        sendError(socket, QStringLiteral("invalid-request"), tr("Multiple input images are only supported for image editing"), jobId);
+        return;
+    }
     if (quality) {
         if (!options.contains("steps") && quality->steps) options.insert("steps", *quality->steps);
         if (!options.contains("cfgScale") && quality->cfgScale) options.insert("cfgScale", *quality->cfgScale);
@@ -397,6 +404,7 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     submission->id = jobId;
     submission->operation = edit ? Operation::Edit : generate ? Operation::Generate : Operation::Upscale;
     submission->options = options;
+    submission->expectedInputs = edit ? options.value("inputCount").toInt(1) : 1;
     submission->modelPath = model->filePath;
     if ((generate || edit) && model->companionRole == QStringLiteral("vae") && !model->companionFileName.isEmpty())
         submission->vaePath = QDir(QFileInfo(model->filePath).absolutePath()).filePath(model->companionFileName);
@@ -678,6 +686,12 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket* socket, const QByteArra
         sendError(socket, "invalid-image", tr("The image upload is empty or too large"), submission->id);
         return;
     }
+    submission->inputs.append(data);
+    if (submission->inputs.size() < submission->expectedInputs) {
+        send(socket, {{QStringLiteral("type"), QStringLiteral("upload-required")}, {QStringLiteral("jobId"), submission->id},
+            {"inputRole", "reference"}, {"inputIndex", int(submission->inputs.size())}});
+        return;
+    }
     m_pendingUploads.remove(socket);
     if (m_queue.size() >= MaximumQueuedJobs) {
         sendError(socket, "queue-full", tr("The service queue is full"), submission->id);
@@ -695,14 +709,17 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket* socket, const QByteArra
     job->clipGPath = submission->clipGPath;
     job->diffusionModel = submission->diffusionModel;
     job->client = socket;
-    job->inputPath = job->directory->filePath("input.png");
-    QFile input(job->inputPath);
-    if (!job->directory->isValid() || !input.open(QIODevice::WriteOnly)
-        || input.write(data) != data.size()) {
-        sendError(socket, "storage-error", tr("Could not save image upload"), job->id);
-        return;
+    for (int index = 0; index < submission->inputs.size(); ++index) {
+        const QByteArray &bytes = submission->inputs.at(index);
+        const QString path = job->directory->filePath(index == 0 ? QStringLiteral("input.png") : QStringLiteral("input-%1.png").arg(index + 1));
+        QFile input(path);
+        if (!job->directory->isValid() || !input.open(QIODevice::WriteOnly) || input.write(bytes) != bytes.size()) {
+            sendError(socket, "storage-error", tr("Could not save image upload"), job->id);
+            return;
+        }
+        input.close();
+        job->inputPaths.append(path);
     }
-    input.close();
     enqueue(job);
 }
 
@@ -742,12 +759,12 @@ void KiraServiceDaemon::startNextJob()
         request.clipLPath = m_activeJob->clipLPath;
         request.clipGPath = m_activeJob->clipGPath;
         request.diffusionModel = m_activeJob->diffusionModel;
-        if (m_activeJob->operation == Operation::Edit) request.referenceImagePath = m_activeJob->inputPath;
-        else if (o.value(QStringLiteral("hasInput")).toBool()) request.baseImagePath = m_activeJob->inputPath;
+        if (m_activeJob->operation == Operation::Edit) request.referenceImagePaths = m_activeJob->inputPaths;
+        else if (o.value(QStringLiteral("hasInput")).toBool()) request.baseImagePath = m_activeJob->inputPaths.value(0);
         if (!m_sdRunner || !m_sdRunner->runGeneration(request)) { sendError(m_activeJob->client, QStringLiteral("start-failed"), tr("Could not start generation"), m_activeJob->id); m_activeJob.reset(); startNextJob(); }
     } else if (m_activeJob->operation == Operation::Upscale) {
         m_activeJob->outputPath = m_activeJob->directory->filePath(QStringLiteral("result.png"));
-        const QStringList arguments = {QStringLiteral("--mode"), QStringLiteral("upscale"), QStringLiteral("--init-img"), m_activeJob->inputPath, QStringLiteral("--upscale-model"), m_activeJob->modelPath, QStringLiteral("--upscale-repeats"), QStringLiteral("1"), QStringLiteral("--upscale-tile-size"), QStringLiteral("128"), QStringLiteral("--output"), m_activeJob->outputPath};
+        const QStringList arguments = {QStringLiteral("--mode"), QStringLiteral("upscale"), QStringLiteral("--init-img"), m_activeJob->inputPaths.value(0), QStringLiteral("--upscale-model"), m_activeJob->modelPath, QStringLiteral("--upscale-repeats"), QStringLiteral("1"), QStringLiteral("--upscale-tile-size"), QStringLiteral("128"), QStringLiteral("--output"), m_activeJob->outputPath};
         if (!m_sdRunner || !m_sdRunner->runUpscale(arguments, m_activeJob->outputPath)) { sendError(m_activeJob->client, QStringLiteral("start-failed"), tr("Could not start upscaling"), m_activeJob->id); m_activeJob.reset(); startNextJob(); }
     }
     broadcastQueuePositions();

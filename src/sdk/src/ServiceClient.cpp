@@ -223,20 +223,20 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
     if (!request.styleId.isEmpty()) options.insert("styleId", request.styleId);
     if (!request.presetId.isEmpty()) options.insert("presetId", request.presetId);
     if (!request.qualityId.isEmpty()) options.insert("qualityId", request.qualityId);
-    return submit(ImageOperation::Generate, options, request.baseImageData);
+    return submit(ImageOperation::Generate, options, request.baseImageData.isEmpty() ? QList<QByteArray>{} : QList<QByteArray>{request.baseImageData});
 }
 
 QString ServiceClient::submitEdit(const ImageGenerationRequest &request)
 {
     if (!request.styleId.isEmpty() || !request.presetId.isEmpty()
         || (!request.qualityId.isEmpty() && !m_capabilities.modelRouting)) return {};
-    if (request.baseImageData.isEmpty() || request.prompt.trimmed().isEmpty()) return {};
-    QJsonObject options{{"modelId", request.modelId}, {"hasInput", true}, {"prompt", request.prompt},
+    if (request.editImages.isEmpty() || request.editImages.size() > 8 || request.editImages.contains(QByteArray()) || request.prompt.trimmed().isEmpty()) return {};
+    QJsonObject options{{"modelId", request.modelId}, {"inputCount", int(request.editImages.size())}, {"prompt", request.prompt},
          {"width", request.width}, {"height", request.height}, {"steps", request.steps},
          {"cfgScale", request.cfgScale}, {"sampler", request.sampler},
          {"scheduler", request.scheduler}, {"clipSkip", request.clipSkip}};
     if (!request.qualityId.isEmpty()) options.insert("qualityId", request.qualityId);
-    return submit(ImageOperation::Edit, options, request.baseImageData);
+    return submit(ImageOperation::Edit, options, request.editImages);
 }
 
 QString ServiceClient::submitUpscale(const ImageUpscaleRequest &request)
@@ -244,7 +244,7 @@ QString ServiceClient::submitUpscale(const ImageUpscaleRequest &request)
     if (request.sourceImageData.isEmpty()) return {};
     return submit(ImageOperation::Upscale,
                   {{QStringLiteral("modelId"), request.modelId}, {QStringLiteral("hasInput"), true}},
-                  request.sourceImageData);
+                  {request.sourceImageData});
 }
 
 bool ServiceClient::canEnhancePrompt(const QString& modelId) const
@@ -267,7 +267,7 @@ QString ServiceClient::enhancePrompt(const PromptEnhancementRequest& request)
     return jobId;
 }
 
-QString ServiceClient::submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData)
+QString ServiceClient::submit(ImageOperation operation, const QJsonObject &options, const QList<QByteArray> &inputImages)
 {
     QString modelId = options.value("modelId").toString();
     if (modelId.isEmpty() && m_routing && options.contains("qualityId")) {
@@ -282,7 +282,7 @@ QString ServiceClient::submit(ImageOperation operation, const QJsonObject &optio
     const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     PendingJob job;
     job.operation = operation;
-    job.inputData = inputData;
+    job.inputImages = inputImages;
     m_pendingJobs.insert(jobId, job);
     const QJsonObject message{{QStringLiteral("type"), QStringLiteral("submit")},
                               {QStringLiteral("jobId"), jobId},
@@ -435,8 +435,9 @@ void ServiceClient::handleTextMessage(const QString &message)
     if (type == QStringLiteral("upload-required")) {
         emit jobStateChanged(jobId, JobState::Uploading, -1);
         const auto &job = m_pendingJobs.value(jobId);
-        const auto role = object.value("inputRole").toString();
-        m_socket->sendBinaryMessage(job.inputData);
+        const int index = object.value("inputIndex").toInt(0);
+        if (index < 0 || index >= job.inputImages.size()) return;
+        m_socket->sendBinaryMessage(job.inputImages.at(index));
     } else if (type == QStringLiteral("progress")) {
         emit generationProgressChanged(jobId, Protocol::progressFromJson(object.value(QStringLiteral("progress")).toObject()));
     } else if (type == QStringLiteral("output")) {
