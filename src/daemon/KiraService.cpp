@@ -865,7 +865,7 @@ void KiraServiceDaemon::startPromptFlowStep()
         "headings or code fences.");
     const QString input = QString::fromUtf8(QJsonDocument(QJsonObject{
         {"positive", job->flow.prompt}, {"negative", job->flow.negativePrompt}}).toJson(QJsonDocument::Compact));
-    if (!startLlm(step.modelPath, step.parameters, system, input)) {
+    if (!startLlm(step.modelPath, step.parameters, system, input, false)) {
         sendError(job->client, "storage-error", tr("Could not prepare prompt flow step “%1”").arg(step.name), job->id);
         m_activeJob.reset(); startNextJob();
     }
@@ -1101,7 +1101,8 @@ void KiraServiceDaemon::startPromptEnhancement()
     }
 }
 
-bool KiraServiceDaemon::startLlm(const QString &modelPath, const QJsonObject &parameters, const QString &system, const QString &input)
+bool KiraServiceDaemon::startLlm(const QString &modelPath, const QJsonObject &parameters, const QString &system,
+                                 const QString &input, bool penalizeRepeats)
 {
     const auto job = m_activeJob;
     const QString promptPath = job->directory->filePath("prompt.txt");
@@ -1116,8 +1117,10 @@ bool KiraServiceDaemon::startLlm(const QString &modelPath, const QJsonObject &pa
         "--single-turn", "--conversation", "--jinja", "--no-display-prompt", "--simple-io", "--color", "off",
         "--reasoning", "off", "--no-context-shift", "--ctx-size", QString::number(parameters.value("contextLength").toInt()),
         "--n-predict", QString::number(parameters.value("maxTokens").toInt()),
-        "--repeat-penalty", QStringLiteral("1.1"),
-        "--repeat-last-n", QString::number(parameters.value("contextLength").toInt()),
+        // llama.cpp also penalizes prompt tokens. Flow steps repeat their instructions'
+        // words and JSON keys by design, so a penalty there garbles small models.
+        "--repeat-penalty", penalizeRepeats ? QStringLiteral("1.1") : QStringLiteral("1.0"),
+        "--repeat-last-n", penalizeRepeats ? QString::number(parameters.value("contextLength").toInt()) : QStringLiteral("0"),
         "--samplers", "penalties;top_k;top_p;temperature", "--temp",
         QString::number(parameters.value("temperature").toDouble(), 'g', 17),
         "--top-p", QString::number(parameters.value("topP").toDouble(), 'g', 17),

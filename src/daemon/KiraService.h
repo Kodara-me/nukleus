@@ -66,7 +66,8 @@ private:
     void startNextJob();
     void runActiveJob();
     void startPromptFlowStep();
-    bool startLlm(const QString &modelPath, const QJsonObject &parameters, const QString &system, const QString &input);
+    bool startLlm(const QString &modelPath, const QJsonObject &parameters, const QString &system, const QString &input,
+                  bool penalizeRepeats = true);
     void cancelJobsFor(QWebSocket *socket);
     void broadcastQueuePositions();
     void handleGenerationFinished(const SdCliGenerationResult &result);

@@ -1408,7 +1408,8 @@ void ServiceTest::runsPresetPromptFlowBeforeGeneration()
                           "if [ \"$previous\" = --output ]; then cp \"$root/fixture.png\" \"$argument\"; fi\n"
                           "previous=\"$argument\"\ndone\n");
     // The first step answers inside code fences; the second omits negative, which is kept.
-    writeScript("completion", "#!/bin/sh\nroot=$(dirname \"$0\")\nprevious=\nfor argument in \"$@\"; do\n"
+    writeScript("completion", "#!/bin/sh\nroot=$(dirname \"$0\")\nprintf '%s\\n' \"$@\" > \"$root/llm-args\"\n"
+                              "previous=\nfor argument in \"$@\"; do\n"
                               "if [ \"$previous\" = --file ]; then cat \"$argument\" >> \"$root/inputs\"; echo >> \"$root/inputs\"; fi\n"
                               "if [ \"$previous\" = --system-prompt-file ]; then cat \"$argument\" > \"$root/system\"; fi\n"
                               "previous=\"$argument\"\ndone\n"
@@ -1476,6 +1477,9 @@ void ServiceTest::runsPresetPromptFlowBeforeGeneration()
     QCOMPARE(QJsonDocument::fromJson(inputs[0].toUtf8()).object(), (QJsonObject{{"positive", "un chat roux"}, {"negative", ""}}));
     QCOMPARE(QJsonDocument::fromJson(inputs[1].toUtf8()).object(), (QJsonObject{{"positive", "enhanced"}, {"negative", "blurry"}}));
     QVERIFY(read("system").contains("{\"positive\": string, \"negative\": string}"));
+    // Flow steps disable the repetition penalty, which would also penalize the instructions.
+    QVERIFY(read("llm-args").contains("--repeat-penalty\n1.0\n"));
+    QVERIFY(read("llm-args").contains("--repeat-last-n\n0\n"));
     QList<int> steps;
     for (const auto &value : progress)
         if (value.stage == KiraService::GenerationProgressStage::EnhancingPrompt) {
