@@ -25,9 +25,12 @@ bool validateModelRouting(const ModelRouting &routing, QString *error)
     const auto qualitiesValid = [](const QList<ModelQuality> &actual, const QList<ModelQuality> &expected) {
         if (actual.size() != expected.size())
             return false;
+        int permanentCount = 0;
         for (int i = 0; i < actual.size(); ++i)
         {
             const auto &q = actual.at(i);
+            if (q.permanent && ++permanentCount > 1)
+                return false;
             const auto &label = expected.at(i);
             if (q.id != label.id || q.name != label.name || q.nameFr != label.nameFr ||
                 (q.steps && (*q.steps < 1 || *q.steps > 200)) ||
@@ -53,7 +56,7 @@ bool validateModelRouting(const ModelRouting &routing, QString *error)
         }
     if (!valid && error)
         *error = QStringLiteral("Presets, qualities and bilingual labels are fixed. Steps must be 1–200, CFG 0–100 and "
-                                "prefixes at most 65536 characters.");
+                                "prefixes at most 65536 characters. Only one quality per group may be permanent.");
     return valid;
 }
 
@@ -64,6 +67,7 @@ QJsonObject modelRoutingToJson(const ModelRouting &routing)
         for (const auto &q : list)
         {
             QJsonObject item{{"id", q.id}, {"name", q.name}, {"nameFr", q.nameFr}, {"modelId", q.modelId}};
+            item.insert("permanent", q.permanent);
             if (q.steps)
                 item.insert("steps", *q.steps);
             if (q.cfgScale)
@@ -109,6 +113,9 @@ std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QStr
                 return false;
             ModelQuality quality{q.value("id").toString(), q.value("name").toString(), q.value("modelId").toString()};
             quality.nameFr = q.value("nameFr").toString();
+            if (q.contains("permanent") && !q.value("permanent").isBool())
+                return false;
+            quality.permanent = q.value("permanent").toBool(false);
             if (quality.id.trimmed().isEmpty() || ids.contains(quality.id) || quality.name.trimmed().isEmpty() ||
                 names.contains(quality.name.trimmed().toCaseFolded()))
                 return false;
@@ -174,6 +181,7 @@ std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QStr
                         q.modelId = old.modelId;
                         q.steps = old.steps;
                         q.cfgScale = old.cfgScale;
+                        q.permanent = old.permanent;
                         break;
                     }
         };

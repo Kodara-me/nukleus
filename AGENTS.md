@@ -167,6 +167,11 @@ edits Model, Steps and CFG. Choosing a model snapshots its recommendations, or
 shared defaults when absent. Save persists those values including manual edits;
 catalogue refresh must not replace them. None clears the assignment and snapshot.
 Keep only Save/Cancel buttons; await acknowledgment and discard drafts on Cancel.
+Each quality exposes a Permanent quality checkbox, saved as an optional boolean
+`permanent` (default false) in version-2 routing. Permit at most one checked
+quality independently within each preset and Editing. Checking another clears
+the previous choice only in that group. Canvas uses the permanent profile and
+hides that group's slider; no checked quality restores normal selection.
 
 Store version-2 model-routing.json beside model metadata through QSaveFile.
 Transmit name (English) and nameFr for every preset/quality. SDK displayLabel

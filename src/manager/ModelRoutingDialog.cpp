@@ -4,6 +4,7 @@
 #include <KiraUi/PrimaryButton.h>
 #include <KiraUi/TreeView.h>
 #include <QComboBox>
+#include <QCheckBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -35,7 +36,8 @@ enum Role
     NegativeRole,
     ModelRole,
     StepsRole,
-    CfgRole
+    CfgRole,
+    PermanentRole
 };
 QStandardItem *entry(const QString &name, Kind kind, const QString &id = {})
 {
@@ -72,6 +74,7 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
     const auto appendQuality = [this](QStandardItem *parentItem, const KiraService::ModelQuality &quality) {
         auto *item = entry(quality.name, Quality, quality.id);
         item->setData(quality.modelId, ModelRole);
+        item->setData(quality.permanent, PermanentRole);
         auto steps = quality.steps;
         auto cfg = quality.cfgScale;
         if (!quality.modelId.isEmpty())
@@ -144,6 +147,10 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
     m_cfg->setSingleStep(0.5);
     form->addRow(tr("Steps:"), m_steps);
     form->addRow(tr("CFG Scale:"), m_cfg);
+    m_permanent = new QCheckBox(tr("Permanent quality"), assignment);
+    m_permanent->setObjectName("qualityPermanent");
+    m_permanent->setToolTip(tr("Use this quality in Canvas and hide the quality slider for this group."));
+    form->addRow(m_permanent);
     assignmentLayout->addLayout(form);
     assignmentLayout->addStretch();
     m_editor->addWidget(assignment);
@@ -217,6 +224,17 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
                 item->setData(cfg, CfgRole);
     });
     connect(m_cancel, &QPushButton::clicked, this, &ModelRoutingDialog::reject);
+    connect(m_permanent, &QCheckBox::toggled, this, [this](bool checked) {
+        if (m_showing)
+            return;
+        auto *item = selectedItem();
+        if (!item || item->data(KindRole).toInt() != Quality)
+            return;
+        if (checked)
+            for (int row = 0; row < item->parent()->rowCount(); ++row)
+                item->parent()->child(row)->setData(false, PermanentRole);
+        item->setData(checked, PermanentRole);
+    });
     connect(m_save, &QPushButton::clicked, this, [this] {
         if (!m_client->configureModelRouting(configuration()))
         {
@@ -271,6 +289,7 @@ void ModelRoutingDialog::showSelection()
     const bool assigned = kind == Quality && !item->data(ModelRole).toString().isEmpty();
     m_steps->setEnabled(assigned);
     m_cfg->setEnabled(assigned);
+    m_permanent->setChecked(kind == Quality && item->data(PermanentRole).toBool());
     m_showing = false;
     updateActions();
 }
@@ -310,6 +329,7 @@ KiraService::ModelRouting ModelRoutingDialog::configuration() const
                 continue;
             auto &q = result[row];
             q.modelId = item->data(ModelRole).toString();
+            q.permanent = item->data(PermanentRole).toBool();
             if (item->data(StepsRole).isValid())
                 q.steps = item->data(StepsRole).toInt();
             if (item->data(CfgRole).isValid())

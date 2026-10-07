@@ -17,6 +17,7 @@ struct ModelQuality
     std::optional<int> steps = {};
     std::optional<double> cfgScale = {};
     QString nameFr = {};
+    bool permanent = false;
     QString displayLabel(const QLocale &locale = QLocale()) const
     {
         return locale.language() == QLocale::French && !nameFr.isEmpty() ? nameFr : name;

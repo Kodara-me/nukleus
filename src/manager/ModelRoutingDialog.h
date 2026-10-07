@@ -12,6 +12,7 @@ class QPushButton;
 class QStackedWidget;
 class QSpinBox;
 class QDoubleSpinBox;
+class QCheckBox;
 namespace KiraUi
 {
 class TreeView;
@@ -43,6 +44,7 @@ private:
     QComboBox *m_assignment;
     QSpinBox *m_steps;
     QDoubleSpinBox *m_cfg;
+    QCheckBox *m_permanent;
     QLabel *m_status;
     QPushButton *m_save;
     QPushButton *m_cancel;

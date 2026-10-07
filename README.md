@@ -92,6 +92,10 @@ to choose an eligible model and edit **Steps** and **CFG Scale**. Selecting a
 model snapshots its recommended values (shared defaults when absent); Save
 persists that pair, including manual reductions in steps. Catalogue refreshes
 never replace saved quality values. Models can be reused across qualities.
+Check **Permanent quality** to make Canvas use that profile and hide its quality
+slider. Only one quality can be permanent within Editing or each individual
+preset; checking another clears the previous choice in that group. Uncheck it
+to restore the slider. Save persists the choices; Cancel discards them.
 Mappings start unassigned and require explicit setup before Canvas can submit.
 Save waits for acknowledgment; Cancel discards all draft edits. Assigned models
 cannot be deleted or lose required capabilities until unassigned.
