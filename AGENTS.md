@@ -179,8 +179,12 @@ Each generation preset carries an ordered `promptFlow` of at most 4 LLM steps
 bilingual names are nonblank, instructions are at most 65536 characters and
 modelId is an installed `llm-chat` model or empty (unassigned). Assigned flow
 LLMs cannot be deleted; reconfiguring them is allowed. Versions 1 and 2 load
-with empty flows. Until the Manager has a flow editor, its Save keeps the
-service's saved flows unchanged.
+with empty flows. In Manager, a "Prompt flow (n steps)" node follows each
+preset's fixed qualities; its page lists steps with Add/Move up/Move down/Remove
+icon buttons (Add disabled at 4) above the selected step's English/French names,
+LLM selector (Unassigned, installed llm-chat models, Unavailable — id) and
+instructions. New steps get a generated unique ID and default names; flow edits
+follow the same Save/Cancel draft rules.
 Transmit name (English) and nameFr for every preset/quality. SDK displayLabel
 uses French for French locales, English otherwise. Validate fixed IDs, ordering
 and bilingual labels plus numeric bounds (Steps 1–200, finite CFG 0–100).

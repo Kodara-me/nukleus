@@ -13,6 +13,11 @@ class QStackedWidget;
 class QSpinBox;
 class QDoubleSpinBox;
 class QCheckBox;
+class QLineEdit;
+class QListWidget;
+class QAbstractButton;
+class QJsonArray;
+class QJsonObject;
 namespace KiraUi
 {
 class TreeView;
@@ -31,6 +36,10 @@ private:
     void showSelection();
     void updateActions();
     void refreshModels();
+    void showFlow(int row);
+    void editStep(const QString &key, const QString &value);
+    void setFlow(QStandardItem *item, const QJsonArray &flow);
+    QString stepLabel(int row, const QJsonObject &step) const;
     QStandardItem *selectedItem() const;
     KiraService::ModelRouting configuration() const;
     ManagerServiceClient *m_client;
@@ -45,6 +54,16 @@ private:
     QSpinBox *m_steps;
     QDoubleSpinBox *m_cfg;
     QCheckBox *m_permanent;
+    QListWidget *m_flowSteps;
+    QAbstractButton *m_addStep;
+    QAbstractButton *m_moveStepUp;
+    QAbstractButton *m_moveStepDown;
+    QAbstractButton *m_removeStep;
+    QWidget *m_stepEditor;
+    QLineEdit *m_stepName;
+    QLineEdit *m_stepNameFr;
+    QComboBox *m_stepModel;
+    QPlainTextEdit *m_stepInstructions;
     QLabel *m_status;
     QPushButton *m_save;
     QPushButton *m_cancel;

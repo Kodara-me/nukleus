@@ -185,11 +185,13 @@ class ManagerUiTest final : public QObject
         auto *editing = model->item(1);
         QCOMPARE(generation->rowCount(), 2);
         auto *preset = generation->child(0);
-        QCOMPARE(preset->rowCount(), 3);
+        QCOMPARE(preset->rowCount(), 4);
         QCOMPARE(preset->text(), QString("Photorealism"));
         QCOMPARE(preset->child(0)->text(), QString("Fast"));
         QCOMPARE(preset->child(1)->text(), QString("Balanced"));
         QCOMPARE(preset->child(2)->text(), QString("Quality"));
+        QCOMPARE(preset->child(3)->text(), QString("Prompt flow (0 steps)"));
+        QCOMPARE(generation->child(1)->child(3)->text(), QString("Prompt flow (1 step)"));
         QCOMPARE(editing->child(1)->text(), QString("Balanced"));
         QVERIFY(!(preset->flags() & Qt::ItemIsEditable));
         QVERIFY(!(preset->child(0)->flags() & Qt::ItemIsDragEnabled));
@@ -248,6 +250,40 @@ class ManagerUiTest final : public QObject
         permanent->setChecked(false);
         tree->setCurrentIndex(editing->child(2)->index());
         QVERIFY(permanent->isChecked());
+        auto *flowItem = generation->child(1)->child(3);
+        auto *flowSteps = dialog.findChild<QListWidget *>("flowSteps");
+        auto *stepName = dialog.findChild<QLineEdit *>("flowStepName");
+        auto *stepModel = dialog.findChild<QComboBox *>("flowStepModel");
+        auto *instructions = dialog.findChild<QPlainTextEdit *>("flowStepInstructions");
+        auto *addStep = dialog.findChild<QAbstractButton *>("addFlowStep");
+        auto *removeStep = dialog.findChild<QAbstractButton *>("removeFlowStep");
+        auto *moveDown = dialog.findChild<QAbstractButton *>("moveFlowStepDown");
+        QVERIFY(flowSteps && stepName && stepModel && instructions && addStep && removeStep && moveDown);
+        tree->setCurrentIndex(preset->child(3)->index());
+        QVERIFY(flowSteps->isVisible());
+        QCOMPARE(flowSteps->count(), 0);
+        QVERIFY(!stepName->isEnabled()); QVERIFY(!removeStep->isEnabled());
+        tree->setCurrentIndex(flowItem->index());
+        QCOMPARE(flowSteps->count(), 1);
+        QCOMPARE(flowSteps->item(0)->text(), QString("1. Enhance — Unassigned"));
+        QCOMPARE(stepName->text(), QString("Enhance"));
+        QCOMPARE(instructions->toPlainText(), QString("Improve."));
+        QCOMPARE(stepModel->currentData().toString(), QString());
+        QTest::keyClicks(stepName, "d");
+        QCOMPARE(flowSteps->item(0)->text(), QString("1. Enhanced — Unassigned"));
+        for (int i = 0; i < 3; ++i) addStep->click();
+        QCOMPARE(flowSteps->count(), 4);
+        QCOMPARE(flowItem->text(), QString("Prompt flow (4 steps)"));
+        QVERIFY(!addStep->isEnabled()); // At most four steps.
+        QCOMPARE(flowSteps->currentRow(), 3);
+        removeStep->click(); removeStep->click();
+        QCOMPARE(flowSteps->count(), 2);
+        flowSteps->setCurrentRow(0);
+        QCOMPARE(stepName->text(), QString("Enhanced"));
+        moveDown->click();
+        QCOMPARE(flowSteps->currentRow(), 1);
+        QCOMPARE(flowSteps->item(1)->text(), QString("2. Enhanced — Unassigned"));
+        instructions->setPlainText("Translate to English.");
         if (qEnvironmentVariableIsSet("KIRA_MANAGER_SCREENSHOT_DIR")) {
             const QDir directory(qEnvironmentVariable("KIRA_MANAGER_SCREENSHOT_DIR"));
             QVERIFY(directory.mkpath("."));
@@ -257,6 +293,9 @@ class ManagerUiTest final : public QObject
             tree->setCurrentIndex(preset->index());
             QCoreApplication::processEvents();
             QVERIFY(dialog.grab().save(directory.filePath("routing-preset.png")));
+            tree->setCurrentIndex(flowItem->index());
+            QCoreApplication::processEvents();
+            QVERIFY(dialog.grab().save(directory.filePath("routing-flow.png")));
         }
         QVERIFY(save->isEnabled()); save->click();
         QTRY_VERIFY(m_messages.last().value("type") == "model-routing.configure");
@@ -274,7 +313,14 @@ class ManagerUiTest final : public QObject
         const auto parsed = KiraService::Protocol::modelRoutingFromJson(sent);
         QVERIFY(parsed);
         QVERIFY(parsed->editingQualities[2].permanent);
-        QCOMPARE(parsed->presets[1].promptFlow, routing.presets[1].promptFlow); // Save keeps saved flows.
+        const auto &flow = parsed->presets[1].promptFlow;
+        QCOMPARE(flow.size(), 2);
+        QCOMPARE(flow[0].name, QString("Step 2"));
+        QCOMPARE(flow[0].nameFr, QString("Étape 2"));
+        QCOMPARE(flow[1].id, QString("enhance"));
+        QCOMPARE(flow[1].name, QString("Enhanced"));
+        QCOMPARE(flow[1].instructions, QString("Translate to English."));
+        QVERIFY(parsed->presets[0].promptFlow.isEmpty());
         QVERIFY(!parsed->editingQualities[1].permanent);
         QVERIFY(!parsed->presets[1].qualities[0].permanent);
         QCOMPARE(qualities.at(0).toObject().value("modelId").toString(), assignedModelId);
