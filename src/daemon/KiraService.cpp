@@ -421,8 +421,9 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         sendError(socket, QStringLiteral("invalid-request"), tr("Invalid generation options"), jobId);
         return;
     }
-    if (!edit && options.contains("inputCount")) {
-        sendError(socket, QStringLiteral("invalid-request"), tr("Multiple input images are only supported for image editing"), jobId);
+    if (!edit && options.contains("inputCount") && (!generate || options.value("hasInput").toBool())) {
+        sendError(socket, QStringLiteral("invalid-request"),
+            tr("Reference images are only supported for image editing and generation without a base image"), jobId);
         return;
     }
     if (quality) {
@@ -460,13 +461,14 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         sendError(socket, "upload-in-progress", tr("Finish the pending image upload before submitting another job"), jobId);
         return;
     }
-    const bool needsInput = edit || upscale || options.value(QStringLiteral("hasInput")).toBool();
+    const bool references = options.contains("inputCount");
+    const bool needsInput = edit || upscale || references || options.value(QStringLiteral("hasInput")).toBool();
     auto submission = std::make_shared<Submission>();
     submission->id = jobId;
     submission->operation = edit ? Operation::Edit : generate ? Operation::Generate : Operation::Upscale;
     submission->options = options;
     submission->flow = flow;
-    submission->expectedInputs = edit ? options.value("inputCount").toInt(1) : 1;
+    submission->expectedInputs = options.value("inputCount").toInt(1);
     submission->modelPath = model->filePath;
     if ((generate || edit) && model->companionRole == QStringLiteral("vae") && !model->companionFileName.isEmpty())
         submission->vaePath = QDir(QFileInfo(model->filePath).absolutePath()).filePath(model->companionFileName);
@@ -509,7 +511,7 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     if (needsInput) {
         m_pendingUploads.insert(socket, submission);
         send(socket, {{QStringLiteral("type"), QStringLiteral("upload-required")}, {QStringLiteral("jobId"), jobId},
-            {"inputRole", "source"}});
+            {"inputRole", generate && references ? "reference" : "source"}});
         return;
     }
     auto job = std::make_shared<Job>();
@@ -835,7 +837,8 @@ void KiraServiceDaemon::runActiveJob()
         request.clipLPath = m_activeJob->clipLPath;
         request.clipGPath = m_activeJob->clipGPath;
         request.diffusionModel = m_activeJob->diffusionModel;
-        if (m_activeJob->operation == Operation::Edit) request.referenceImagePaths = m_activeJob->inputPaths;
+        if (m_activeJob->operation == Operation::Edit || o.contains(QStringLiteral("inputCount")))
+            request.referenceImagePaths = m_activeJob->inputPaths;
         else if (o.value(QStringLiteral("hasInput")).toBool()) request.baseImagePath = m_activeJob->inputPaths.value(0);
         if (!m_sdRunner || !m_sdRunner->runGeneration(request)) { sendError(m_activeJob->client, QStringLiteral("start-failed"), tr("Could not start generation"), m_activeJob->id); m_activeJob.reset(); startNextJob(); }
     } else if (m_activeJob->operation == Operation::Upscale) {

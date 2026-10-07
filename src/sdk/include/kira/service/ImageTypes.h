@@ -85,6 +85,8 @@ struct ImageGenerationRequest
     int seed = -1;
     QByteArray baseImageData;
     QList<QByteArray> editImages;
+    // Generation conditioning images (1–8), sent in order; exclusive with baseImageData.
+    QList<QByteArray> referenceImages;
     double baseImageStrength = 0.55;
     QString modelId;
     QString styleId;

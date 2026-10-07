@@ -152,6 +152,12 @@ an input upload. Invalid types or ranges return `invalid-request` correlated to
 | seed | Optional integer -1–2147483647; defaults to -1 |
 | hasInput | Optional boolean; defaults to false |
 | baseImageStrength | Optional finite number 0–1; defaults to 0.55 |
+| inputCount | Optional integer 1–8 of reference images; not allowed with `hasInput: true` |
+
+With `inputCount`, the service sends one `upload-required` per reference image
+(`inputIndex` 0…n-1, role `reference`); the client answers each with one binary
+frame in order, and sd-cli receives them as repeated `-r` arguments. SDK clients
+fill `ImageGenerationRequest::referenceImages`.
 
 Automatic sampler/scheduler flags are omitted from the backend command. Positive
 Clip Skip values are forwarded; -1 omits the flag. CFG and image strength retain
@@ -253,7 +259,7 @@ shell-quoted text for diagnosis; execution still uses QProcess argument lists.
 
 ### Reference-image editing
 
-`capabilities.operations` includes `image.edit` when the image backend is ready. Submit an installed Image-generation `modelId`, nonblank `prompt`, source `width`/`height`, and generation options through `submit` with operation `image.edit`. The service requires source bytes through the `upload-required` binary upload flow, even if `hasInput` is omitted. Optional `inputCount` (1–8, edit only, default 1) sets the number of images: the service sends one `upload-required` per image (`inputIndex` 0…n-1; role `source` for index 0, `reference` otherwise) and the client answers each with one binary frame in order. The first image is the one to edit; all are passed to sd-cli as repeated `-r` arguments in that order. Validation, queue/progress, result bytes and job errors follow the generation lifecycle. Results identify `image.edit`. Optional installed LLM, VAE and mmproj companions are resolved by the daemon; clients never supply paths. SDK clients use `submitEdit(ImageGenerationRequest)` and `ServiceCapabilities::imageEdit`.
+`capabilities.operations` includes `image.edit` when the image backend is ready. Submit an installed Image-generation `modelId`, nonblank `prompt`, source `width`/`height`, and generation options through `submit` with operation `image.edit`. The service requires source bytes through the `upload-required` binary upload flow, even if `hasInput` is omitted. Optional `inputCount` (1–8, default 1) sets the number of images: the service sends one `upload-required` per image (`inputIndex` 0…n-1; role `source` for index 0, `reference` otherwise) and the client answers each with one binary frame in order. The first image is the one to edit; all are passed to sd-cli as repeated `-r` arguments in that order. Validation, queue/progress, result bytes and job errors follow the generation lifecycle. Results identify `image.edit`. Optional installed LLM, VAE and mmproj companions are resolved by the daemon; clients never supply paths. SDK clients use `submitEdit(ImageGenerationRequest)` and `ServiceCapabilities::imageEdit`.
 
 ### Preset prompt flows
 

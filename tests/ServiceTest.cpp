@@ -695,6 +695,26 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(arguments().count("-r"), 3);
     images.clear();
     messages.clear();
+    // Generation accepts reference images without a base image.
+    QJsonObject referenceOptions = valid;
+    referenceOptions.insert("inputCount", 2);
+    send("generate-references", referenceOptions);
+    for (int index = 0; index < 2; ++index) {
+        QTRY_COMPARE(std::count_if(messages.cbegin(), messages.cend(), [](const QJsonObject &message) {
+            return message.value("type") == "upload-required" && message.value("jobId") == "generate-references"
+                && message.value("inputRole") == "reference"; }), index + 1);
+        socket.sendBinaryMessage(image);
+    }
+    QTRY_VERIFY(terminal("generate-references"));
+    QTRY_COMPARE(images.count(), 1);
+    QCOMPARE(arguments().count("-r"), 2);
+    QVERIFY(!arguments().contains("--init-img"));
+    referenceOptions.insert("hasInput", true);
+    send("generate-references-base", referenceOptions);
+    QTRY_VERIFY(terminal("generate-references-base"));
+    QCOMPARE(messages.last().value("code").toString(), QString("invalid-request"));
+    images.clear();
+    messages.clear();
     send("automatic", valid);
     QTRY_VERIFY(terminal("automatic"));
     QTRY_COMPARE(images.count(), 1);

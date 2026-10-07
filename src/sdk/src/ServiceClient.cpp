@@ -207,6 +207,8 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
 {
     if ((!request.presetId.isEmpty() || !request.qualityId.isEmpty())
         && (!m_capabilities.modelRouting || request.presetId.isEmpty() || request.qualityId.isEmpty() || !request.styleId.isEmpty())) return {};
+    if (!request.referenceImages.isEmpty() && (!request.baseImageData.isEmpty() || request.referenceImages.size() > 8
+        || request.referenceImages.contains(QByteArray()))) return {};
     QJsonObject options{{QStringLiteral("prompt"), request.prompt},
                               {QStringLiteral("negativePrompt"), request.negativePrompt},
                               {QStringLiteral("sampler"), request.sampler},
@@ -224,6 +226,10 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
     if (!request.presetId.isEmpty()) options.insert("presetId", request.presetId);
     if (!request.qualityId.isEmpty()) options.insert("qualityId", request.qualityId);
     if (request.skipPromptFlow) options.insert("skipPromptFlow", true);
+    if (!request.referenceImages.isEmpty()) {
+        options.insert("inputCount", int(request.referenceImages.size()));
+        return submit(ImageOperation::Generate, options, request.referenceImages);
+    }
     return submit(ImageOperation::Generate, options, request.baseImageData.isEmpty() ? QList<QByteArray>{} : QList<QByteArray>{request.baseImageData});
 }
 
