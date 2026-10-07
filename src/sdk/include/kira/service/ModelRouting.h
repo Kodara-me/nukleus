@@ -24,6 +24,19 @@ struct ModelQuality
     }
     bool operator==(const ModelQuality &) const = default;
 };
+struct PromptFlowStep
+{
+    QString id;
+    QString name;
+    QString nameFr;
+    QString modelId;
+    QString instructions;
+    QString displayLabel(const QLocale &locale = QLocale()) const
+    {
+        return locale.language() == QLocale::French && !nameFr.isEmpty() ? nameFr : name;
+    }
+    bool operator==(const PromptFlowStep &) const = default;
+};
 struct GenerationPreset
 {
     QString id;
@@ -32,6 +45,7 @@ struct GenerationPreset
     QString negativePrefix;
     QList<ModelQuality> qualities;
     QString nameFr = {};
+    QList<PromptFlowStep> promptFlow = {};
     QString displayLabel(const QLocale &locale = QLocale()) const
     {
         return locale.language() == QLocale::French && !nameFr.isEmpty() ? nameFr : name;

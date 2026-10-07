@@ -146,6 +146,24 @@ void ServiceTest::persistsAndProtectsModelRouting()
     QVERIFY(!catalog.remove(id, &error));
     QVERIFY(!catalog.configure(id, {{"canGenerate", false}, {"canEdit", true}}, &error, {}, "Test"));
     QVERIFY(!catalog.configure(id, {{"canGenerate", true}, {"canEdit", false}}, &error, {}, "Test"));
+    QVERIFY(QDir(directory.path()).mkpath("llm"));
+    QFile llmFile(directory.filePath("llm/chat.gguf"));
+    QVERIFY(llmFile.open(QIODevice::WriteOnly)); llmFile.write("weights"); llmFile.close();
+    const QString llmId = "llm-chat:chat.gguf";
+    const auto llmOptions = KiraService::Protocol::defaultModelOptions("llm-chat");
+    QVERIFY2(catalog.configure(llmId, llmOptions, &error, {}, "Chat"), qPrintable(error));
+    auto flowRouting = *routing;
+    flowRouting.presets[1].promptFlow = {{"enhance", "Enhance", "Améliorer", llmId, "Translate to English."},
+                                         {"specialist", "Specialist", "Spécialiste", {}, {}}};
+    QVERIFY2(catalog.configureRouting(flowRouting, &error), qPrintable(error));
+    QCOMPARE(catalog.routing(), std::optional<KiraService::ModelRouting>(flowRouting));
+    QVERIFY(!catalog.remove(llmId, &error)); // Assigned flow models cannot be deleted.
+    QVERIFY2(catalog.configure(llmId, llmOptions, &error, {}, "Chat"), qPrintable(error));
+    auto missingFlowModel = flowRouting;
+    missingFlowModel.presets[1].promptFlow[1].modelId = "llm-chat:missing.gguf";
+    QVERIFY(!catalog.configureRouting(missingFlowModel, &error));
+    QVERIFY(catalog.configureRouting(*routing, &error));
+    QVERIFY2(catalog.remove(llmId, &error), qPrintable(error));
     auto invalid = *routing;
     invalid.editingQualities[0].name = "Medium";
     QVERIFY(!catalog.configureRouting(invalid, &error));
@@ -223,6 +241,31 @@ void ServiceTest::fixedRoutingLabelsAndLegacyMigration()
     checkRenamed(renamed->editingQualities, previousLabels.editingQualities, fixed.editingQualities);
     QCOMPARE(KiraService::Protocol::modelRoutingFromJson(KiraService::Protocol::modelRoutingToJson(fixed)),
         std::optional<KiraService::ModelRouting>(fixed));
+    auto withFlow = fixed;
+    withFlow.presets[0].promptFlow = {{"enhance", "Enhance", "Améliorer", "llm-chat:chat.gguf", "Improve."}};
+    const auto flowJson = KiraService::Protocol::modelRoutingToJson(withFlow);
+    QCOMPARE(flowJson.value("version").toInt(), 3);
+    QCOMPARE(KiraService::Protocol::modelRoutingFromJson(flowJson), std::optional<KiraService::ModelRouting>(withFlow));
+    QCOMPARE(withFlow.presets[0].promptFlow[0].displayLabel(QLocale("fr_CA")), QString("Améliorer"));
+    auto version2 = flowJson; version2.insert("version", 2); // Earlier versions load with empty flows.
+    QCOMPARE(KiraService::Protocol::modelRoutingFromJson(version2), std::optional<KiraService::ModelRouting>(fixed));
+    auto missingFlow = flowJson;
+    auto flowPresets = missingFlow.value("presets").toArray();
+    auto flowPreset = flowPresets[1].toObject(); flowPreset.remove("promptFlow"); flowPresets[1] = flowPreset;
+    missingFlow.insert("presets", flowPresets);
+    QVERIFY(!KiraService::Protocol::modelRoutingFromJson(missingFlow));
+    auto invalidFlow = withFlow; invalidFlow.presets[0].promptFlow.append(invalidFlow.presets[0].promptFlow.first());
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalidFlow)); // Duplicate step ID.
+    invalidFlow = withFlow; invalidFlow.presets[0].promptFlow[0].nameFr = " ";
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalidFlow));
+    invalidFlow = withFlow; invalidFlow.presets[0].promptFlow[0].instructions = QString(65537, 'x');
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalidFlow));
+    invalidFlow = withFlow;
+    for (int i = 1; i < 5; ++i)
+        invalidFlow.presets[0].promptFlow.append({QString("step-%1").arg(i), "Step", "Étape", {}, {}});
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalidFlow)); // At most four steps.
+    invalidFlow.presets[0].promptFlow.removeLast();
+    QVERIFY(KiraService::Protocol::validateModelRouting(invalidFlow));
     auto invalid = fixed; invalid.presets.swapItemsAt(0, 1);
     QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
     invalid = fixed; invalid.presets[0].qualities.append(invalid.presets[0].qualities.first());
@@ -268,7 +311,7 @@ void ServiceTest::fixedRoutingLabelsAndLegacyMigration()
     QCOMPARE(catalog.routing()->presets[0].qualities[1].steps, std::optional<int>(4));
     QCOMPARE(catalog.routing()->editingQualities[1].steps, std::optional<int>(37));
     QVERIFY(file.open(QIODevice::ReadOnly));
-    QCOMPARE(QJsonDocument::fromJson(file.readAll()).object().value("version").toInt(), 2);
+    QCOMPARE(QJsonDocument::fromJson(file.readAll()).object().value("version").toInt(), 3);
     file.close();
     // Renaming previous version-2 labels is read-only and preserves saved values.
     auto oldSaved = *catalog.routing();

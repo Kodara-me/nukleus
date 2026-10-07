@@ -99,8 +99,9 @@ to restore the slider. Save persists the choices; Cancel discards them.
 Mappings start unassigned and require explicit setup before Canvas can submit.
 Save waits for acknowledgment; Cancel discards all draft edits. Assigned models
 cannot be deleted or lose required capabilities until unassigned.
-Version-2 `models/model-routing.json` stores both English and French labels and
-per-quality parameters atomically. Canvas chooses the system locale, falling back
+Version-3 `models/model-routing.json` stores both English and French labels,
+per-quality parameters and each preset's prompt flow (up to four LLM steps)
+atomically. Version-2 files load with empty prompt flows. Canvas chooses the system locale, falling back
 to English. Version-1 settings load into the fixed structure by stable ID,
 retaining known assignments/prefixes and initializing missing quality parameters
 from model recommendations; the file is rewritten only on explicit Save.

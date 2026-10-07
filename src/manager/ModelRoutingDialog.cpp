@@ -321,6 +321,10 @@ void ModelRoutingDialog::refreshModels()
 KiraService::ModelRouting ModelRoutingDialog::configuration() const
 {
     auto routing = KiraService::Protocol::starterModelRouting();
+    // Prompt flows have no editor yet; keep the service's saved flows unchanged.
+    if (const auto saved = m_client->modelRouting())
+        for (int row = 0; row < routing.presets.size() && row < saved->presets.size(); ++row)
+            routing.presets[row].promptFlow = saved->presets.at(row).promptFlow;
     const auto qualities = [](QList<KiraService::ModelQuality> &result, const QStandardItem *parent) {
         for (int row = 0; row < result.size(); ++row)
         {

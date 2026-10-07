@@ -168,18 +168,25 @@ shared defaults when absent. Save persists those values including manual edits;
 catalogue refresh must not replace them. None clears the assignment and snapshot.
 Keep only Save/Cancel buttons; await acknowledgment and discard drafts on Cancel.
 Each quality exposes a Permanent quality checkbox, saved as an optional boolean
-`permanent` (default false) in version-2 routing. Permit at most one checked
+`permanent` (default false) in routing. Permit at most one checked
 quality independently within each preset and Editing. Checking another clears
 the previous choice only in that group. Canvas uses the permanent profile and
 hides that group's slider; no checked quality restores normal selection.
 
-Store version-2 model-routing.json beside model metadata through QSaveFile.
+Store version-3 model-routing.json beside model metadata through QSaveFile.
+Each generation preset carries an ordered `promptFlow` of at most 4 LLM steps
+(id, name, nameFr, modelId, instructions). Step IDs are unique within the preset,
+bilingual names are nonblank, instructions are at most 65536 characters and
+modelId is an installed `llm-chat` model or empty (unassigned). Assigned flow
+LLMs cannot be deleted; reconfiguring them is allowed. Versions 1 and 2 load
+with empty flows. Until the Manager has a flow editor, its Save keeps the
+service's saved flows unchanged.
 Transmit name (English) and nameFr for every preset/quality. SDK displayLabel
 uses French for French locales, English otherwise. Validate fixed IDs, ordering
 and bilingual labels plus numeric bounds (Steps 1–200, finite CFG 0–100).
 Version-1 reads project known IDs onto the fixed structure, retaining known
 prefixes/assignments and initializing missing parameters from model recommendations.
-Do not write during reads; Save writes version 2 and retires legacy custom entries.
+Do not write during reads; Save writes version 3 and retires legacy custom entries.
 Reject malformed/unreadable storage without overwriting. Block mapped-model
 deletion and disabling required capabilities, including companion installs.
 External disappearance leaves assignments intact.

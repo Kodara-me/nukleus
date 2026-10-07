@@ -500,8 +500,14 @@ bool ModelCatalog::validateRoutingReferences(const KiraService::ModelRouting &ro
         }
         return true;
     };
-    for (const auto &p : routing.presets)
+    for (const auto &p : routing.presets) {
         if (!validate(p.qualities, "canGenerate")) return false;
+        for (const auto &step : p.promptFlow)
+            if (!step.modelId.isEmpty() && !model(ModelCategory::LlmChat, step.modelId)) {
+                if (error) *error = tr("Prompt flow step %1 must select an installed LLM, or Unassigned").arg(step.name);
+                return false;
+            }
+    }
     return validate(routing.editingQualities, "canEdit");
 }
 
@@ -527,9 +533,20 @@ bool ModelCatalog::configureRouting(const KiraService::ModelRouting &value, QStr
 
 bool ModelCatalog::protectRouting(const QString &id, const QJsonObject *options, QString *error) const
 {
-    if (!id.startsWith("image-generation:")) return true;
+    const bool llm = id.startsWith("llm-chat:");
+    if (!id.startsWith("image-generation:") && !(llm && !options)) return true;
     const auto value = routing(error);
     if (!value) return false;
+    if (llm) {
+        // LLM options carry no routing capability, so only deletion is blocked.
+        for (const auto &p : value->presets)
+            for (const auto &step : p.promptFlow)
+                if (step.modelId == id) {
+                    if (error) *error = tr("This model is assigned to a prompt flow step; clear its assignment first");
+                    return false;
+                }
+        return true;
+    }
     const auto permitted = [&](const QList<KiraService::ModelQuality> &qualities, const QString &capability) {
         for (const auto &q : qualities)
             if (q.modelId == id && (!options || !options->value(capability).toBool(true))) {

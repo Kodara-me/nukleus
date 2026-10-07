@@ -39,6 +39,19 @@ bool validateModelRouting(const ModelRouting &routing, QString *error)
         }
         return true;
     };
+    const auto flowValid = [](const QList<PromptFlowStep> &steps) {
+        if (steps.size() > 4)
+            return false;
+        QSet<QString> ids;
+        for (const auto &step : steps)
+        {
+            if (step.id.trimmed().isEmpty() || ids.contains(step.id) || step.name.trimmed().isEmpty() ||
+                step.nameFr.trimmed().isEmpty() || step.instructions.size() > 65536)
+                return false;
+            ids.insert(step.id);
+        }
+        return true;
+    };
     bool valid = routing.presets.size() == fixed.presets.size() &&
                  qualitiesValid(routing.editingQualities, fixed.editingQualities);
     if (valid)
@@ -48,7 +61,7 @@ bool validateModelRouting(const ModelRouting &routing, QString *error)
             const auto &expected = fixed.presets.at(i);
             if (p.id != expected.id || p.name != expected.name || p.nameFr != expected.nameFr ||
                 !qualitiesValid(p.qualities, expected.qualities) || p.positivePrefix.size() > 65536 ||
-                p.negativePrefix.size() > 65536)
+                p.negativePrefix.size() > 65536 || !flowValid(p.promptFlow))
             {
                 valid = false;
                 break;
@@ -56,7 +69,9 @@ bool validateModelRouting(const ModelRouting &routing, QString *error)
         }
     if (!valid && error)
         *error = QStringLiteral("Presets, qualities and bilingual labels are fixed. Steps must be 1–200, CFG 0–100 and "
-                                "prefixes at most 65536 characters. Only one quality per group may be permanent.");
+                                "prefixes at most 65536 characters. Only one quality per group may be permanent. "
+                                "Prompt flows allow at most 4 steps with unique IDs, bilingual names and "
+                                "instructions of at most 65536 characters.");
     return valid;
 }
 
@@ -78,13 +93,23 @@ QJsonObject modelRoutingToJson(const ModelRouting &routing)
     };
     QJsonArray presets;
     for (const auto &p : routing.presets)
+    {
+        QJsonArray flow;
+        for (const auto &step : p.promptFlow)
+            flow.append(QJsonObject{{"id", step.id},
+                                    {"name", step.name},
+                                    {"nameFr", step.nameFr},
+                                    {"modelId", step.modelId},
+                                    {"instructions", step.instructions}});
         presets.append(QJsonObject{{"id", p.id},
                                    {"name", p.name},
                                    {"nameFr", p.nameFr},
                                    {"positivePrefix", p.positivePrefix},
                                    {"negativePrefix", p.negativePrefix},
-                                   {"qualities", qualities(p.qualities)}});
-    return {{"version", 2}, {"presets", presets}, {"editingQualities", qualities(routing.editingQualities)}};
+                                   {"qualities", qualities(p.qualities)},
+                                   {"promptFlow", flow}});
+    }
+    return {{"version", 3}, {"presets", presets}, {"editingQualities", qualities(routing.editingQualities)}};
 }
 
 std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QString *error)
@@ -95,7 +120,8 @@ std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QStr
         return std::nullopt;
     };
     const bool legacy = object.value("version") == QJsonValue(1);
-    if ((!legacy && object.value("version") != QJsonValue(2)) || !object.value("presets").isArray() ||
+    const bool flows = object.value("version") == QJsonValue(3);
+    if ((!legacy && !flows && object.value("version") != QJsonValue(2)) || !object.value("presets").isArray() ||
         !object.value("editingQualities").isArray())
         return fail();
     QSet<QString> ids;
@@ -168,6 +194,24 @@ std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QStr
         names.insert(preset.name.trimmed().toCaseFolded());
         if (!parseQualities(p.value("qualities"), preset.qualities))
             return fail();
+        // Versions 1 and 2 predate prompt flows and load with an empty flow.
+        if (flows)
+        {
+            if (!p.value("promptFlow").isArray())
+                return fail();
+            for (const auto &value : p.value("promptFlow").toArray())
+            {
+                if (!value.isObject())
+                    return fail();
+                const auto s = value.toObject();
+                for (const auto &key : {"id", "name", "nameFr", "modelId", "instructions"})
+                    if (!s.value(key).isString())
+                        return fail();
+                preset.promptFlow.append({s.value("id").toString(), s.value("name").toString(),
+                                          s.value("nameFr").toString(), s.value("modelId").toString(),
+                                          s.value("instructions").toString()});
+            }
+        }
         routing.presets.append(preset);
     }
     if (legacy)

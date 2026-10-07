@@ -165,7 +165,8 @@ class ManagerUiTest final : public QObject
         client.setAutomaticReconnect(false); client.connectToService();
         QTRY_VERIFY(client.modelListAvailable());
         send({{"type", "capabilities"}, {"operations", QJsonArray{"model-routing"}}});
-        const auto routing = KiraService::Protocol::starterModelRouting();
+        auto routing = KiraService::Protocol::starterModelRouting();
+        routing.presets[1].promptFlow = {{"enhance", "Enhance", "Améliorer", {}, "Improve."}};
         send({{"type", "model-routing.get.completed"}, {"routing", KiraService::Protocol::modelRoutingToJson(routing)}});
         QTRY_VERIFY(client.modelRouting().has_value());
         const auto originalLocale = QLocale();
@@ -260,7 +261,7 @@ class ManagerUiTest final : public QObject
         QVERIFY(save->isEnabled()); save->click();
         QTRY_VERIFY(m_messages.last().value("type") == "model-routing.configure");
         const auto sent = m_messages.last().value("routing").toObject();
-        QCOMPARE(sent.value("version").toInt(), 2);
+        QCOMPARE(sent.value("version").toInt(), 3);
         const auto presets = sent.value("presets").toArray();
         QCOMPARE(presets.size(), 2);
         const auto savedPreset = presets.first().toObject();
@@ -273,6 +274,7 @@ class ManagerUiTest final : public QObject
         const auto parsed = KiraService::Protocol::modelRoutingFromJson(sent);
         QVERIFY(parsed);
         QVERIFY(parsed->editingQualities[2].permanent);
+        QCOMPARE(parsed->presets[1].promptFlow, routing.presets[1].promptFlow); // Save keeps saved flows.
         QVERIFY(!parsed->editingQualities[1].permanent);
         QVERIFY(!parsed->presets[1].qualities[0].permanent);
         QCOMPARE(qualities.at(0).toObject().value("modelId").toString(), assignedModelId);
