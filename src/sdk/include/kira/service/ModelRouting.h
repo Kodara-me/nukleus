@@ -1,0 +1,54 @@
+#pragma once
+
+#include <QJsonObject>
+#include <QList>
+#include <QLocale>
+#include <QMetaType>
+#include <QString>
+#include <optional>
+
+namespace KiraService
+{
+struct ModelQuality
+{
+    QString id;
+    QString name;
+    QString modelId;
+    std::optional<int> steps = {};
+    std::optional<double> cfgScale = {};
+    QString nameFr = {};
+    QString displayLabel(const QLocale &locale = QLocale()) const
+    {
+        return locale.language() == QLocale::French && !nameFr.isEmpty() ? nameFr : name;
+    }
+    bool operator==(const ModelQuality &) const = default;
+};
+struct GenerationPreset
+{
+    QString id;
+    QString name;
+    QString positivePrefix;
+    QString negativePrefix;
+    QList<ModelQuality> qualities;
+    QString nameFr = {};
+    QString displayLabel(const QLocale &locale = QLocale()) const
+    {
+        return locale.language() == QLocale::French && !nameFr.isEmpty() ? nameFr : name;
+    }
+    bool operator==(const GenerationPreset &) const = default;
+};
+struct ModelRouting
+{
+    QList<GenerationPreset> presets;
+    QList<ModelQuality> editingQualities;
+    bool operator==(const ModelRouting &) const = default;
+};
+namespace Protocol
+{
+ModelRouting starterModelRouting();
+bool validateModelRouting(const ModelRouting &routing, QString *error = nullptr);
+QJsonObject modelRoutingToJson(const ModelRouting &routing);
+std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QString *error = nullptr);
+} // namespace Protocol
+} // namespace KiraService
+Q_DECLARE_METATYPE(KiraService::ModelRouting)

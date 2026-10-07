@@ -4,8 +4,10 @@ Kira Service is the standalone backend for Kira applications. It owns installed 
 
 Editing reuses **Image generation** models directly. image.edit accepts their
 original opaque IDs and resolves the same primary weights, model type and companions.
-There is no separate editing category or eligibility checkbox. Select a generation
-model as Canvas's default edit model. Existing legacy model directories remain on disk.
+There is no separate editing category. **Can Edit** and **Can Generate** control
+which operations each model supports; at least one must be checked. Select an
+eligible model as Canvas's default edit model. Missing flags preserve both
+operations for existing models. Existing legacy model directories remain on disk.
 
 Prompt enhancement uses the **LLM** catalogue (llm-chat, stored under models/llm/).
 The identity dialog in Canvas selects its default LLM model in Service Preferences.
@@ -76,12 +78,32 @@ connection for next launch; failed attempts and Cancel do not change saved setti
 Remote servers must have a reachable LAN listener and token configured; use a
 trusted LAN or VPN. Browse imports remain local-only. CLI commands still use loopback.
 
-For an image-generation model, **Styles…** edits its ordered list of named
-positive/negative prompt prefixes. Save waits for the service acknowledgment;
-Cancel discards the draft. Models without saved styles expose Photographic,
-Cinematic and Illustration starters; saving an empty list removes them.
-Canvas selects a style, and the service applies its prefixes once for generation,
- Editing and upscaling do not use styles.
+**Presets…** opens a service-wide tree with fixed Generation and Editing branches.
+Generation has exactly **Photorealism / Photoréalisme** and **Illustration**.
+Each has **Fast / Rapide**, **Balanced / Équilibré** and
+**Quality / Qualité**; editing has the same three qualities.
+Names, order and counts are fixed; no add/remove/rename or drag/drop is available.
+Manager displays preset/quality names in English regardless of its system locale.
+Previous Low/Medium/High labels in version-1/2 settings are accepted on read;
+only labels change, retaining IDs, assignments, Steps/CFG and prefixes. Reads do
+not rewrite storage; Save persists the updated bilingual labels.
+Select a preset to edit its optional positive/negative prefixes. Select a quality
+to choose an eligible model and edit **Steps** and **CFG Scale**. Selecting a
+model snapshots its recommended values (shared defaults when absent); Save
+persists that pair, including manual reductions in steps. Catalogue refreshes
+never replace saved quality values. Models can be reused across qualities.
+Mappings start unassigned and require explicit setup before Canvas can submit.
+Save waits for acknowledgment; Cancel discards all draft edits. Assigned models
+cannot be deleted or lose required capabilities until unassigned.
+Version-2 `models/model-routing.json` stores both English and French labels and
+per-quality parameters atomically. Canvas chooses the system locale, falling back
+to English. Version-1 settings load into the fixed structure by stable ID,
+retaining known assignments/prefixes and initializing missing quality parameters
+from model recommendations; the file is rewritten only on explicit Save.
+Legacy custom entries are not exposed in the fixed UI. Unreadable/malformed
+configuration is never overwritten. Deploy Service before updated Canvas.
+Legacy per-model style protocol/metadata remain compatible with older clients,
+but their management dialog is removed.
 
 Add model opens a landscape modal with HTTPS model/companion URLs on the left
 and category-specific recommendations on the right, without scrolling.
@@ -93,20 +115,20 @@ The manager connects to `127.0.0.1:9384` and retries while the service is offlin
 
 Recommended options are metadata returned to clients, not enforced execution
 settings. Image generation expose square resolution (256–2048 in steps
-of 256), steps, CFG scale, sampler, scheduler, and Clip Skip. LLM exposes
+of 256), steps, CFG scale, sampler, scheduler, and generation/edit capabilities. LLM exposes
 temperature, top-p, context length, and maximum tokens; Upscaler has no options or explicit-content control (execution remains fixed at 2×); Existing
 models without recommendations remain usable; proposed defaults are saved only
 on an explicit Save. Canvas uses the selected model’s recommendations for unedited generation controls.
 
 Image models can be complete checkpoints or standalone diffusion models (for
 example, a split UNet GGUF). The add dialog includes **Model contents** plus
-optional CLIP-L, CLIP-G, VAE, LLM text encoder and mmproj URLs. Select an installed image model and choose
-**Optional files…** to attach missing files without downloading its primary again.
-Leave unused URLs empty; complete checkpoints keep working without extra files.
-Already attached roles cannot be overwritten. Choose compatible components from
-the model publisher; standalone SDXL UNets normally need both CLIP encoders and a VAE.
-The service passes only attached files to `sd-cli`: `--clip_l`, `--clip_g`, and
-`--vae`. Standalone models use `--diffusion-model`; complete checkpoints use
+dropdowns for an installed **Companion / VAE** and an installed **LLM** marked
+**Can be used as text encoder**, both with None. These are shared references;
+deleting the image model never deletes their weights. Assigned models cannot be
+deleted, retyped or have text encoder eligibility removed until detached.
+CLIP-L, CLIP-G, Clip Skip and the image model's optional mmproj controls are removed.
+The service passes assignments as `--vae` and `--llm`; the selected LLM's MMPROJ
+assignment supplies `--llm_vision` when present. Standalone models use `--diffusion-model`; complete checkpoints use
 `--model`. See the [upstream CLI options](https://github.com/leejet/stable-diffusion.cpp/blob/master/examples/common/common.cpp).
 
 The manager also provides local CLI operations:
@@ -127,7 +149,7 @@ Use `--help` for all options. CLI and GUI manager connections are local-only and
 
 Image-generation models support generation and image.edit with uploaded reference images.
 
-Service models live in `$XDG_DATA_HOME/kira-service/models/`: image-generation files in `models/`, upscalers in `models/upscale/`, LLM chat files in `models/llm/`. Optional companion files are kept under each category's private `companions/<primary filename>/` directory and linked through persistent category-local metadata: VAE for Image-generation. The manager downloads and installs the primary and its optional files together; failed or canceled downloads leave no usable pair, and deleting the primary also removes its companion. Model listings expose `companionFileName` and `companionRole` (`mmproj` or `vae`) without exposing service paths. The manager accepts HTTPS model-file URLs and never overwrites an installed filename. SHA-256 fields and download verification are no longer supported. mmproj files require `.gguf`, while VAE files accept `.safetensors`, `.ckpt`, or `.gguf`. Query-bearing URLs are accepted and Hugging Face `blob` links are normalized to `resolve` URLs. The add-model modal shows the optional companion URL field appropriate to the selected category. Image-generation CLIP-L, CLIP-G, VAE, LLM text encoder and mmproj companions are passed to sd-cli; LLM models reference separately installed MMPROJ companions by ID.  Legacy single-companion installations remain supported. New companionFiles metadata maps roles to category-relative filenames, and modelType defaults to checkpoint when absent.
+Service models live in `$XDG_DATA_HOME/kira-service/models/`: image-generation files in `models/`, upscalers in `models/upscale/`, LLM files in `models/llm/`, and shared VAE/MMPROJ companions in `models/companion/`. Assignments use opaque IDs and never expose service paths or delete shared files with a primary. The manager accepts HTTPS sources and local imports, never overwriting installed weights. VAE accepts `.safetensors`, `.ckpt`, or `.gguf`; MMPROJ requires `.gguf`. Hugging Face `blob` links normalize to `resolve` URLs. SHA-256 verification is not supported. Legacy category-local attachments remain stored under `companions/<primary filename>/`; legacy VAE/LLM weights remain usable as fallbacks. modelType defaults to checkpoint when absent.
 
 The Linux installer moves legacy models from `$XDG_DATA_HOME/kira-canvas/models/` during an upgrade. It aborts without changing either directory if both model roots already exist.
 
@@ -154,13 +176,14 @@ Omitted dimensions and steps default to 1024 × 1024 and 28; CFG defaults to 7.
 No external VAE is required for a complete checkpoint with an embedded VAE.
 Standalone diffusion files require their missing encoder/VAE weights separately.
 
-Image-generation models accept optional `companionUrls` roles `llm`
-(text encoder) and `mmproj` (vision projector). Manager add/optional-file dialogs
-show both URLs for these categories; CLI add/attach accepts `--text-encoder` and
-`--mmproj` together with the existing VAE/CLIP options. LLM models use --mmproj-model with an installed MMPROJ companion ID instead of a URL. mmproj must be GGUF; text encoders accept GGUF, safetensors,
-or ckpt. Files are attached to their primary model, staged and published atomically,
-preserved across restart, and deleted with the primary. Generation resolves them
-internally and passes `--llm` and `--llm_vision` only when present. Editing jobs use image.edit with uploaded reference-image bytes.
+Image models save `canEdit`, `canGenerate`, `vaeModelId` and `textEncoderModelId`
+inside recommendedOptions; LLM saves `canBeTextEncoder` (default false) there.
+The service validates references and capabilities before accepting jobs. Legacy
+attachment APIs/CLI remain compatible and existing files remain on disk; legacy
+VAE/LLM files are fallback weights when no shared assignment is selected. Legacy
+CLIP and image-level mmproj attachments are no longer passed to sd-cli.
+**Optional files…** retains the legacy VAE removal/replacement workflow.
+Editing jobs use image.edit with uploaded reference-image bytes.
 
 Manager add/optional-file dialogs offer **Browse…** beside the model and companion
 sources. Selected local files are copied by the service through the same staged,

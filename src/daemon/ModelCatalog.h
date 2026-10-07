@@ -5,6 +5,7 @@
 #include <QObject>
 #include <QUrl>
 #include <kira/service/PromptStyle.h>
+#include <kira/service/ModelRouting.h>
 
 #include <optional>
 #include <QJsonObject>
@@ -91,6 +92,8 @@ public:
     bool isInstalling() const;
     bool configure(const QString &id, const QJsonObject &options, QString *error = nullptr, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {}, std::optional<QString> mmprojModelId = {});
     bool configureStyles(const QString &id, const QList<KiraService::PromptStyle> &styles, QString *error = nullptr);
+    std::optional<KiraService::ModelRouting> routing(QString *error = nullptr) const;
+    bool configureRouting(const KiraService::ModelRouting &routing, QString *error = nullptr);
 
 signals:
     void installProgress(const ModelInstallProgress &progress);
@@ -101,6 +104,11 @@ signals:
 private:
     struct InstallJob;
     bool validateMmproj(ModelCategory category, const std::optional<QString>& id, QString* error) const;
+    bool validateImageReferences(ModelCategory category, const QJsonObject& options, QString* error) const;
+    bool isImageReference(const QString& id) const;
+    bool validateRoutingReferences(const KiraService::ModelRouting &routing, QString *error) const;
+    void initializeRoutingOptions(KiraService::ModelRouting &routing) const;
+    bool protectRouting(const QString &id, const QJsonObject *options, QString *error) const;
 
     QString rootPath() const;
     QString directoryPath(ModelCategory category) const;

@@ -2,6 +2,7 @@
 #include <QJsonObject>
 #include <QMap>
 #include <QWidget>
+#include "ManagerServiceClient.h"
 class QFormLayout;
 class QCheckBox;
 
@@ -14,6 +15,7 @@ class ModelOptionsWidget final : public QWidget
     QJsonObject options() const;
     bool isValid() const;
     bool explicitContent() const;
+    void setModels(const QList<ManagedModelInfo>& models);
   signals:
     void optionsChanged();
 
@@ -22,4 +24,5 @@ class ModelOptionsWidget final : public QWidget
     QString m_category;
     QFormLayout *m_form;
     QMap<QString, QWidget *> m_fields;
+    QList<ManagedModelInfo> m_models;
 };

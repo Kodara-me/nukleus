@@ -113,22 +113,6 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     form->addRow(tr("Category:"), m_category);
     form->addRow(tr("Model URL or file:"), sourceRow(m_url));
     form->addRow(m_companionLabel, sourceRow(m_companion));
-    m_clipL = new QLineEdit(content);
-    m_clipL->setObjectName("clipLUrl");
-    m_clipLLabel = new QLabel(tr("Optional CLIP-L URL:"), content);
-    form->addRow(m_clipLLabel, sourceRow(m_clipL));
-    m_clipG = new QLineEdit(content);
-    m_clipG->setObjectName("clipGUrl");
-    m_clipGLabel = new QLabel(tr("Optional CLIP-G URL:"), content);
-    form->addRow(m_clipGLabel, sourceRow(m_clipG));
-    m_textEncoder = new QLineEdit(content);
-    m_textEncoder->setObjectName("textEncoderUrl");
-    m_textEncoderLabel = new QLabel(tr("Optional text encoder URL:"), content);
-    form->addRow(m_textEncoderLabel, sourceRow(m_textEncoder));
-    m_mmproj = new QLineEdit(content);
-    m_mmproj->setObjectName("mmprojUrl");
-    m_mmprojLabel = new QLabel(tr("Optional mmproj URL:"), content);
-    form->addRow(m_mmprojLabel, sourceRow(m_mmproj));
     m_modelType = new QComboBox(content);
     m_modelType->setObjectName("modelType");
     m_modelType->addItem(tr("Complete checkpoint"), "checkpoint");
@@ -143,11 +127,6 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     optionsLayout->addWidget(heading);
     m_options = new ModelOptionsWidget(recommendations);
     optionsLayout->addWidget(m_options);
-    m_optionsHint =
-        new QLabel(tr("Choose recommended values for this model. Applications can override them."), recommendations);
-    m_optionsHint->setWordWrap(true);
-    m_optionsHint->setObjectName("recommendedValuesHint");
-    optionsLayout->addWidget(m_optionsHint);
     optionsLayout->addStretch();
     columns->addWidget(content, 1);
     columns->addWidget(recommendations, 1);
@@ -172,10 +151,6 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     connect(m_displayName, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
     connect(m_url, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
     connect(m_companion, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
-    connect(m_clipL, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
-    connect(m_clipG, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
-    connect(m_textEncoder, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
-    connect(m_mmproj, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
     connect(m_options, &ModelOptionsWidget::optionsChanged, this, &AddModelDialog::updateActions);
     connect(m_start, &QPushButton::clicked, this, &AddModelDialog::startInstall);
     connect(m_cancel, &QPushButton::clicked, this, &AddModelDialog::reject);
@@ -184,8 +159,7 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
         if (id != m_existingModelId) return;
         m_attachedFiles.remove(role);
         m_pendingRemoval.clear();
-        for (auto* field : {m_companion, m_clipL, m_clipG, m_textEncoder, m_mmproj})
-            if (roleFor(field) == role) { field->clear(); field->setPlaceholderText({}); }
+        if (roleFor(m_companion) == role) { m_companion->clear(); m_companion->setPlaceholderText({}); }
         m_status->setText(tr("Companion removed. Choose a replacement file or URL."));
         updateActions();
     });
@@ -208,7 +182,7 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
             if (!model.companionFileName.isEmpty()) m_attachedFiles.insert(model.companionRole, model.companionFileName);
             m_modelType->setCurrentIndex(m_modelType->findData(model.modelType));
         }
-        const QList<QPair<QString, QLineEdit*>> fields{{roleFor(m_companion), m_companion}, {"clip-l", m_clipL}, {"clip-g", m_clipG}, {"llm", m_textEncoder}, {"mmproj", m_mmproj}};
+        const QList<QPair<QString, QLineEdit*>> fields{{roleFor(m_companion), m_companion}};
         for (const auto &field : fields)
             if (m_attachedFiles.contains(field.first)) field.second->setPlaceholderText(tr("Already attached: %1").arg(m_attachedFiles.value(field.first).toString().section('/', -1)));
         updateActions();
@@ -218,24 +192,20 @@ void AddModelDialog::updateCategory()
 {
     const QString category = m_category->currentData().toString();
     m_companion->clear();
-    const bool supports = category == "image-generation";
+    const bool supports = category == "image-generation" && !m_existingModelId.isEmpty();
     m_companion->setVisible(supports);
     m_companionLabel->setVisible(supports);
     m_companionLabel->setText(tr("Optional VAE URL:"));
     m_mmprojSelection->setVisible(category == "llm-chat");
     m_mmprojSelectionLabel->setVisible(category == "llm-chat");
-    m_optionsHint->setVisible(category == "image-generation");
     m_recommendations->setVisible(category != "upscaler");
     const bool image = category == "image-generation";
-    m_clipL->clear();
-    m_clipG->clear();
-    m_textEncoder->clear();
-    m_mmproj->clear();
-    for (QWidget *widget : QList<QWidget*>{m_clipL, m_clipG, m_clipLLabel, m_clipGLabel, m_textEncoder, m_mmproj, m_textEncoderLabel, m_mmprojLabel, m_modelType, m_modelTypeLabel}) widget->setVisible(image);
-    for (auto* field : {m_clipL, m_clipG, m_textEncoder, m_mmproj}) field->parentWidget()->setVisible(image);
+    m_modelType->setVisible(image);
+    m_modelTypeLabel->setVisible(image);
     m_companion->parentWidget()->setVisible(supports);
     m_modelType->setCurrentIndex(0);
     m_options->setOptions(category);
+    m_options->setModels(m_client->models("companion") + m_client->models("llm-chat"));
     updateActions();
 }
 void AddModelDialog::updateActions()
@@ -245,11 +215,7 @@ void AddModelDialog::updateActions()
     m_url->setEnabled(!busy);
     m_displayName->setEnabled(!busy);
     m_companion->setEnabled(!busy && !m_attachedFiles.contains(roleFor(m_companion)));
-    m_clipL->setEnabled(!busy && !m_attachedFiles.contains("clip-l"));
-    m_clipG->setEnabled(!busy && !m_attachedFiles.contains("clip-g"));
-    m_textEncoder->setEnabled(!busy && !m_attachedFiles.contains("llm"));
-    m_mmproj->setEnabled(!busy && !m_attachedFiles.contains("mmproj"));
-    for (auto* field : {m_url, m_companion, m_clipL, m_clipG, m_textEncoder, m_mmproj}) {
+    for (auto* field : {m_url, m_companion}) {
         field->parentWidget()->findChild<QPushButton*>(field->objectName() + "Browse")->setEnabled(field->isEnabled());
         auto* remove = field->parentWidget()->findChild<QPushButton*>(field->objectName() + "Remove");
         remove->setVisible(!m_existingModelId.isEmpty() && m_attachedFiles.contains(roleFor(field)));
@@ -264,10 +230,6 @@ void AddModelDialog::updateActions()
         (!m_existingModelId.isEmpty() || !m_displayName->text().trimmed().isEmpty()) &&
                         (m_category->currentData() == "upscaler" || m_companion->text().trimmed().isEmpty() ||
                          validUrl(m_companion->text())) &&
-                        (m_clipL->text().trimmed().isEmpty() || validUrl(m_clipL->text())) &&
-                        (m_clipG->text().trimmed().isEmpty() || validUrl(m_clipG->text())) &&
-                        (m_textEncoder->text().trimmed().isEmpty() || validUrl(m_textEncoder->text())) &&
-                        (m_mmproj->text().trimmed().isEmpty() || validUrl(m_mmproj->text())) &&
                         m_options->isValid());
     m_cancel->setEnabled(!m_canceling);
 }
@@ -280,10 +242,6 @@ void AddModelDialog::startInstall()
     m_progress->setRange(0, 0);
     updateActions();
     QJsonObject files;
-    if (!m_textEncoder->text().trimmed().isEmpty()) files.insert("llm", m_textEncoder->text().trimmed());
-    if (!m_mmproj->text().trimmed().isEmpty()) files.insert("mmproj", m_mmproj->text().trimmed());
-    if (!m_clipL->text().trimmed().isEmpty()) files.insert("clip-l", m_clipL->text().trimmed());
-    if (!m_clipG->text().trimmed().isEmpty()) files.insert("clip-g", m_clipG->text().trimmed());
     m_installId = m_client->installModel(m_category->currentData().toString(), QUrl(m_url->text().trimmed()),
         QUrl(m_companion->text().trimmed()), m_existingModelId.isEmpty() ? m_options->options() : QJsonObject{},
         files, m_modelType->isHidden() ? QString("checkpoint") : m_modelType->currentData().toString(), m_existingModelId,
@@ -379,10 +337,6 @@ void AddModelDialog::closeEvent(QCloseEvent *event)
 
 QString AddModelDialog::roleFor(QLineEdit* field) const
 {
-    if (field == m_clipL) return "clip-l";
-    if (field == m_clipG) return "clip-g";
-    if (field == m_textEncoder) return "llm";
-    if (field == m_mmproj) return "mmproj";
     if (field == m_companion) {
         const QString category = m_category->currentData().toString();
         return category == "llm-chat" ? "mmproj" : "vae";
@@ -392,6 +346,7 @@ QString AddModelDialog::roleFor(QLineEdit* field) const
 
 void AddModelDialog::refreshCompanions()
 {
+    if (m_options) m_options->setModels(m_client->models("companion") + m_client->models("llm-chat"));
     const QString selected = m_mmprojSelection->property("selectedModelId").toString();
     const QSignalBlocker blocker(m_mmprojSelection);
     m_mmprojSelection->clear();

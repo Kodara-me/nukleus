@@ -78,11 +78,15 @@ class ServiceTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void persistsAndProtectsModelRouting();
+    void fixedRoutingLabelsAndLegacyMigration();
+    void configuresModelRoutingThroughSdk();
     void persistsPromptStyles();
     void enhancesPromptThroughSdk();
     void configuresStylesOverProtocol();
     void generatesWithValidatedOptionsAndVae();
     void validatesRecommendedOptions();
+    void assignsImageReferencesAndProtectsSharedModels();
     void persistsOptionsAndLegacyMetadata();
     void reservesSingleInstallAndCancels();
     void cancelsDuringCompanionDownload();
@@ -109,6 +113,219 @@ private slots:
     void migratesLegacyModelRoot();
     void rejectsConflictingModelRoots();
 };
+
+void ServiceTest::persistsAndProtectsModelRouting()
+{
+    QTemporaryDir directory;
+    ModelCatalog catalog(directory.path(), false);
+    QString error;
+    auto routing = catalog.routing(&error);
+    QVERIFY2(routing.has_value(), qPrintable(error));
+    QCOMPARE(routing->presets.size(), 2);
+    QCOMPARE(routing->presets.first().name, QString("Photorealism"));
+    QCOMPARE(routing->presets.first().qualities.size(), 3);
+    QVERIFY(routing->presets.first().positivePrefix.isEmpty());
+    QVERIFY(!QFileInfo::exists(directory.filePath("model-routing.json")));
+    QFile model(directory.filePath("test.gguf"));
+    QVERIFY(model.open(QIODevice::WriteOnly)); model.write("weights"); model.close();
+    const QString id = "image-generation:test.gguf";
+    auto options = KiraService::Protocol::defaultModelOptions("image-generation");
+    options.insert("steps", 37); options.insert("cfgScale", 5.75);
+    QVERIFY2(catalog.configure(id, options, &error, {}, "Test"), qPrintable(error));
+    routing->presets[0].qualities[0].modelId = id;
+    routing->presets[0].qualities[1].modelId = id;
+    routing->editingQualities[1].modelId = id;
+    QVERIFY2(catalog.configureRouting(*routing, &error), qPrintable(error));
+    routing = catalog.routing(&error);
+    QCOMPARE(routing->presets[0].qualities[0].steps, std::optional<int>(37));
+    QCOMPARE(routing->presets[0].qualities[0].cfgScale, std::optional<double>(5.75));
+    routing->presets[0].qualities[0].steps = 4;
+    routing->presets[0].qualities[0].cfgScale = 1.0;
+    QVERIFY(catalog.configureRouting(*routing, &error));
+    QCOMPARE(catalog.routing(), routing);
+    QVERIFY(!catalog.remove(id, &error));
+    QVERIFY(!catalog.configure(id, {{"canGenerate", false}, {"canEdit", true}}, &error, {}, "Test"));
+    QVERIFY(!catalog.configure(id, {{"canGenerate", true}, {"canEdit", false}}, &error, {}, "Test"));
+    auto invalid = *routing;
+    invalid.editingQualities[0].name = "Medium";
+    QVERIFY(!catalog.configureRouting(invalid, &error));
+    invalid = *routing; invalid.presets[0].qualities[0].modelId = "image-generation:missing.gguf";
+    QVERIFY(!catalog.configureRouting(invalid, &error));
+    invalid = *routing; invalid.editingQualities[0].id = invalid.presets[0].id;
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    QVERIFY(model.remove());
+    QCOMPARE(catalog.routing(), routing); // External disappearance preserves the assignment.
+    QVERIFY(!catalog.configureRouting({}, &error));
+    QVERIFY(catalog.configureRouting(KiraService::Protocol::starterModelRouting(), &error));
+    QCOMPARE(catalog.routing()->presets.size(), 2);
+#ifdef Q_OS_UNIX
+    const auto permissions = QFileInfo(directory.path()).permissions();
+    const auto restorePermissions = qScopeGuard([&] { QFile::setPermissions(directory.path(), permissions); });
+    QVERIFY(QFile::setPermissions(directory.path(), QFile::ReadOwner | QFile::ExeOwner));
+    QFile probe(directory.filePath("write-probe"));
+    if (!probe.open(QIODevice::WriteOnly)) {
+        QVERIFY(!catalog.configureRouting(KiraService::Protocol::starterModelRouting(), &error));
+        QCOMPARE(catalog.routing(), std::optional<KiraService::ModelRouting>(KiraService::Protocol::starterModelRouting()));
+    }
+    probe.close();
+    QVERIFY(QFile::setPermissions(directory.path(), permissions));
+#endif
+    QFile config(directory.filePath("model-routing.json"));
+    QVERIFY(config.open(QIODevice::WriteOnly | QIODevice::Truncate)); config.write("broken"); config.close();
+    QVERIFY(!catalog.routing(&error));
+    QVERIFY(!catalog.configureRouting({}, &error));
+    QVERIFY(config.open(QIODevice::ReadOnly)); QCOMPARE(config.readAll(), QByteArray("broken")); config.close();
+    QVERIFY(config.remove());
+    QVERIFY(QDir().mkdir(config.fileName()));
+    QVERIFY(!catalog.configureRouting({}, &error));
+}
+
+void ServiceTest::fixedRoutingLabelsAndLegacyMigration()
+{
+    const auto fixed = KiraService::Protocol::starterModelRouting();
+    QCOMPARE(fixed.presets[0].displayLabel(QLocale("fr_CA")), QString("Photoréalisme"));
+    QCOMPARE(fixed.presets[0].displayLabel(QLocale("en_US")), QString("Photorealism"));
+    QCOMPARE(fixed.presets[1].displayLabel(QLocale("fr_FR")), QString("Illustration"));
+    QCOMPARE(fixed.presets[0].qualities[0].displayLabel(QLocale("fr_CA")), QString("Rapide"));
+    QCOMPARE(fixed.presets[0].qualities[1].displayLabel(QLocale("fr_CA")), QString("Équilibré"));
+    QCOMPARE(fixed.presets[0].qualities[2].displayLabel(QLocale("en_US")), QString("Quality"));
+    auto previousLabels = fixed;
+    previousLabels.presets[0].positivePrefix = "saved prefix";
+    previousLabels.presets[0].negativePrefix = "saved negative";
+    const QStringList oldEnglish{"Low — faster", "Medium", "High — slower"};
+    const QStringList oldFrench{"Basse — plus rapide", "Moyenne", "Haute — plus lente"};
+    const auto oldNames = [&](QList<KiraService::ModelQuality> &qualities) {
+        for (int i = 0; i < qualities.size(); ++i) {
+            qualities[i].name = oldEnglish[i]; qualities[i].nameFr = oldFrench[i];
+            qualities[i].modelId = "image-generation:existing.gguf";
+            qualities[i].steps = 4 + i; qualities[i].cfgScale = 1.25 + i;
+        }
+    };
+    for (auto &preset : previousLabels.presets) oldNames(preset.qualities);
+    oldNames(previousLabels.editingQualities);
+    const auto renamed = KiraService::Protocol::modelRoutingFromJson(KiraService::Protocol::modelRoutingToJson(previousLabels));
+    QVERIFY(renamed.has_value());
+    QCOMPARE(renamed->presets[0].positivePrefix, previousLabels.presets[0].positivePrefix);
+    QCOMPARE(renamed->presets[0].negativePrefix, previousLabels.presets[0].negativePrefix);
+    const auto checkRenamed = [&](const QList<KiraService::ModelQuality> &actual,
+        const QList<KiraService::ModelQuality> &old, const QList<KiraService::ModelQuality> &labels) {
+        for (int i = 0; i < actual.size(); ++i) {
+            QCOMPARE(actual[i].id, old[i].id);
+            QCOMPARE(actual[i].modelId, old[i].modelId);
+            QCOMPARE(actual[i].steps, old[i].steps);
+            QCOMPARE(actual[i].cfgScale, old[i].cfgScale);
+            QCOMPARE(actual[i].name, labels[i].name);
+            QCOMPARE(actual[i].nameFr, labels[i].nameFr);
+        }
+    };
+    for (int i = 0; i < renamed->presets.size(); ++i)
+        checkRenamed(renamed->presets[i].qualities, previousLabels.presets[i].qualities, fixed.presets[i].qualities);
+    checkRenamed(renamed->editingQualities, previousLabels.editingQualities, fixed.editingQualities);
+    QCOMPARE(KiraService::Protocol::modelRoutingFromJson(KiraService::Protocol::modelRoutingToJson(fixed)),
+        std::optional<KiraService::ModelRouting>(fixed));
+    auto invalid = fixed; invalid.presets.swapItemsAt(0, 1);
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    invalid = fixed; invalid.presets[0].qualities.append(invalid.presets[0].qualities.first());
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    invalid = fixed; invalid.editingQualities[0].steps = 0;
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    invalid = fixed; invalid.editingQualities[0].cfgScale = 101;
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    for (const QJsonValue bad : {QJsonValue(1.5), QJsonValue("4"), QJsonValue(false)}) {
+        auto json = KiraService::Protocol::modelRoutingToJson(fixed);
+        auto qualities = json.value("editingQualities").toArray();
+        auto quality = qualities[0].toObject(); quality.insert("steps", bad); qualities[0] = quality;
+        json.insert("editingQualities", qualities);
+        QVERIFY(!KiraService::Protocol::modelRoutingFromJson(json));
+    }
+    QTemporaryDir directory;
+    QFile weights(directory.filePath("legacy.gguf"));
+    QVERIFY(weights.open(QIODevice::WriteOnly)); weights.write("weights"); weights.close();
+    ModelCatalog catalog(directory.path(), false);
+    QString error;
+    auto options = KiraService::Protocol::defaultModelOptions("image-generation");
+    options.insert("steps", 37); options.insert("cfgScale", 5.75);
+    QVERIFY2(catalog.configure("image-generation:legacy.gguf", options, &error, {}, "Legacy"), qPrintable(error));
+    const QJsonObject legacy{{"version", 1}, {"presets", QJsonArray{QJsonObject{
+        {"id", "photorealism"}, {"name", "Old name"}, {"positivePrefix", "realism"}, {"negativePrefix", "cartoon"},
+        {"qualities", QJsonArray{QJsonObject{{"id", "photo-medium"}, {"name", "Medium"}, {"modelId", "image-generation:legacy.gguf"}}}}}}},
+        {"editingQualities", QJsonArray{QJsonObject{{"id", "edit-medium"}, {"name", "Medium"}, {"modelId", "image-generation:legacy.gguf"}}}}};
+    QFile file(directory.filePath("model-routing.json"));
+    const auto bytes = QJsonDocument(legacy).toJson();
+    QVERIFY(file.open(QIODevice::WriteOnly)); file.write(bytes); file.close();
+    auto upgraded = catalog.routing(&error);
+    QVERIFY2(upgraded.has_value(), qPrintable(error));
+    QCOMPARE(upgraded->presets.size(), 2);
+    QCOMPARE(upgraded->presets[0].nameFr, QString("Photoréalisme"));
+    QCOMPARE(upgraded->presets[0].positivePrefix, QString("realism"));
+    QCOMPARE(upgraded->presets[0].qualities[1].steps, std::optional<int>(37));
+    QCOMPARE(upgraded->editingQualities[1].cfgScale, std::optional<double>(5.75));
+    QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), bytes); file.close();
+    upgraded->presets[0].qualities[1].steps = 4;
+    QVERIFY(catalog.configureRouting(*upgraded, &error));
+    options.insert("steps", 88); options.insert("cfgScale", 9.25);
+    QVERIFY(catalog.configure("image-generation:legacy.gguf", options, &error, {}, "Legacy"));
+    QCOMPARE(catalog.routing()->presets[0].qualities[1].steps, std::optional<int>(4));
+    QCOMPARE(catalog.routing()->editingQualities[1].steps, std::optional<int>(37));
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(file.readAll()).object().value("version").toInt(), 2);
+    file.close();
+    // Renaming previous version-2 labels is read-only and preserves saved values.
+    auto oldSaved = *catalog.routing();
+    for (auto &preset : oldSaved.presets)
+        for (int i = 0; i < preset.qualities.size(); ++i) {
+            preset.qualities[i].name = oldEnglish[i]; preset.qualities[i].nameFr = oldFrench[i];
+        }
+    for (int i = 0; i < oldSaved.editingQualities.size(); ++i) {
+        oldSaved.editingQualities[i].name = oldEnglish[i]; oldSaved.editingQualities[i].nameFr = oldFrench[i];
+    }
+    const auto savedBytes = QJsonDocument(KiraService::Protocol::modelRoutingToJson(oldSaved)).toJson();
+    QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate)); file.write(savedBytes); file.close();
+    const auto restored = catalog.routing(&error);
+    QVERIFY2(restored.has_value(), qPrintable(error));
+    QCOMPARE(restored->presets[0].qualities[1].name, QString("Balanced"));
+    QCOMPARE(restored->presets[0].qualities[1].steps, std::optional<int>(4));
+    QCOMPARE(restored->editingQualities[1].steps, std::optional<int>(37));
+    QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), savedBytes); file.close();
+    QVERIFY(catalog.configureRouting(*restored, &error));
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto saved = QJsonDocument::fromJson(file.readAll()).object();
+    const auto balanced = saved.value("presets").toArray()[0].toObject().value("qualities").toArray()[1].toObject();
+    QCOMPARE(balanced.value("name").toString(), QString("Balanced"));
+    QCOMPARE(balanced.value("nameFr").toString(), QString("Équilibré"));
+    QCOMPARE(balanced.value("id").toString(), QString("photo-medium"));
+    QCOMPARE(balanced.value("steps").toInt(), 4);
+}
+
+void ServiceTest::configuresModelRoutingThroughSdk()
+{
+    QTemporaryDir directory;
+    KiraServiceConfiguration configuration;
+    configuration.port = 0; configuration.modelRootPath = directory.path();
+    KiraServiceDaemon daemon(configuration);
+    QString error; QVERIFY2(daemon.start(&error), qPrintable(error));
+    KiraService::ServiceClient client;
+    client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
+    client.connectToService();
+    QTRY_VERIFY(client.modelRouting().has_value());
+    QVERIFY(client.capabilities().modelRouting);
+    KiraService::ServiceClient observer;
+    observer.setConfiguration(client.endpoint(), {}); observer.connectToService();
+    QTRY_VERIFY(observer.modelRouting().has_value());
+    QSignalSpy saved(&client, &KiraService::ServiceClient::modelRoutingConfigured);
+    auto routing = *client.modelRouting();
+    routing.presets[0].positivePrefix = "realism";
+    routing.presets[0].negativePrefix = "illustration";
+    QVERIFY(client.configureModelRouting(routing));
+    QTRY_COMPARE(saved.size(), 1);
+    QTRY_COMPARE(client.modelRouting(), std::optional<KiraService::ModelRouting>(routing));
+    QTRY_COMPARE(observer.modelRouting(), std::optional<KiraService::ModelRouting>(routing));
+    QVERIFY(!client.configureModelRouting({}));
+    routing.presets[1].positivePrefix = "illustrated";
+    QVERIFY(client.configureModelRouting(routing));
+    QTRY_COMPARE(saved.size(), 2);
+    QTRY_COMPARE(client.modelRouting(), std::optional<KiraService::ModelRouting>(routing));
+}
 
 void ServiceTest::persistsPromptStyles()
 {
@@ -415,7 +632,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(editArgs.value(editArgs.indexOf("--diffusion-model") + 1), QDir(editRoot).filePath("edit.gguf"));
     QCOMPARE(editArgs.value(editArgs.indexOf("--llm") + 1), QDir(editRoot).filePath("companions/edit.gguf/llm.gguf"));
     QCOMPARE(editArgs.value(editArgs.indexOf("--vae") + 1), QDir(editRoot).filePath("companions/edit.gguf/vae.safetensors"));
-    QCOMPARE(editArgs.value(editArgs.indexOf("--llm_vision") + 1), QDir(editRoot).filePath("companions/edit.gguf/mmproj.gguf"));
+    QVERIFY(!editArgs.contains("--llm_vision"));
     QCOMPARE(messages.last().value("operation").toString(), QString("image.edit"));
     images.clear();
     messages.clear();
@@ -435,9 +652,23 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(args.value(args.indexOf("--vae") + 1), QDir(root).filePath(companion));
     QVERIFY(args.contains("--model"));
     QVERIFY(!args.contains("--diffusion-model"));
-    // Associate modular files without changing the caller's generation options.
+    // Resolve shared installed VAE and LLM assignments without changing job options.
+    QVERIFY(QDir().mkpath(QDir(root).filePath("companion")));
+    QVERIFY(QDir().mkpath(QDir(root).filePath("llm")));
+    QVERIFY(QFile::copy(QDir(root).filePath(companion), QDir(root).filePath("companion/shared-vae.gguf")));
+    QVERIFY(QFile::copy(QDir(root).filePath(llm), QDir(root).filePath("llm/shared-encoder.gguf")));
+    QFile sharedMetadata(QDir(root).filePath("companion/metadata.json"));
+    QVERIFY(sharedMetadata.open(QIODevice::WriteOnly));
+    sharedMetadata.write(QJsonDocument(QJsonObject{{"shared-vae.gguf", QJsonObject{{"recommendedOptions", QJsonObject{{"subtype", "vae"}}}}}}).toJson());
+    sharedMetadata.close();
+    QFile encoderMetadata(QDir(root).filePath("llm/metadata.json"));
+    QVERIFY(encoderMetadata.open(QIODevice::WriteOnly));
+    encoderMetadata.write(QJsonDocument(QJsonObject{{"shared-encoder.gguf", QJsonObject{{"recommendedOptions", QJsonObject{{"canBeTextEncoder", true}}}}}}).toJson());
+    encoderMetadata.close();
     QVERIFY(metadata.open(QIODevice::WriteOnly | QIODevice::Truncate));
     metadata.write(QJsonDocument(QJsonObject{{"model.gguf", QJsonObject{
+        {"recommendedOptions", QJsonObject{{"canGenerate", true}, {"canEdit", false},
+            {"vaeModelId", "companion:shared-vae.gguf"}, {"textEncoderModelId", "llm-chat:shared-encoder.gguf"}}},
         {"modelType", "diffusion"}, {"companionFiles", QJsonObject{
             {"vae", companion}, {"clip-l", clipL}, {"clip-g", clipG}, {"llm", llm}, {"mmproj", mmproj}}}}}}).toJson());
     metadata.close();
@@ -448,11 +679,32 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     args = arguments();
     QVERIFY(!args.contains("--model"));
     QCOMPARE(args.value(args.indexOf("--diffusion-model") + 1), QDir(root).filePath("model.gguf"));
-    QCOMPARE(args.value(args.indexOf("--clip_l") + 1), QDir(root).filePath(clipL));
-    QCOMPARE(args.value(args.indexOf("--clip_g") + 1), QDir(root).filePath(clipG));
-    QCOMPARE(args.value(args.indexOf("--llm") + 1), QDir(root).filePath(llm));
-    QCOMPARE(args.value(args.indexOf("--llm_vision") + 1), QDir(root).filePath(mmproj));
-    QCOMPARE(args.value(args.indexOf("--vae") + 1), QDir(root).filePath(companion));
+    QVERIFY(!args.contains("--clip_l"));
+    QVERIFY(!args.contains("--clip_g"));
+    QCOMPARE(args.value(args.indexOf("--llm") + 1), QDir(root).filePath("llm/shared-encoder.gguf"));
+    QVERIFY(!args.contains("--llm_vision"));
+    QCOMPARE(args.value(args.indexOf("--vae") + 1), QDir(root).filePath("companion/shared-vae.gguf"));
+    KiraService::ServiceClient capabilityClient;
+    capabilityClient.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(service.serverPort())), {});
+    capabilityClient.connectToService();
+    QTRY_VERIFY(capabilityClient.modelListAvailable());
+    QVERIFY(capabilityClient.canSubmit(KiraService::ImageOperation::Generate, "image-generation:model.gguf"));
+    QVERIFY(!capabilityClient.canSubmit(KiraService::ImageOperation::Edit, "image-generation:model.gguf"));
+    ModelCatalog capabilityCatalog(root, true);
+    auto capabilities = KiraService::Protocol::defaultModelOptions("image-generation");
+    capabilities.insert("canGenerate", false);
+    capabilities.insert("canEdit", true);
+    capabilities.insert("vaeModelId", "companion:shared-vae.gguf");
+    capabilities.insert("textEncoderModelId", "llm-chat:shared-encoder.gguf");
+    QVERIFY(configureNamed(capabilityCatalog, "image-generation:model.gguf", capabilities, &error));
+    capabilityClient.requestModels();
+    QTRY_VERIFY(!capabilityClient.canSubmit(KiraService::ImageOperation::Generate, "image-generation:model.gguf"));
+    QVERIFY(capabilityClient.canSubmit(KiraService::ImageOperation::Edit, "image-generation:model.gguf"));
+    messages.clear(); send("disabled-generation", valid);
+    QTRY_VERIFY(terminal("disabled-generation"));
+    QCOMPARE(messages.last().value("code").toString(), QString("model-unavailable"));
+    capabilities.insert("canGenerate", true);
+    QVERIFY(configureNamed(capabilityCatalog, "image-generation:model.gguf", capabilities, &error));
     QJsonObject explicitOptions = valid;
     explicitOptions.insert("sampler", "dpm++2m");
     explicitOptions.insert("scheduler", "karras");
@@ -473,7 +725,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(args.value(args.indexOf("--clip-skip") + 1), QString("12"));
     QCOMPARE(args.value(args.indexOf("--cfg-scale") + 1), QString("7.125"));
     QCOMPARE(args.value(args.indexOf("--strength") + 1).toDouble(), 0.5678);
-    QCOMPARE(args.value(args.indexOf("--vae") + 1), QDir(root).filePath(companion));
+    QCOMPARE(args.value(args.indexOf("--vae") + 1), QDir(root).filePath("companion/shared-vae.gguf"));
     QVERIFY(args.contains("--init-img"));
     QJsonObject minimal{{"modelId", "image-generation:plain.gguf"},
                         {"prompt", "test"},
@@ -583,6 +835,69 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
         QTRY_VERIFY(terminal("invalid-style"));
         QCOMPARE(messages.last().value("code").toString(), QString("invalid-request"));
     }
+    auto routing = KiraService::Protocol::starterModelRouting();
+    routing.presets[0].positivePrefix = "  realism  ";
+    routing.presets[0].negativePrefix = "  cartoon  ";
+    routing.presets[0].qualities[1].modelId = "image-generation:plain.gguf";
+    routing.presets[0].qualities[1].steps = 4;
+    routing.presets[0].qualities[1].cfgScale = 1.0;
+    routing.editingQualities[1].modelId = "image-generation:edit.gguf";
+    routing.editingQualities[1].steps = 12;
+    routing.editingQualities[1].cfgScale = 2.25;
+    QVERIFY(styleCatalog.configureRouting(routing, &error));
+    const QJsonObject routed{{"presetId", "photorealism"}, {"qualityId", "photo-medium"},
+        {"prompt", "  subject  "}, {"negativePrompt", "  noise  "}, {"hasInput", true}};
+    messages.clear(); send("routing-snapshot", routed);
+    const auto requestedUpload = [&](const QString &id) {
+        return std::any_of(messages.cbegin(), messages.cend(), [&](const QJsonObject &m) {
+            return m.value("jobId") == id && m.value("type") == "upload-required";
+        });
+    };
+    QTRY_VERIFY(requestedUpload("routing-snapshot"));
+    routing.presets[0].positivePrefix = "changed";
+    routing.presets[0].qualities[1].modelId = "image-generation:model.gguf";
+    routing.presets[0].qualities[1].steps = 50;
+    routing.presets[0].qualities[1].cfgScale = 8.0;
+    QVERIFY(styleCatalog.configureRouting(routing, &error));
+    socket.sendBinaryMessage(image);
+    QTRY_VERIFY(terminal("routing-snapshot"));
+    ++completed;
+    QTRY_COMPARE(images.count(), completed);
+    args = arguments();
+    QCOMPARE(args.value(args.indexOf("--prompt") + 1), QString("realism, subject"));
+    QCOMPARE(args.value(args.indexOf("--steps") + 1), QString("4"));
+    QCOMPARE(args.value(args.indexOf("--cfg-scale") + 1), QString("1"));
+    QCOMPARE(args.value(args.indexOf("--negative-prompt") + 1), QString("cartoon, noise"));
+    QCOMPARE(args.value(args.indexOf("--model") + 1), QDir(root).filePath("plain.gguf"));
+    for (const auto &field : QList<QPair<QString, QJsonValue>>{
+        {"prompt", " "}, {"qualityId", ""}, {"qualityId", 42}, {"presetId", false},
+        {"presetId", "missing"}, {"styleId", "cinematic"}, {"modelId", "image-generation:plain.gguf"},
+        {"steps", 0}, {"cfgScale", 101}}) {
+        auto invalidRoute = routed; invalidRoute.insert(field.first, field.second);
+        messages.clear(); send("invalid-route", invalidRoute);
+        QTRY_VERIFY(terminal("invalid-route"));
+        QCOMPARE(messages.last().value("type").toString(), QString("error"));
+    }
+    messages.clear();
+    socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"type", "submit"}, {"operation", "image.edit"}, {"jobId", "routed-edit"},
+        {"options", QJsonObject{{"qualityId", "edit-medium"}, {"prompt", "change background"}, {"hasInput", true}}}}).toJson()));
+    QTRY_VERIFY(requestedUpload("routed-edit"));
+    routing.editingQualities[1].modelId = "image-generation:plain.gguf";
+    routing.editingQualities[1].steps = 50;
+    routing.editingQualities[1].cfgScale = 8.0;
+    QVERIFY(styleCatalog.configureRouting(routing, &error));
+    socket.sendBinaryMessage(image);
+    QTRY_VERIFY(terminal("routed-edit"));
+    ++completed;
+    QTRY_COMPARE(images.count(), completed);
+    args = arguments();
+    QCOMPARE(args.value(args.indexOf("--prompt") + 1), QString("change background"));
+    QCOMPARE(args.value(args.indexOf("--steps") + 1), QString("12"));
+    QCOMPARE(args.value(args.indexOf("--cfg-scale") + 1), QString("2.25"));
+    QCOMPARE(args.value(args.indexOf("--model") + 1), QDir(root).filePath("edit.gguf"));
+    QVERIFY(styleCatalog.configureRouting(KiraService::Protocol::starterModelRouting(), &error));
+
     QVERIFY(executable.open(QIODevice::WriteOnly | QIODevice::Truncate));
     executable.write("#!/bin/sh\nprintf 'Klein fixture failure\\n' >&2\nexit 17\n");
     executable.close();
@@ -599,7 +914,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QVERIFY(detail.contains("exit code 17"));
     QVERIFY(detail.contains("Command:"));
     QVERIFY(detail.contains("'--llm'"));
-    QVERIFY(detail.contains(QDir(root).filePath(llm)));
+    QVERIFY(detail.contains(QDir(root).filePath("llm/shared-encoder.gguf")));
     QVERIFY(detail.contains("'--vae'"));
     QVERIFY(detail.contains("Klein fixture failure"));
     QVERIFY(executable.open(QIODevice::WriteOnly | QIODevice::Truncate));
@@ -634,15 +949,69 @@ void ServiceTest::validatesRecommendedOptions()
         options.insert("unrelated", true);
         QVERIFY(!validateModelOptions(category, options));
     }
-    auto image = defaultModelOptions("image-generation"); image.insert("steps", "28"); QVERIFY(!validateModelOptions("image-generation", image));
+    auto image = defaultModelOptions("image-generation");
+    QVERIFY(!image.contains("clipSkip"));
+    image.insert("canEdit", false); image.insert("canGenerate", false);
+    QVERIFY(!validateModelOptions("image-generation", image));
+    image.insert("canGenerate", true); QVERIFY(validateModelOptions("image-generation", image));
+    image.insert("canEdit", "yes"); QVERIFY(!validateModelOptions("image-generation", image));
+    image.insert("canEdit", true);
+    image.insert("vaeModelId", 1); QVERIFY(!validateModelOptions("image-generation", image));
+    image.insert("vaeModelId", "");
+    image.insert("steps", "28"); QVERIFY(!validateModelOptions("image-generation", image));
     image.insert("steps", 28.5); QVERIFY(!validateModelOptions("image-generation", image));
     image.insert("steps", 200); image.insert("width", 2048); image.insert("height", 2048); QVERIFY(validateModelOptions("image-generation", image));
     image.insert("clipSkip", 0); QVERIFY(!validateModelOptions("image-generation", image));
     image.insert("clipSkip", 12); image.insert("sampler", "unknown"); QVERIFY(!validateModelOptions("image-generation", image));
-    auto llm = defaultModelOptions("llm-chat"); llm.insert("maxTokens", 4097); QVERIFY(!validateModelOptions("llm-chat", llm));
+    auto llm = defaultModelOptions("llm-chat");
+    llm.insert("canBeTextEncoder", "yes"); QVERIFY(!validateModelOptions("llm-chat", llm));
+    llm.insert("canBeTextEncoder", true); QVERIFY(validateModelOptions("llm-chat", llm));
+    llm.insert("maxTokens", 4097); QVERIFY(!validateModelOptions("llm-chat", llm));
     llm.insert("maxTokens", 4096); llm.insert("topP", 0); QVERIFY(!validateModelOptions("llm-chat", llm));
     QVERIFY(validateModelOptions("upscaler", {}));
     QVERIFY(!validateModelOptions("upscaler", {{"tileSize", 129}}));
+}
+
+void ServiceTest::assignsImageReferencesAndProtectsSharedModels()
+{
+    QTemporaryDir directory;
+    TestHttpServer source("weights"); QVERIFY(source.start());
+    ModelCatalog catalog(directory.path(), true);
+    QSignalSpy installed(&catalog, &ModelCatalog::installFinished);
+    QString error;
+    ModelInstallRequest request;
+    request.installId = "vae"; request.category = ModelCategory::Companion;
+    request.url = source.url("vae.gguf"); request.displayName = "VAE";
+    request.recommendedOptions = QJsonObject{{"subtype", "vae"}};
+    QVERIFY(catalog.install(request, &error)); QTRY_COMPARE(installed.count(), 1);
+    request.installId = "encoder"; request.category = ModelCategory::LlmChat;
+    request.url = source.url("encoder.gguf"); request.displayName = "Encoder";
+    auto llm = KiraService::Protocol::defaultModelOptions("llm-chat");
+    llm.insert("canBeTextEncoder", true); request.recommendedOptions = llm;
+    QVERIFY(catalog.install(request, &error)); QTRY_COMPARE(installed.count(), 2);
+    request.installId = "image"; request.category = ModelCategory::ImageGeneration;
+    request.url = source.url("image.gguf"); request.displayName = "Image";
+    auto image = KiraService::Protocol::defaultModelOptions("image-generation");
+    image.insert("canGenerate", false);
+    image.insert("vaeModelId", "llm-chat:encoder.gguf"); request.recommendedOptions = image;
+    QVERIFY(!catalog.install(request, &error));
+    image.insert("vaeModelId", "companion:vae.gguf");
+    image.insert("textEncoderModelId", "llm-chat:encoder.gguf"); request.recommendedOptions = image;
+    QVERIFY(catalog.install(request, &error));
+    QVERIFY(!catalog.remove("companion:vae.gguf", &error));
+    QTRY_COMPARE(installed.count(), 3);
+    ModelCatalog restored(directory.path(), true);
+    QCOMPARE(restored.modelById("image-generation:image.gguf")->recommendedOptions, image);
+    QVERIFY(!restored.remove("companion:vae.gguf", &error));
+    QVERIFY(!restored.remove("llm-chat:encoder.gguf", &error));
+    QVERIFY(!restored.configure("companion:vae.gguf", {{"subtype", "mmproj"}}, &error));
+    llm.insert("canBeTextEncoder", false);
+    QVERIFY(!restored.configure("llm-chat:encoder.gguf", llm, &error));
+    image.insert("vaeModelId", ""); image.insert("textEncoderModelId", "");
+    QVERIFY(restored.configure("image-generation:image.gguf", image, &error));
+    QVERIFY(restored.configure("llm-chat:encoder.gguf", llm, &error));
+    QVERIFY(restored.remove("companion:vae.gguf", &error));
+    QVERIFY(QFileInfo::exists(directory.filePath("image.gguf")));
 }
 
 void ServiceTest::persistsOptionsAndLegacyMetadata()

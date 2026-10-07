@@ -3,7 +3,7 @@
 #include "AddModelDialog.h"
 #include "ManagerServiceClient.h"
 #include "ModelOptionsWidget.h"
-#include "ModelStylesDialog.h"
+#include "ModelRoutingDialog.h"
 #include "ServiceConnectionDialog.h"
 #include <KiraUi/IconProvider.h>
 #include <KiraUi/Panel.h>
@@ -75,9 +75,9 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     m_attach = new QPushButton(tr("Optional files…"), library);
     m_attach->setObjectName("attachModelFiles");
     left->addWidget(m_attach);
-    m_styles = new QPushButton(tr("Styles…"), library);
-    m_styles->setObjectName("modelStyles");
-    left->addWidget(m_styles);
+    m_presets = new QPushButton(tr("Presets…"), library);
+    m_presets->setObjectName("modelPresets");
+    left->addWidget(m_presets);
     auto *configuration = new KiraUi::Panel(m_splitter);
     auto* panelLayout = new QVBoxLayout(configuration);
     m_configurationBody = new QWidget(configuration);
@@ -120,11 +120,6 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     m_options = new ModelOptionsWidget(content);
     m_options->hide();
     contentLayout->addWidget(m_options);
-    m_hint =
-        new QLabel(tr("Recommended values for this model. Applications can override them."), content);
-    m_hint->setWordWrap(true);
-    m_hint->setObjectName("recommendedValuesHint");
-    contentLayout->addWidget(m_hint);
     contentLayout->addStretch();
     scroll->setWidget(content);
     right->addWidget(scroll, 1);
@@ -154,10 +149,12 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
         updateActions();
     });
     connect(m_attach, &QPushButton::clicked, this, &ManageModelsWindow::attachFiles);
-    connect(m_styles, &QPushButton::clicked, this, &ManageModelsWindow::editStyles);
+    connect(m_presets, &QPushButton::clicked, this, &ManageModelsWindow::editPresets);
     connect(m_delete, &QPushButton::clicked, this, &ManageModelsWindow::deleteSelectedModel);
     connect(m_save, &QPushButton::clicked, this, &ManageModelsWindow::saveOptions);
     connect(m_client, &ManagerServiceClient::modelsChanged, this, &ManageModelsWindow::populateModels);
+    connect(m_client, &ManagerServiceClient::modelRoutingChanged, this, &ManageModelsWindow::updateActions);
+    connect(m_client, &ManagerServiceClient::modelRoutingFailed, m_status, &QLabel::setText);
     connect(m_client, &ManagerServiceClient::modelsChanged, this, &ManageModelsWindow::refreshCompanions);
     connect(m_client, &ManagerServiceClient::serviceStateChanged, this,
             [this](const QString &state, const QString &message)
@@ -262,6 +259,8 @@ void ManageModelsWindow::populateModels()
             auto files = model.companionFiles;
             if (!model.companionFileName.isEmpty()) files.insert(model.companionRole, model.companionFileName);
             for (auto it = files.begin(); it != files.end(); ++it) {
+                if (category.first == "image-generation"
+                    && (it.key() == "clip-l" || it.key() == "clip-g" || it.key() == "mmproj")) continue;
                 auto *companion = new QStandardItem(it.key() + ": " + QFileInfo(it.value().toString()).fileName());
                 companion->setEditable(false);
                 companion->setData(model.id, Qt::UserRole + 1);
@@ -320,7 +319,6 @@ void ManageModelsWindow::showSelection(const QString &id)
             m_options->setOptions(category.first, model.recommendedOptions, model.explicitContent);
             m_configurationBody->show();
             m_options->setVisible(category.first != "upscaler");
-            m_hint->setVisible(category.first == "image-generation");
             m_mmprojLabel->setVisible(category.first == "llm-chat");
             m_mmproj->setVisible(category.first == "llm-chat");
             m_originalMmproj = model.mmprojModelId;
@@ -372,10 +370,8 @@ bool ManageModelsWindow::guardChanges(std::function<void()> continuation)
 }
 void ManageModelsWindow::updateActions()
 {
-    bool generationSelected = false;
-    for (const auto &model : m_client->models("image-generation"))
-        if (model.id == m_selectedId) generationSelected = true;
-    m_styles->setEnabled(m_client->isAuthenticated() && m_client->modelListAvailable() && !m_saving && generationSelected);
+    m_presets->setEnabled(m_client->isAuthenticated() && m_client->modelRouting().has_value() && !m_saving);
+    m_presets->setToolTip(m_client->supportsModelRouting() ? QString() : tr("Upgrade Kira Service to configure presets."));
     m_tree->setEnabled(!m_saving);
     m_options->setEnabled(m_client->isAuthenticated() && !m_saving);
     m_displayName->setEnabled(m_client->isAuthenticated() && !m_saving && !m_selectedId.isEmpty());
@@ -437,15 +433,11 @@ void ManageModelsWindow::attachFiles()
     if (guardChanges(open)) open();
 }
 
-void ManageModelsWindow::editStyles()
+void ManageModelsWindow::editPresets()
 {
     const auto open = [this] {
-        for (const auto &model : m_client->models("image-generation")) {
-            if (model.id != m_selectedId) continue;
-            ModelStylesDialog dialog(m_client, model.id, model.styles, this);
-            dialog.exec();
-            break;
-        }
+        ModelRoutingDialog dialog(m_client, this);
+        dialog.exec();
     };
     if (guardChanges(open)) open();
 }
@@ -482,6 +474,7 @@ void ManageModelsWindow::closeEvent(QCloseEvent *event)
 
 void ManageModelsWindow::refreshCompanions()
 {
+    m_options->setModels(m_client->models("companion") + m_client->models("llm-chat"));
     const QSignalBlocker blocker(m_mmproj);
     const auto selected = m_mmproj->property("selectedModelId").toString();
     m_mmproj->clear();

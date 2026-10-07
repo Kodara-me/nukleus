@@ -1,6 +1,9 @@
 #include "../src/manager/AddModelDialog.h"
 #include "../src/manager/ManageModelsWindow.h"
-#include "../src/manager/ModelStylesDialog.h"
+#include "../src/manager/ModelRoutingDialog.h"
+#include <QStandardItemModel>
+#include <QDoubleSpinBox>
+#include <QAction>
 #include "../src/manager/ServiceConnectionDialog.h"
 #include "../src/manager/ManagerServiceClient.h"
 #include "../src/manager/ModelOptionsWidget.h"
@@ -23,6 +26,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSettings>
+#include <QScopeGuard>
 #include <QSpinBox>
 #include <QTemporaryDir>
 #include <QWebSocket>
@@ -60,6 +64,40 @@ class ManagerUiTest final : public QObject
                                                      {"recommendedOptions", m_saved}}}}}}}});
     }
   private slots:
+    void imageCapabilitiesAndSharedEncoderChoices()
+    {
+        ModelOptionsWidget form;
+        ManagedModelInfo vae;
+        vae.id = "companion:vae.gguf"; vae.displayName = "Shared VAE";
+        vae.recommendedOptions = {{"subtype", "vae"}};
+        ManagedModelInfo projector = vae;
+        projector.id = "companion:vision.gguf";
+        projector.recommendedOptions = {{"subtype", "mmproj"}};
+        ManagedModelInfo encoder;
+        encoder.id = "llm-chat:encoder.gguf"; encoder.displayName = "Encoder";
+        encoder.recommendedOptions = {{"canBeTextEncoder", true}};
+        ManagedModelInfo chat = encoder;
+        chat.id = "llm-chat:chat.gguf"; chat.recommendedOptions = {{"canBeTextEncoder", false}};
+        form.setModels({vae, projector, encoder, chat});
+        form.setOptions("image-generation");
+        auto *edit = form.findChild<QCheckBox*>("canEdit");
+        auto *generate = form.findChild<QCheckBox*>("canGenerate");
+        edit->setChecked(false); generate->setChecked(false);
+        QVERIFY(!form.isValid());
+        edit->setChecked(true); QVERIFY(form.isValid());
+        auto *vaeChoice = form.findChild<QComboBox*>("vaeModelId");
+        auto *encoderChoice = form.findChild<QComboBox*>("textEncoderModelId");
+        QCOMPARE(vaeChoice->count(), 2); QCOMPARE(encoderChoice->count(), 2);
+        vaeChoice->setCurrentIndex(1); encoderChoice->setCurrentIndex(1);
+        QCOMPARE(form.options().value("vaeModelId").toString(), vae.id);
+        QCOMPARE(form.options().value("textEncoderModelId").toString(), encoder.id);
+        form.setModels({encoder, vae, chat, projector});
+        QCOMPARE(encoderChoice->currentData().toString(), encoder.id);
+        form.setOptions("llm-chat");
+        auto *eligible = form.findChild<QCheckBox*>("canBeTextEncoder");
+        QVERIFY(!eligible->isChecked()); eligible->setChecked(true);
+        QVERIFY(form.options().value("canBeTextEncoder").toBool());
+    }
     void savesConnectionOnlyAfterAuthentication()
     {
         m_requiredToken = "test-key";
@@ -120,53 +158,119 @@ class ManagerUiTest final : public QObject
         QCOMPARE(QSettings().value("Service/Host").toString(), QString("127.0.0.1"));
         window.close();
     }
-    void editsStylesAfterAcknowledgment()
+    void editsRoutingAfterAcknowledgment()
     {
+        m_saved.insert("steps", 37); m_saved.insert("cfgScale", 5.75);
         ManagerServiceClient client(nullptr, m_server.serverPort());
-        client.setAutomaticReconnect(false);
-        client.connectToService();
+        client.setAutomaticReconnect(false); client.connectToService();
         QTRY_VERIFY(client.modelListAvailable());
-        const auto styles = KiraService::Protocol::starterPromptStyles();
-        ModelStylesDialog dialog(&client, "image-generation:test.gguf", styles);
-        dialog.show();
-        auto *list = dialog.findChild<QListWidget *>("stylesList");
-        auto *name = dialog.findChild<QLineEdit *>("styleName");
-        auto *positive = dialog.findChild<QPlainTextEdit *>("positivePrefix");
-        auto *save = dialog.findChild<QPushButton *>("saveStyles");
-        QCOMPARE(list->count(), 3);
-        name->setText("Renamed");
+        send({{"type", "capabilities"}, {"operations", QJsonArray{"model-routing"}}});
+        const auto routing = KiraService::Protocol::starterModelRouting();
+        send({{"type", "model-routing.get.completed"}, {"routing", KiraService::Protocol::modelRoutingToJson(routing)}});
+        QTRY_VERIFY(client.modelRouting().has_value());
+        const auto originalLocale = QLocale();
+        const auto restoreLocale = qScopeGuard([&] { QLocale::setDefault(originalLocale); });
+        QLocale::setDefault(QLocale("fr_CA"));
+        ModelRoutingDialog dialog(&client); dialog.show();
+        auto *tree = dialog.findChild<KiraUi::TreeView *>("routingTree");
+        QVERIFY(tree);
+        QCOMPARE(tree->dragDropMode(), QAbstractItemView::NoDragDrop);
+        QCOMPARE(tree->editTriggers(), QAbstractItemView::EditTriggers(QAbstractItemView::NoEditTriggers));
+        QVERIFY(!dialog.findChild<QAction *>("addPreset"));
+        QVERIFY(!dialog.findChild<QAction *>("addQuality"));
+        QVERIFY(!dialog.findChild<QAction *>("removeRoutingItem"));
+        auto *model = qobject_cast<QStandardItemModel *>(tree->model());
+        auto *generation = model->item(0);
+        auto *editing = model->item(1);
+        QCOMPARE(generation->rowCount(), 2);
+        auto *preset = generation->child(0);
+        QCOMPARE(preset->rowCount(), 3);
+        QCOMPARE(preset->text(), QString("Photorealism"));
+        QCOMPARE(preset->child(0)->text(), QString("Fast"));
+        QCOMPARE(preset->child(1)->text(), QString("Balanced"));
+        QCOMPARE(preset->child(2)->text(), QString("Quality"));
+        QCOMPARE(editing->child(1)->text(), QString("Balanced"));
+        QVERIFY(!(preset->flags() & Qt::ItemIsEditable));
+        QVERIFY(!(preset->child(0)->flags() & Qt::ItemIsDragEnabled));
+        auto *positive = dialog.findChild<QPlainTextEdit *>("presetPositive");
+        auto *negative = dialog.findChild<QPlainTextEdit *>("presetNegative");
+        auto *assignment = dialog.findChild<QComboBox *>("qualityModel");
+        auto *steps = dialog.findChild<QSpinBox *>("qualitySteps");
+        auto *cfg = dialog.findChild<QDoubleSpinBox *>("qualityCfg");
+        auto *save = dialog.findChild<QPushButton *>("saveRouting");
+        QVERIFY(positive->isVisible()); QVERIFY(negative->isVisible()); QVERIFY(!assignment->isVisible());
         positive->setPlainText("line one\nline two");
-        dialog.findChild<QPushButton *>("addStyle")->click();
-        QCOMPARE(list->count(), 4);
-        QVERIFY(!save->isEnabled());
-        name->setText("Added"); positive->setPlainText("prefix");
-        list->setCurrentRow(2);
-        dialog.findChild<QPushButton *>("removeStyle")->click();
-        QCOMPARE(list->count(), 3);
-        save->click();
-        QTRY_VERIFY(m_messages.last().value("type") == "models.styles.configure");
-        const auto sent = m_messages.last().value("styles").toArray();
-        QCOMPARE(sent.first().toObject().value("id").toString(), styles.first().id);
-        QCOMPARE(sent.first().toObject().value("name").toString(), QString("Renamed"));
-        QCOMPARE(sent.first().toObject().value("positivePrefix").toString(), QString("line one\nline two"));
-        QCOMPARE(sent.last().toObject().value("name").toString(), QString("Added"));
-        QVERIFY(!QUuid(sent.last().toObject().value("id").toString()).isNull());
+        tree->setCurrentIndex(preset->child(0)->index());
+        QVERIFY(!positive->isVisible()); QVERIFY(assignment->isVisible());
+        QVERIFY(!steps->isEnabled()); QVERIFY(!cfg->isEnabled());
+        QCOMPARE(assignment->currentData().toString(), QString());
+        QVERIFY(assignment->count() > 1);
+        assignment->setCurrentIndex(1);
+        const auto assignedModelId = assignment->currentData().toString();
+        QCOMPARE(steps->value(), 37);
+        QCOMPARE(cfg->value(), 5.75);
+        steps->setValue(4); cfg->setValue(1.0);
+        tree->setCurrentIndex(preset->child(1)->index());
+        assignment->setCurrentIndex(1);
+        QCOMPARE(steps->value(), 37);
+        QCOMPARE(cfg->value(), 5.75);
+        m_saved.insert("steps", 88); m_saved.insert("cfgScale", 9.25);
+        listModels();
+        QTRY_COMPARE(client.models("image-generation").first().recommendedOptions.value("steps").toInt(), 88);
+        QCOMPARE(steps->value(), 37); // Refresh never replaces the quality's snapshot.
+        tree->setCurrentIndex(preset->child(0)->index());
+        QCOMPARE(steps->value(), 4); QCOMPARE(cfg->value(), 1.0);
+        assignment->setCurrentIndex(0);
+        assignment->setCurrentIndex(1);
+        QCOMPARE(steps->value(), 88); QCOMPARE(cfg->value(), 9.25);
+        steps->setValue(4); cfg->setValue(1.0);
+        tree->setCurrentIndex(editing->child(1)->index());
+        assignment->setCurrentIndex(1);
+        QCOMPARE(steps->value(), 88); QCOMPARE(cfg->value(), 9.25);
+        steps->setValue(12); cfg->setValue(2.25);
+        if (qEnvironmentVariableIsSet("KIRA_MANAGER_SCREENSHOT_DIR")) {
+            const QDir directory(qEnvironmentVariable("KIRA_MANAGER_SCREENSHOT_DIR"));
+            QVERIFY(directory.mkpath("."));
+            tree->setCurrentIndex(preset->child(0)->index());
+            QCoreApplication::processEvents();
+            QVERIFY(dialog.grab().save(directory.filePath("routing-quality.png")));
+            tree->setCurrentIndex(preset->index());
+            QCoreApplication::processEvents();
+            QVERIFY(dialog.grab().save(directory.filePath("routing-preset.png")));
+        }
+        QVERIFY(save->isEnabled()); save->click();
+        QTRY_VERIFY(m_messages.last().value("type") == "model-routing.configure");
+        const auto sent = m_messages.last().value("routing").toObject();
+        QCOMPARE(sent.value("version").toInt(), 2);
+        const auto presets = sent.value("presets").toArray();
+        QCOMPARE(presets.size(), 2);
+        const auto savedPreset = presets.first().toObject();
+        QCOMPARE(savedPreset.value("id").toString(), routing.presets.first().id);
+        QCOMPARE(savedPreset.value("nameFr").toString(), QString("Photoréalisme"));
+        QCOMPARE(savedPreset.value("positivePrefix").toString(), QString("line one\nline two"));
+        const auto qualities = savedPreset.value("qualities").toArray();
+        QCOMPARE(qualities.at(0).toObject().value("modelId").toString(), assignedModelId);
+        QCOMPARE(qualities.at(0).toObject().value("steps").toInt(), 4);
+        QCOMPARE(qualities.at(0).toObject().value("cfgScale").toDouble(), 1.0);
+        QCOMPARE(qualities.at(1).toObject().value("steps").toInt(), 37);
+        QCOMPARE(qualities.at(1).toObject().value("cfgScale").toDouble(), 5.75);
+        QCOMPARE(sent.value("editingQualities").toArray().at(1).toObject().value("steps").toInt(), 12);
+        QCOMPARE(sent.value("editingQualities").toArray().at(1).toObject().value("cfgScale").toDouble(), 2.25);
         QVERIFY(dialog.isVisible()); QVERIFY(!save->isEnabled());
-        send({{"type", "error"}, {"id", "image-generation:test.gguf"}, {"message", "Retry"}});
+        send({{"type", "error"}, {"operation", "model-routing.configure"}, {"message", "Retry"}});
         QTRY_VERIFY(save->isEnabled());
-        list->setCurrentRow(0);
-        QCOMPARE(name->text(), QString("Renamed"));
+        tree->setCurrentIndex(preset->index());
+        QCOMPARE(positive->toPlainText(), QString("line one\nline two"));
         save->click();
-        send({{"type", "models.styles.configure.completed"}, {"id", "image-generation:test.gguf"}, {"styles", sent}});
+        send({{"type", "model-routing.configure.completed"}, {"routing", sent}});
         QTRY_VERIFY(!dialog.isVisible());
         QCOMPARE(dialog.result(), int(QDialog::Accepted));
-        ModelStylesDialog canceled(&client, "image-generation:test.gguf", styles);
-        canceled.show();
-        const auto count = m_messages.size();
-        canceled.findChild<QLineEdit *>("styleName")->setText("Discard");
-        canceled.findChild<QPushButton *>("cancelStyles")->click();
+        ModelRoutingDialog canceled(&client); canceled.show();
+        const int count = m_messages.size();
+        canceled.findChild<QPlainTextEdit *>("presetPositive")->setPlainText("Discard");
+        QMetaObject::invokeMethod(&canceled, "reject");
         QCOMPARE(m_messages.size(), count);
-        QCOMPARE(canceled.result(), int(QDialog::Rejected));
+        QCOMPARE(client.modelRouting()->presets.first().positivePrefix, QString("line one\nline two"));
     }
     void initTestCase()
     {
@@ -314,7 +418,7 @@ class ManagerUiTest final : public QObject
         auto* companion = window.findChild<QComboBox*>("modelMmprojCompanion");
         QCOMPARE(companion->count(), 2);
         QCOMPARE(companion->itemData(1).toString(), QString("companion:vision.gguf"));
-        QVERIFY(window.findChild<QLabel*>("recommendedValuesHint")->isHidden());
+        QVERIFY(!window.findChild<QLabel*>("recommendedValuesHint"));
         tree->setCurrentIndex(tree->model()->index(0, 0, tree->model()->index(0, 0)));
         QVERIFY(body->isHidden());
         select("upscaler:scale.gguf");
@@ -326,7 +430,7 @@ class ManagerUiTest final : public QObject
         AddModelDialog add(&client, "llm-chat");
         add.show();
         QVERIFY(add.findChild<QLineEdit*>("companionUrl")->parentWidget()->isHidden());
-        QVERIFY(add.findChild<QLabel*>("recommendedValuesHint")->isHidden());
+        QVERIFY(!add.findChild<QLabel*>("recommendedValuesHint"));
         auto* selection = add.findChild<QComboBox*>("llmMmprojCompanion");
         QCOMPARE(selection->count(), 2);
         add.findChild<QLineEdit*>("modelUrl")->setText("https://example.com/chat.gguf");
@@ -365,10 +469,11 @@ class ManagerUiTest final : public QObject
         send({{"type", "models.companion.delete.completed"}, {"id", "image-generation:test.gguf"}, {"role", "vae"}});
         QTRY_VERIFY(dialog.findChild<QLineEdit*>("companionUrl")->isEnabled());
         QVERIFY(!remove->isVisible());
-        dialog.findChild<QLineEdit*>("clipLUrl")->setText("https://example.test/clip_l.safetensors");
-        dialog.findChild<QLineEdit*>("clipGUrl")->setText("https://example.test/clip_g.safetensors");
-        dialog.findChild<QLineEdit*>("textEncoderUrl")->setText("https://example.test/encoder.gguf");
-        dialog.findChild<QLineEdit*>("mmprojUrl")->setText("https://example.test/mmproj.gguf");
+        QVERIFY(!dialog.findChild<QLineEdit*>("clipLUrl"));
+        QVERIFY(!dialog.findChild<QLineEdit*>("clipGUrl"));
+        QVERIFY(!dialog.findChild<QLineEdit*>("textEncoderUrl"));
+        QVERIFY(!dialog.findChild<QLineEdit*>("mmprojUrl"));
+        dialog.findChild<QLineEdit*>("companionUrl")->setText("https://example.test/replacement.safetensors");
         dialog.findChild<QComboBox*>("modelType")->setCurrentIndex(1);
         if (qEnvironmentVariableIsSet("KIRA_MANAGER_SCREENSHOT_DIR")) {
             const QDir directory(qEnvironmentVariable("KIRA_MANAGER_SCREENSHOT_DIR"));
@@ -382,10 +487,9 @@ class ManagerUiTest final : public QObject
         QTRY_VERIFY(!m_messages.isEmpty());
         const auto request = m_messages.last();
         QCOMPARE(request.value("id").toString(), QString("image-generation:test.gguf"));
-        QCOMPARE(request.value("companionUrls").toObject().value("llm").toString(), QString("https://example.test/encoder.gguf"));
-        QCOMPARE(request.value("companionUrls").toObject().value("mmproj").toString(), QString("https://example.test/mmproj.gguf"));
+        QCOMPARE(request.value("companionUrl").toString(), QString("https://example.test/replacement.safetensors"));
         QCOMPARE(request.value("modelType").toString(), QString("diffusion"));
-        QCOMPARE(request.value("companionUrls").toObject().size(), 4);
+        QVERIFY(request.value("companionUrls").toObject().isEmpty());
         QVERIFY(!request.contains("recommendedOptions"));
         QVERIFY(request.value("url").toString().isEmpty());
         QVERIFY(!start->isEnabled());
@@ -427,7 +531,9 @@ class ManagerUiTest final : public QObject
         QVERIFY(explicitContent);
         QVERIFY(!explicitContent->isChecked());
         explicitContent->setChecked(true);
-        QVERIFY(!form->findChild<QCheckBox*>("canEdit"));
+        QVERIFY(form->findChild<QCheckBox*>("canEdit")->isChecked());
+        QVERIFY(form->findChild<QCheckBox*>("canGenerate")->isChecked());
+        QVERIFY(!form->findChild<QComboBox*>("clipSkip"));
         auto *save = window.findChild<QPushButton *>("saveOptions");
         QVERIFY(save->isEnabled());
         save->click();

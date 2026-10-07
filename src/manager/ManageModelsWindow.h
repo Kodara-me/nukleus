@@ -34,7 +34,7 @@ class ManageModelsWindow final : public KiraUi::MainWindow
     void updateActions();
     void addModel();
     void attachFiles();
-    void editStyles();
+    void editPresets();
     void deleteSelectedModel();
     void saveOptions();
     bool guardChanges(std::function<void()> continuation);
@@ -45,7 +45,6 @@ class ManageModelsWindow final : public KiraUi::MainWindow
     QLabel *m_status;
     QLabel *m_details;
     QWidget* m_configurationBody;
-    QLabel* m_hint;
     QLabel* m_mmprojLabel;
     QComboBox* m_mmproj;
     QString m_originalMmproj;
@@ -58,7 +57,7 @@ class ManageModelsWindow final : public KiraUi::MainWindow
     ModelOptionsWidget *m_options;
     QPushButton *m_add;
     QPushButton *m_attach;
-    QPushButton *m_styles;
+    QPushButton *m_presets;
     QPushButton *m_delete;
     QPushButton *m_save;
     QString m_selectedId;

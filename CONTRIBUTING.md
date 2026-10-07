@@ -53,21 +53,46 @@ The SDK install method accepts an optional companion URL instead of a SHA-256
 checksum. Download checksums are no longer supported. Image models also accept
 `companionUrls` (CLIP-L/CLIP-G/VAE), `modelType` (`checkpoint` or `diffusion`),
 and an existing opaque `id` to attach files without downloading the primary again.
-The GUI exposes this via Optional files; the CLI exposes `attach` with
+The legacy VAE GUI exposes this via Optional files; the compatibility CLI exposes `attach` with
 `--model-type`, `--clip-l`, `--clip-g`, and `--vae`.
 
 ## Shared manager UI
 
-Per-model prompt styles use the framework-independent Protocol `PromptStyle`
-value type and JSON validation helpers. The Manager's **Styles…** dialog edits
-an in-memory ordered draft for one generation model; Save replaces the list
-atomically in category-local metadata and closes only after acknowledgment.
-Missing metadata exposes service-owned starters without writing files; explicit
-`[]` stays empty. Preserve companion fields and unrelated entries on writes.
-Generation resolves `styleId` and snapshots both composed prompts before uploads
-and queueing. Clients refresh on `models.styles.changed` and never apply prefixes.
-Deploy the service before updated clients. ServiceTest, ServiceSdkTest and
-ManagerUiTest use disposable models/network fixtures; do not edit live models.
+ModelRouting Protocol types carry fixed English/French labels, preset prefixes,
+quality/model assignments and optional Steps/CFG snapshots. Use the shared
+KiraUi TreeView with fixed Generation/Editing branches: Photorealism and
+Illustration each have Fast, Balanced, Quality; editing has those
+three qualities without style prefixes. The tree cannot rename, add, remove,
+reorder or reparent entries. Selection shows preset prefixes or Model/Steps/CFG.
+Model changes initialize the quality pair from recommendations or shared defaults;
+catalogue refresh preserves it. Save persists manual values; Cancel discards them.
+
+Store version-2 JSON atomically beside model metadata. Version-1 parsing maps
+known IDs into the fixed catalogue, preserves assignments/prefixes and fills
+missing parameters from models. Read/migration never writes; explicit Save
+replaces the file with the fixed structure, omitting retired custom entries.
+Validate the fixed IDs/order/labels and finite numeric bounds (Steps 1–200,
+CFG 0–100); protect assignments and capabilities, including attachment installs.
+Tests cover bilingual labels, legacy reading, persistence, snapshots, fixed-tree
+behavior and draft Save/Cancel with disposable files and local sockets.
+
+Protocol v3 advertises `model-routing`; `model-routing.get/configure` return
+completion messages with `routing`, and saves broadcast `model-routing.changed`.
+Generation accepts presetId + qualityId; editing accepts only qualityId.
+Resolve models server-side, reject conflicting modelId and legacy styleId mixing,
+validate original prompts, then snapshot prefixes and quality defaults before
+upload/queueing. Fill omitted Steps/CFG from the selected quality; explicit valid
+job values take precedence. Direct-model requests retain their existing defaults.
+Editing adds no preset prefixes. Labels include `name` (English) and `nameFr`;
+SDK displayLabel uses French for French locales, English otherwise.
+Manager uses English names explicitly, even with a French system locale. Keep
+existing low/medium/high IDs and select Balanced by ID rather than display text.
+Accept the previous version-2 bilingual labels on read, normalizing only labels;
+preserve assignments, parameters and prefixes without writing until Save.
+The Protocol target propagates MSVC's /utf-8 source encoding so bilingual labels
+and consumer tests compile consistently on Windows.
+Preserve legacy per-model style APIs/metadata without their management UI.
+Deploy service first.
 
 CMake defaults `KIRA_UI_SOURCE_DIR` to `../kira-ui-framework`. Override it with
 `-DKIRA_UI_SOURCE_DIR=/path/to/kira-ui-framework`. Without a source checkout,
@@ -138,13 +163,16 @@ form edits it alongside recommendations. Validate default false, edits, restart
 persistence, list/completion responses, invalid boolean rejection, and legacy
 metadata preservation using disposable test models.
 
-Image-generation models accept optional `companionUrls` roles `llm`
-(text encoder) and `mmproj` (vision projector). Manager add/optional-file dialogs
-show both URLs for these categories; CLI add/attach accepts `--text-encoder` and
-`--mmproj` together with the existing VAE/CLIP options. LLM models use --mmproj-model with an installed MMPROJ companion ID instead of a URL. mmproj must be GGUF; text encoders accept GGUF, safetensors,
-or ckpt. Files are attached to their primary model, staged and published atomically,
-preserved across restart, and deleted with the primary. Generation resolves them
-internally and passes `--llm` and `--llm_vision` only when present. Editing jobs use image.edit with uploaded reference-image bytes.
+Image forms select installed VAE companions and eligible LLM text encoders by
+opaque IDs in recommendedOptions.vaeModelId/textEncoderModelId. Save canEdit and
+canGenerate there with at least one true; missing flags default true. LLM saves
+canBeTextEncoder (default false). The service validates references on installation,
+configuration and submission, protects referenced models during pending installs,
+and prevents deletion/reclassification until detached. Execution uses --vae/--llm
+and the selected LLM's assigned MMPROJ as --llm_vision. CLIP and image-level mmproj
+attachments are retained on disk but not passed to sd-cli. Legacy VAE/LLM
+attachments remain fallbacks. Clip Skip is removed from model configuration;
+legacy request fields remain protocol-compatible. Editing jobs use image.edit.
 
 Manager add/optional-file dialogs offer **Browse…** beside the model and companion
 sources. Selected local files are copied by the service through the same staged,

@@ -86,6 +86,8 @@ struct ImageGenerationRequest
     double baseImageStrength = 0.55;
     QString modelId;
     QString styleId;
+    QString presetId;
+    QString qualityId;
 };
 
 struct ImageUpscaleRequest
@@ -111,6 +113,7 @@ struct ServiceCapabilities
     bool imageUpscale = false;
     bool imageEdit = false;
     bool promptEnhancement = false;
+    bool modelRouting = false;
 };
 
 struct PromptEnhancementRequest

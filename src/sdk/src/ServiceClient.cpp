@@ -110,7 +110,13 @@ bool ServiceClient::canSubmit(ImageOperation operation, const QString &modelId) 
 {
     const ModelCategory category = operation == ImageOperation::Generate || operation == ImageOperation::Edit
         ? ModelCategory::ImageGeneration : ModelCategory::Upscaler;
-    return m_authenticated && supports(operation) && containsModel(modelId, category);
+    if (!m_authenticated || !supports(operation) || !containsModel(modelId, category)) return false;
+    for (const auto& model : m_models)
+        if (model.id == modelId) {
+            if (operation == ImageOperation::Generate) return model.recommendedOptions.value("canGenerate").toBool(true);
+            if (operation == ImageOperation::Edit) return model.recommendedOptions.value("canEdit").toBool(true);
+        }
+    return true;
 }
 
 bool ServiceClient::modelListAvailable() const { return m_modelListAvailable; }
@@ -199,6 +205,8 @@ bool ServiceClient::deleteModel(const QString &id)
 
 QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
 {
+    if ((!request.presetId.isEmpty() || !request.qualityId.isEmpty())
+        && (!m_capabilities.modelRouting || request.presetId.isEmpty() || request.qualityId.isEmpty() || !request.styleId.isEmpty())) return {};
     QJsonObject options{{QStringLiteral("prompt"), request.prompt},
                               {QStringLiteral("negativePrompt"), request.negativePrompt},
                               {QStringLiteral("sampler"), request.sampler},
@@ -213,17 +221,21 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
                               {QStringLiteral("baseImageStrength"), request.baseImageStrength},
                               {QStringLiteral("modelId"), request.modelId}};
     if (!request.styleId.isEmpty()) options.insert("styleId", request.styleId);
+    if (!request.presetId.isEmpty()) options.insert("presetId", request.presetId);
+    if (!request.qualityId.isEmpty()) options.insert("qualityId", request.qualityId);
     return submit(ImageOperation::Generate, options, request.baseImageData);
 }
 
 QString ServiceClient::submitEdit(const ImageGenerationRequest &request)
 {
-    if (!request.styleId.isEmpty()) return {};
+    if (!request.styleId.isEmpty() || !request.presetId.isEmpty()
+        || (!request.qualityId.isEmpty() && !m_capabilities.modelRouting)) return {};
     if (request.baseImageData.isEmpty() || request.prompt.trimmed().isEmpty()) return {};
     QJsonObject options{{"modelId", request.modelId}, {"hasInput", true}, {"prompt", request.prompt},
          {"width", request.width}, {"height", request.height}, {"steps", request.steps},
          {"cfgScale", request.cfgScale}, {"sampler", request.sampler},
          {"scheduler", request.scheduler}, {"clipSkip", request.clipSkip}};
+    if (!request.qualityId.isEmpty()) options.insert("qualityId", request.qualityId);
     return submit(ImageOperation::Edit, options, request.baseImageData);
 }
 
@@ -257,7 +269,16 @@ QString ServiceClient::enhancePrompt(const PromptEnhancementRequest& request)
 
 QString ServiceClient::submit(ImageOperation operation, const QJsonObject &options, const QByteArray &inputData)
 {
-    if (!canSubmit(operation, options.value(QStringLiteral("modelId")).toString())) return {};
+    QString modelId = options.value("modelId").toString();
+    if (modelId.isEmpty() && m_routing && options.contains("qualityId")) {
+        QList<ModelQuality> qualities = m_routing->editingQualities;
+        if (operation == ImageOperation::Generate)
+            for (const auto &preset : m_routing->presets)
+                if (preset.id == options.value("presetId").toString()) { qualities = preset.qualities; break; }
+        for (const auto &quality : qualities)
+            if (quality.id == options.value("qualityId").toString()) { modelId = quality.modelId; break; }
+    }
+    if (!canSubmit(operation, modelId)) return {};
     const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     PendingJob job;
     job.operation = operation;
@@ -294,7 +315,8 @@ void ServiceClient::handleTextMessage(const QString &message)
     if (type == QStringLiteral("capabilities")) {
         const QJsonArray operations = object.value(QStringLiteral("operations")).toArray();
         updateCapabilities({operations.contains("image.generate"), operations.contains("image.upscale"),
-            operations.contains("image.edit"), operations.contains("prompt.enhance")});
+            operations.contains("image.edit"), operations.contains("prompt.enhance"), operations.contains("model-routing")});
+        if (m_capabilities.modelRouting) requestModelRouting();
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
         return;
@@ -363,6 +385,15 @@ void ServiceClient::handleTextMessage(const QString &message)
         if (styles) emit modelStylesConfigured(object.value("id").toString(), *styles);
         return;
     }
+    if (type == "model-routing.changed") { requestModelRouting(); return; }
+    if (type == "model-routing.get.completed" || type == "model-routing.configure.completed") {
+        QString error;
+        m_routing = Protocol::modelRoutingFromJson(object.value("routing").toObject(), &error);
+        emit modelRoutingChanged();
+        if (!m_routing) emit modelRoutingFailed(error);
+        else if (type == "model-routing.configure.completed") emit modelRoutingConfigured();
+        return;
+    }
     if (type == "models.styles.changed") { requestModels(); return; }
     if (type == "models.companion.delete.completed") {
         emit companionDeleted(object.value("id").toString(), object.value("role").toString());
@@ -377,6 +408,11 @@ void ServiceClient::handleTextMessage(const QString &message)
     if (type == QStringLiteral("error")) {
         const QString code = object.value(QStringLiteral("code")).toString();
         const QString detail = object.value(QStringLiteral("message")).toString();
+        if (object.value("operation").toString().startsWith("model-routing.")) {
+            if (object.value("operation") == "model-routing.get") { m_routing.reset(); emit modelRoutingChanged(); }
+            emit modelRoutingFailed(detail);
+            return;
+        }
         if (ModelInstall *install = findInstall(object.value(QStringLiteral("installId")).toString())) {
             if (install->state == ModelInstallState::Completed || install->state == ModelInstallState::Canceled) return;
             install->state = ModelInstallState::Failed;
@@ -441,6 +477,7 @@ void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
 {
     if (m_capabilities.imageGeneration == capabilities.imageGeneration && m_capabilities.imageUpscale == capabilities.imageUpscale && m_capabilities.imageEdit == capabilities.imageEdit
         && m_capabilities.promptEnhancement == capabilities.promptEnhancement
+        && m_capabilities.modelRouting == capabilities.modelRouting
 ) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
@@ -451,7 +488,25 @@ void ServiceClient::clearCatalog()
     const bool changed = m_modelListAvailable || !m_models.isEmpty();
     m_modelListAvailable = false;
     m_models.clear();
+    m_routing.reset();
+    emit modelRoutingChanged();
     if (changed) emit modelsChanged();
+}
+
+std::optional<ModelRouting> ServiceClient::modelRouting() const { return m_routing; }
+
+void ServiceClient::requestModelRouting()
+{
+    if (!m_authenticated || !m_capabilities.modelRouting) return;
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "model-routing.get"}}).toJson(QJsonDocument::Compact)));
+}
+
+bool ServiceClient::configureModelRouting(const ModelRouting &routing)
+{
+    if (!m_authenticated || !m_capabilities.modelRouting || !Protocol::validateModelRouting(routing)) return false;
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "model-routing.configure"},
+        {"routing", Protocol::modelRoutingToJson(routing)}}).toJson(QJsonDocument::Compact)));
+    return true;
 }
 
 ModelInstall *ServiceClient::findInstall(const QString &installId)

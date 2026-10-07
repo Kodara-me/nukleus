@@ -72,6 +72,9 @@ ManagerServiceClient::ManagerServiceClient(QObject *parent, quint16 localPort)
         m_connectionTimeout.stop();
         m_authenticated = false;
         m_modelListAvailable = false;
+        m_supportsRouting = false;
+        m_routing.reset();
+        emit modelRoutingChanged();
         m_generationModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_companionModels.clear();
         failActiveInstalls(tr("Service connection was closed"));
         emit modelsChanged();
@@ -196,6 +199,20 @@ bool ManagerServiceClient::deleteModel(const QString &id)
     return true;
 }
 
+void ManagerServiceClient::requestModelRouting()
+{
+    if (!m_authenticated || !m_supportsRouting) return;
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "model-routing.get"}}).toJson(QJsonDocument::Compact)));
+}
+
+bool ManagerServiceClient::configureModelRouting(const KiraService::ModelRouting &routing)
+{
+    if (!m_authenticated || !m_supportsRouting || !KiraService::Protocol::validateModelRouting(routing)) return false;
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "model-routing.configure"},
+        {"routing", KiraService::Protocol::modelRoutingToJson(routing)}}).toJson(QJsonDocument::Compact)));
+    return true;
+}
+
 void ManagerServiceClient::authenticate()
 {
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument({{QStringLiteral("type"), QStringLiteral("authenticate")},
@@ -206,6 +223,21 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
 {
     const QJsonDocument document = QJsonDocument::fromJson(message.toUtf8()); if (!document.isObject()) return;
     const QJsonObject object = document.object(); const QString type = object.value(QStringLiteral("type")).toString();
+    if (type == "capabilities") {
+        m_supportsRouting = object.value("operations").toArray().contains("model-routing");
+        emit modelRoutingChanged();
+        if (m_supportsRouting) requestModelRouting();
+        return;
+    }
+    if (type == "model-routing.changed") { requestModelRouting(); return; }
+    if (type == "model-routing.get.completed" || type == "model-routing.configure.completed") {
+        QString error;
+        m_routing = KiraService::Protocol::modelRoutingFromJson(object.value("routing").toObject(), &error);
+        emit modelRoutingChanged();
+        if (!m_routing) emit modelRoutingFailed(error);
+        else if (type == "model-routing.configure.completed") emit modelRoutingConfigured();
+        return;
+    }
     if (type == QStringLiteral("authenticated")) { m_connectionTimeout.stop(); m_authenticated = true; requestModels(); emit serviceStateChanged(QStringLiteral("connected"), tr("Connected to service")); return; }
     if (type == QStringLiteral("models.list.result")) {
         m_generationModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_companionModels.clear();
@@ -259,6 +291,11 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
     }
     if (type == QStringLiteral("models.delete.completed")) { emit modelDeleted(object.value(QStringLiteral("id")).toString()); requestModels(); return; }
     if (type == QStringLiteral("error")) {
+        if (object.value("operation").toString().startsWith("model-routing.")) {
+            if (object.value("operation") == "model-routing.get") { m_routing.reset(); emit modelRoutingChanged(); }
+            emit modelRoutingFailed(object.value("message").toString());
+            return;
+        }
         const QString installId = object.value(QStringLiteral("installId")).toString();
         if (auto *install = findInstall(installId)) {
             if (install->state == ManagedInstallState::Completed || install->state == ManagedInstallState::Canceled) return;

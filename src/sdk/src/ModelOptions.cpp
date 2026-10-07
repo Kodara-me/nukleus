@@ -12,9 +12,10 @@ QJsonObject defaultModelOptions(const QString &category)
 {
     if (category == "image-generation")
         return {{"width", 1024}, {"height", 1024},  {"steps", 28},   {"cfgScale", 7.0},
-                {"sampler", ""}, {"scheduler", ""}, {"clipSkip", -1}};
+                {"sampler", ""}, {"scheduler", ""}, {"canEdit", true}, {"canGenerate", true},
+                {"vaeModelId", ""}, {"textEncoderModelId", ""}};
     if (category == "llm-chat")
-        return {{"temperature", 0.8}, {"topP", 0.95}, {"contextLength", 4096}, {"maxTokens", 1024}};
+        return {{"temperature", 0.8}, {"topP", 0.95}, {"contextLength", 4096}, {"maxTokens", 1024}, {"canBeTextEncoder", false}};
     if (category == "upscaler")
         return {};
     if (category == "companion")
@@ -31,7 +32,15 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
     };
     const auto defaults = defaultModelOptions(category);
     if (category == "upscaler") return options.isEmpty() || fail();
-    if (defaults.isEmpty() || options.keys() != defaults.keys()) return fail();
+    if (defaults.isEmpty()) return fail();
+    auto required = defaults;
+    if (category == "image-generation")
+        for (const auto &key : {"canEdit", "canGenerate", "vaeModelId", "textEncoderModelId"}) required.remove(key);
+    if (category == "llm-chat") required.remove("canBeTextEncoder");
+    for (auto it = required.begin(); it != required.end(); ++it)
+        if (!options.contains(it.key())) return fail();
+    for (auto it = options.begin(); it != options.end(); ++it)
+        if (!defaults.contains(it.key()) && !(category == "image-generation" && it.key() == "clipSkip")) return fail();
     const auto number = [&options](const QString &key, double low, double high, bool integer = false)
     {
         const auto value = options.value(key);
@@ -42,10 +51,14 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
     if (category == "image-generation")
     {
         const int width = options.value("width").toInt();
-        const int clip = options.value("clipSkip").toInt();
+        for (const auto &key : {"canEdit", "canGenerate"})
+            if (options.contains(key) && !options.value(key).isBool()) return fail();
+        if (!options.value("canEdit").toBool(true) && !options.value("canGenerate").toBool(true)) return fail();
+        for (const auto &key : {"vaeModelId", "textEncoderModelId"})
+            if (options.contains(key) && !options.value(key).isString()) return fail();
         if (!number("width", 256, 2048, true) || width % 256 || !number("height", width, width, true) ||
             !number("steps", 1, 200, true) || !number("cfgScale", 0, 100) ||
-            !number("clipSkip", -1, 12, true) || clip == 0 || !options.value("sampler").isString() ||
+            (options.contains("clipSkip") && (!number("clipSkip", -1, 12, true) || options.value("clipSkip").toInt() == 0)) || !options.value("sampler").isString() ||
             !modelSamplers().contains(options.value("sampler").toString()) ||
             !options.value("scheduler").isString() ||
             !modelSchedulers().contains(options.value("scheduler").toString()))
@@ -53,6 +66,7 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
     }
     else if (category == "llm-chat")
     {
+        if (options.contains("canBeTextEncoder") && !options.value("canBeTextEncoder").isBool()) return fail();
         if (!number("temperature", 0, 2) || !number("topP", 0, 1) || options.value("topP").toDouble() == 0 ||
             !number("contextLength", 256, 131072, true) ||
             !number("maxTokens", 1, options.value("contextLength").toDouble(), true))

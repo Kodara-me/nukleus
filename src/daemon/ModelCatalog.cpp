@@ -205,6 +205,11 @@ std::optional<ModelInfo> ModelCatalog::modelById(const QString &id) const
 
 bool ModelCatalog::remove(const QString &id, QString *errorMessage)
 {
+    if (!protectRouting(id, nullptr, errorMessage)) return false;
+    if (isImageReference(id)) {
+        if (errorMessage) *errorMessage = tr("This model is assigned to an image-generation model");
+        return false;
+    }
     if (id.startsWith("companion:") && !readMetadata(ModelCategory::LlmChat)) {
         if (errorMessage) *errorMessage = tr("Could not read LLM companion assignments");
         return false;
@@ -249,6 +254,9 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
         || (request.displayName && (request.displayName->trimmed().isEmpty() || request.displayName->size() > 256)))
         return fail(tr("A display name of 1–256 characters is required"));
     if (!validateMmproj(request.category, request.mmprojModelId, errorMessage)) return false;
+    if (request.recommendedOptions && !validateImageReferences(request.category, *request.recommendedOptions, errorMessage)) return false;
+    if (!request.existingModelId.isEmpty() && request.recommendedOptions
+        && !protectRouting(request.existingModelId, &*request.recommendedOptions, errorMessage)) return false;
     if ((request.category == ModelCategory::Upscaler || request.category == ModelCategory::Companion) && request.explicitContent.value_or(false))
         return fail(tr("This category has no explicit-content setting"));
     if (request.category == ModelCategory::LlmChat && request.companionUrl)
@@ -346,10 +354,17 @@ void ModelCatalog::cancel(const QString &installId)
 
 bool ModelCatalog::configure(const QString &id, const QJsonObject &options, QString *error, std::optional<bool> explicitContent, std::optional<QString> displayName, std::optional<QString> mmprojModelId)
 {
+    if (!protectRouting(id, &options, error)) return false;
     const auto info = modelById(id);
     if (!info) { if (error) *error = tr("The requested model is not installed"); return false; }
     const auto category = *categoryFromName(id.section(':', 0, 0));
     if (!KiraService::Protocol::validateModelOptions(categoryName(category), options, error)) return false;
+    if (!validateImageReferences(category, options, error)) return false;
+    if (isImageReference(id) && ((category == ModelCategory::Companion && options.value("subtype") != "vae")
+        || (category == ModelCategory::LlmChat && !options.value("canBeTextEncoder").toBool()))) {
+        if (error) *error = tr("This model is assigned to an image-generation model");
+        return false;
+    }
     const auto name = displayName.value_or(info->displayName).trimmed();
     if (name.isEmpty() || name.size() > 256) { if (error) *error = tr("A display name of 1–256 characters is required"); return false; }
     if (!validateMmproj(category, mmprojModelId, error)) return false;
@@ -387,6 +402,39 @@ bool ModelCatalog::configure(const QString &id, const QJsonObject &options, QStr
     return true;
 }
 
+bool ModelCatalog::validateImageReferences(ModelCategory category, const QJsonObject& options, QString* error) const
+{
+    if (category != ModelCategory::ImageGeneration) return true;
+    for (const auto& key : {QString("vaeModelId"), QString("textEncoderModelId")}) {
+        const auto id = options.value(key).toString();
+        if (id.isEmpty()) continue;
+        const auto target = modelById(id);
+        const bool valid = target && (key == "vaeModelId"
+            ? id.startsWith("companion:") && target->recommendedOptions.value("subtype") == "vae"
+            : id.startsWith("llm-chat:") && target->recommendedOptions.value("canBeTextEncoder").toBool());
+        if (!valid) {
+            if (error) *error = tr("Select an installed VAE or an eligible LLM text encoder");
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ModelCatalog::isImageReference(const QString& id) const
+{
+    if (id.startsWith("companion:") || id.startsWith("llm-chat:")) {
+        if (!readMetadata(ModelCategory::ImageGeneration)) return true;
+        const auto references = [&id](const QJsonObject& options) {
+            return options.value("vaeModelId").toString() == id || options.value("textEncoderModelId").toString() == id;
+        };
+        if (m_activeInstall && m_activeInstall->request.recommendedOptions
+            && references(*m_activeInstall->request.recommendedOptions)) return true;
+        for (const auto& model : models(ModelCategory::ImageGeneration))
+            if (references(model.recommendedOptions)) return true;
+    }
+    return false;
+}
+
 bool ModelCatalog::configureStyles(const QString &id, const QList<KiraService::PromptStyle> &styles, QString *error)
 {
     const auto fail = [error](const QString &message) { if (error) *error = message; return false; };
@@ -401,6 +449,98 @@ bool ModelCatalog::configureStyles(const QString &id, const QList<KiraService::P
     metadata->insert(info->fileName, entry);
     if (!writeMetadata(ModelCategory::ImageGeneration, *metadata)) return fail(tr("Could not save model metadata"));
     return true;
+}
+
+std::optional<KiraService::ModelRouting> ModelCatalog::routing(QString *error) const
+{
+    const QString path = QDir(rootPath()).filePath("model-routing.json");
+    if (!QFileInfo::exists(path)) return KiraService::Protocol::starterModelRouting();
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        if (error) *error = tr("Could not read model routing configuration");
+        return std::nullopt;
+    }
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson(file.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        if (error) *error = tr("Malformed model routing configuration");
+        return std::nullopt;
+    }
+    auto value = KiraService::Protocol::modelRoutingFromJson(document.object(), error);
+    if (value) initializeRoutingOptions(*value);
+    return value;
+}
+
+void ModelCatalog::initializeRoutingOptions(KiraService::ModelRouting &routing) const
+{
+    const auto defaults = KiraService::Protocol::defaultModelOptions("image-generation");
+    const auto initialize = [&](QList<KiraService::ModelQuality> &qualities) {
+        for (auto &q : qualities) {
+            if (q.modelId.isEmpty()) continue;
+            const auto info = model(ModelCategory::ImageGeneration, q.modelId);
+            const auto options = info ? info->recommendedOptions : QJsonObject{};
+            if (!q.steps) q.steps = options.value("steps").toInt(defaults.value("steps").toInt());
+            if (!q.cfgScale) q.cfgScale = options.value("cfgScale").toDouble(defaults.value("cfgScale").toDouble());
+        }
+    };
+    for (auto &preset : routing.presets) initialize(preset.qualities);
+    initialize(routing.editingQualities);
+}
+
+bool ModelCatalog::validateRoutingReferences(const KiraService::ModelRouting &routing, QString *error) const
+{
+    const auto validate = [&](const QList<KiraService::ModelQuality> &qualities, const QString &capability) {
+        for (const auto &q : qualities) {
+            if (q.modelId.isEmpty()) continue;
+            const auto info = model(ModelCategory::ImageGeneration, q.modelId);
+            if (!info || !info->recommendedOptions.value(capability).toBool(true)) {
+                if (error) *error = tr("Quality %1 must select an installed model supporting %2, or Unassigned").arg(q.name, capability);
+                return false;
+            }
+        }
+        return true;
+    };
+    for (const auto &p : routing.presets)
+        if (!validate(p.qualities, "canGenerate")) return false;
+    return validate(routing.editingQualities, "canEdit");
+}
+
+bool ModelCatalog::configureRouting(const KiraService::ModelRouting &value, QString *error)
+{
+    if (!routing(error) || !KiraService::Protocol::validateModelRouting(value, error)
+        || !validateRoutingReferences(value, error)) return false;
+    if (!QDir().mkpath(rootPath())) {
+        if (error) *error = tr("Could not create the model configuration directory");
+        return false;
+    }
+    QSaveFile file(QDir(rootPath()).filePath("model-routing.json"));
+    auto saved = value;
+    initializeRoutingOptions(saved);
+    if (!KiraService::Protocol::validateModelRouting(saved, error)) return false;
+    const auto bytes = QJsonDocument(KiraService::Protocol::modelRoutingToJson(saved)).toJson();
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit()) {
+        if (error) *error = tr("Could not save model routing configuration");
+        return false;
+    }
+    return true;
+}
+
+bool ModelCatalog::protectRouting(const QString &id, const QJsonObject *options, QString *error) const
+{
+    if (!id.startsWith("image-generation:")) return true;
+    const auto value = routing(error);
+    if (!value) return false;
+    const auto permitted = [&](const QList<KiraService::ModelQuality> &qualities, const QString &capability) {
+        for (const auto &q : qualities)
+            if (q.modelId == id && (!options || !options->value(capability).toBool(true))) {
+                if (error) *error = tr("This model is assigned to a quality tier; clear its assignment first");
+                return false;
+            }
+        return true;
+    };
+    for (const auto &p : value->presets)
+        if (!permitted(p.qualities, "canGenerate")) return false;
+    return permitted(value->editingQualities, "canEdit");
 }
 
 QString ModelCatalog::rootPath() const
@@ -591,6 +731,15 @@ void ModelCatalog::completeInstall()
     const auto category = m_activeInstall->request.category;
     QString referenceError;
     if (!validateMmproj(category, m_activeInstall->request.mmprojModelId, &referenceError)) { failActiveInstall(referenceError); return; }
+    if (m_activeInstall->request.recommendedOptions
+        && !validateImageReferences(category, *m_activeInstall->request.recommendedOptions, &referenceError)) {
+        failActiveInstall(referenceError);
+        return;
+    }
+    if (!m_activeInstall->request.existingModelId.isEmpty() && m_activeInstall->request.recommendedOptions
+        && !protectRouting(m_activeInstall->request.existingModelId, &*m_activeInstall->request.recommendedOptions, &referenceError)) {
+        failActiveInstall(referenceError); return;
+    }
     auto metadata = readMetadata(category);
     if (!metadata) { failActiveInstall(tr("Could not read model metadata")); return; }
     if (!m_activeInstall->request.existingModelId.isEmpty() && !QFileInfo(m_activeInstall->finalPath).isFile()) {

@@ -41,7 +41,7 @@ bool validGenerationOptions(const QJsonObject &options)
 {
     const QStringList allowed{"modelId", "prompt", "negativePrompt", "width", "height",
         "steps", "cfgScale", "clipSkip", "seed", "sampler", "scheduler",
-        "hasInput", "baseImageStrength", "styleId"};
+        "hasInput", "baseImageStrength", "styleId", "presetId", "qualityId"};
     for (const auto& key : options.keys())
         if (!allowed.contains(key)) return false;
     const auto optionalString = [&options](const QString &key) {
@@ -289,6 +289,7 @@ void KiraServiceDaemon::processTextMessage(QWebSocket *socket, const QString &me
     else if (type == QStringLiteral("models.install")) installModel(socket, object);
     else if (type == QStringLiteral("models.configure")) configureModel(socket, object);
     else if (type == QStringLiteral("models.styles.configure")) configureModelStyles(socket, object);
+    else if (type == "model-routing.get" || type == "model-routing.configure") modelRouting(socket, object);
     else if (type == QStringLiteral("models.install.cancel")) cancelInstall(socket, object);
     else if (type == QStringLiteral("models.companion.delete")) deleteCompanion(socket, object);
     else if (type == QStringLiteral("models.delete")) deleteModel(socket, object);
@@ -315,8 +316,44 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         return;
     }
     const ModelCategory category = (generate || edit) ? ModelCategory::ImageGeneration : ModelCategory::Upscaler;
+    const bool routed = options.contains("presetId") || options.contains("qualityId");
+    std::optional<KiraService::GenerationPreset> preset;
+    std::optional<KiraService::ModelQuality> quality;
+    if (routed) {
+        if ((!generate && !edit) || !options.value("qualityId").isString() || options.value("qualityId").toString().isEmpty()
+            || (generate && (!options.value("presetId").isString() || options.value("presetId").toString().isEmpty()))
+            || (edit && options.contains("presetId")) || !options.value("styleId").toString().isEmpty()
+            || (options.contains("styleId") && !options.value("styleId").isString())
+            || (options.contains("modelId") && !options.value("modelId").isString())) {
+            sendError(socket, "invalid-request", tr("Invalid preset/quality selection"), jobId); return;
+        }
+        QString error;
+        const auto routing = m_models->routing(&error);
+        if (!routing) { sendError(socket, "model-routing-unavailable", error, jobId); return; }
+        QList<KiraService::ModelQuality> qualities = routing->editingQualities;
+        if (generate) {
+            for (const auto &p : routing->presets)
+                if (p.id == options.value("presetId").toString()) { preset = p; break; }
+            if (!preset) { sendError(socket, "model-routing-unavailable", tr("The preset is unavailable"), jobId); return; }
+            qualities = preset->qualities;
+        }
+        QString modelId;
+        for (const auto &q : qualities)
+            if (q.id == options.value("qualityId").toString()) { modelId = q.modelId; quality = q; break; }
+        if (modelId.isEmpty()) { sendError(socket, "model-routing-unavailable", tr("The quality has no assigned model"), jobId); return; }
+        const auto supplied = options.value("modelId").toString();
+        if (!supplied.isEmpty() && supplied != modelId) {
+            sendError(socket, "invalid-request", tr("The supplied model conflicts with the quality assignment"), jobId); return;
+        }
+        options.insert("modelId", modelId);
+    }
     const std::optional<ModelInfo> model = m_models->model(category, options.value(QStringLiteral("modelId")).toString());
     if (!model.has_value()) { sendError(socket, QStringLiteral("model-unavailable"), tr("The requested model is unavailable"), jobId); return; }
+    if ((generate && !model->recommendedOptions.value("canGenerate").toBool(true))
+        || (edit && !model->recommendedOptions.value("canEdit").toBool(true))) {
+        sendError(socket, "model-unavailable", tr("The model does not support this image operation"), jobId);
+        return;
+    }
     if (upscale && options.contains(QStringLiteral("scale"))) {
         sendError(socket, QStringLiteral("invalid-request"), tr("Upscale is fixed at 2×"), jobId);
         return;
@@ -327,12 +364,20 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         sendError(socket, QStringLiteral("invalid-request"), tr("Invalid generation options"), jobId);
         return;
     }
+    if (quality) {
+        if (!options.contains("steps") && quality->steps) options.insert("steps", *quality->steps);
+        if (!options.contains("cfgScale") && quality->cfgScale) options.insert("cfgScale", *quality->cfgScale);
+    }
     if (options.contains("styleId") && (!options.value("styleId").isString()
         || (!generate && !options.value("styleId").toString().isEmpty()))) {
         sendError(socket, "invalid-request", tr("Styles are only supported for image generation"), jobId);
         return;
     }
     const QString styleId = options.value("styleId").toString();
+    if (preset) {
+        options.insert("prompt", KiraService::Protocol::composeStyledPrompt(preset->positivePrefix, options.value("prompt").toString()));
+        options.insert("negativePrompt", KiraService::Protocol::composeStyledPrompt(preset->negativePrefix, options.value("negativePrompt").toString()));
+    }
     if (!styleId.isEmpty()) {
         const auto style = std::find_if(model->styles.cbegin(), model->styles.cend(),
             [&styleId](const KiraService::PromptStyle &candidate) { return candidate.id == styleId; });
@@ -363,9 +408,31 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     if (generate || edit) {
         if (model->companionFiles.contains("vae")) submission->vaePath = filePath("vae");
         submission->llmPath = filePath("llm");
-        submission->llmVisionPath = filePath("mmproj");
-        submission->clipLPath = filePath("clip-l");
-        submission->clipGPath = filePath("clip-g");
+        for (const auto &key : {QString("vaeModelId"), QString("textEncoderModelId")}) {
+            const auto id = model->recommendedOptions.value(key).toString();
+            if (id.isEmpty()) continue;
+            const auto target = m_models->modelById(id);
+            const bool valid = target && (key == "vaeModelId"
+                ? id.startsWith("companion:") && target->recommendedOptions.value("subtype") == "vae"
+                : id.startsWith("llm-chat:") && target->recommendedOptions.value("canBeTextEncoder").toBool());
+            if (!valid) {
+                sendError(socket, "model-unavailable", tr("An assigned VAE or text encoder is unavailable"), jobId);
+                return;
+            }
+            if (key == "vaeModelId") submission->vaePath = target->filePath;
+            else {
+                submission->llmPath = target->filePath;
+                if (!target->mmprojModelId.isEmpty()) {
+                    const auto projector = m_models->modelById(target->mmprojModelId);
+                    if (!projector || !target->mmprojModelId.startsWith("companion:")
+                        || projector->recommendedOptions.value("subtype") != "mmproj") {
+                        sendError(socket, "model-unavailable", tr("The text encoder's MMPROJ is unavailable"), jobId);
+                        return;
+                    }
+                    submission->llmVisionPath = projector->filePath;
+                }
+            }
+        }
         submission->diffusionModel = model->modelType == "diffusion";
     }
     submission->client = socket;
@@ -590,7 +657,7 @@ void KiraServiceDaemon::deleteModel(QWebSocket *socket, const QJsonObject &messa
 bool KiraServiceDaemon::modelInUse(const QString &path) const
 {
     const auto usesModel = [&path](const auto &job) {
-        return job && job->modelPath == path;
+        return job && (job->modelPath == path || job->vaePath == path || job->llmPath == path || job->llmVisionPath == path);
     };
     if (usesModel(m_activeJob)) return true;
     for (const auto &job : m_queue) {
@@ -731,6 +798,7 @@ void KiraServiceDaemon::sendCapabilities(QWebSocket *socket) const
 {
     const QString state = isImageReady() || isPromptEnhancementReady() ? QStringLiteral("ready") : QStringLiteral("unavailable");
     QJsonArray operations;
+    operations.append("model-routing");
     if (isImageReady()) {
         operations.append(QStringLiteral("image.generate"));
         operations.append(QStringLiteral("image.upscale"));
@@ -738,6 +806,26 @@ void KiraServiceDaemon::sendCapabilities(QWebSocket *socket) const
     }
     if (isPromptEnhancementReady()) operations.append("prompt.enhance");
     send(socket, {{QStringLiteral("type"), QStringLiteral("capabilities")}, {QStringLiteral("state"), state}, {QStringLiteral("operations"), operations}});
+}
+
+void KiraServiceDaemon::modelRouting(QWebSocket *socket, const QJsonObject &message)
+{
+    const auto operation = message.value("type").toString();
+    QString error;
+    auto routing = m_models->routing(&error);
+    if (routing && operation == "model-routing.configure") {
+        routing = KiraService::Protocol::modelRoutingFromJson(message.value("routing").toObject(), &error);
+        if (routing && !m_models->configureRouting(*routing, &error)) routing.reset();
+        else if (routing) routing = m_models->routing(&error);
+    }
+    if (!routing) {
+        send(socket, {{"type", "error"}, {"code", "model-routing-invalid"}, {"operation", operation}, {"message", error}});
+        return;
+    }
+    send(socket, {{"type", operation + ".completed"}, {"routing", KiraService::Protocol::modelRoutingToJson(*routing)}});
+    if (operation == "model-routing.configure")
+        for (auto it = m_authenticatedClients.cbegin(); it != m_authenticatedClients.cend(); ++it)
+            send(it.key(), {{"type", "model-routing.changed"}});
 }
 
 bool KiraServiceDaemon::isPromptEnhancementReady() const

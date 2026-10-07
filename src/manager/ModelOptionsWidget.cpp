@@ -62,8 +62,27 @@ void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &
         connect(field, &QComboBox::currentIndexChanged, this, &ModelOptionsWidget::optionsChanged);
         add(key, label, field);
     };
+    const auto check = [&](const QString &key, const QString &label, bool fallback) {
+        auto *field = new QCheckBox(label, this);
+        field->setChecked(values.value(key).toBool(fallback));
+        connect(field, &QCheckBox::toggled, this, &ModelOptionsWidget::optionsChanged);
+        add(key, QString(), field);
+    };
+    const auto modelChoice = [&](const QString &key, const QString &label) {
+        auto *field = new QComboBox(this);
+        field->setProperty("selectedModelId", values.value(key).toString());
+        connect(field, &QComboBox::currentIndexChanged, this, [this, field] {
+            field->setProperty("selectedModelId", field->currentData());
+            emit optionsChanged();
+        });
+        add(key, label, field);
+    };
     if (category == "image-generation")
     {
+        check("canEdit", tr("Can Edit"), true);
+        check("canGenerate", tr("Can Generate"), true);
+        modelChoice("vaeModelId", tr("VAE:"));
+        modelChoice("textEncoderModelId", tr("Text encoder:"));
         auto *resolution = new QComboBox(this);
         for (int side = 256; side <= 2048; side += 256)
             resolution->addItem(tr("%1 × %1").arg(side), side);
@@ -74,16 +93,10 @@ void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &
         decimal("cfgScale", tr("CFG scale:"), 0, 100, 1);
         choices("sampler", tr("Sampler:"), KiraService::Protocol::modelSamplers());
         choices("scheduler", tr("Scheduler:"), KiraService::Protocol::modelSchedulers());
-        auto *clip = new QComboBox(this);
-        clip->addItem(tr("Automatic"), -1);
-        for (int value = 1; value <= 12; ++value)
-            clip->addItem(QString::number(value), value);
-        clip->setCurrentIndex(clip->findData(values.value("clipSkip").toInt()));
-        connect(clip, &QComboBox::currentIndexChanged, this, &ModelOptionsWidget::optionsChanged);
-        add("clipSkip", tr("Clip skip:"), clip);
     }
     else if (category == "llm-chat")
     {
+        check("canBeTextEncoder", tr("Can be used as text encoder"), false);
         decimal("temperature", tr("Temperature:"), 0, 2, 2);
         decimal("topP", tr("Top-p:"), 0.01, 1, 2);
         integer("contextLength", tr("Context length:"), 256, 131072);
@@ -96,6 +109,29 @@ void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &
         subtype->setCurrentIndex(subtype->findData(values.value("subtype").toString()));
         connect(subtype, &QComboBox::currentIndexChanged, this, &ModelOptionsWidget::optionsChanged);
         add("subtype", tr("Type:"), subtype);
+    }
+    setModels(m_models);
+}
+void ModelOptionsWidget::setModels(const QList<ManagedModelInfo>& models)
+{
+    m_models = models;
+    for (const auto &key : {QString("vaeModelId"), QString("textEncoderModelId")}) {
+        auto *field = qobject_cast<QComboBox*>(m_fields.value(key));
+        if (!field) continue;
+        const QSignalBlocker blocker(field);
+        const auto selected = field->property("selectedModelId").toString();
+        field->clear();
+        field->addItem(tr("None"), QString());
+        for (const auto &model : m_models)
+            if ((key == "vaeModelId" && model.id.startsWith("companion:") && model.recommendedOptions.value("subtype") == "vae")
+                || (key == "textEncoderModelId" && model.id.startsWith("llm-chat:") && model.recommendedOptions.value("canBeTextEncoder").toBool()))
+                field->addItem(model.displayLabel(), model.id);
+        int index = field->findData(selected);
+        if (index < 0 && !selected.isEmpty()) {
+            field->addItem(tr("Unavailable: %1").arg(selected), selected);
+            index = field->count() - 1;
+        }
+        field->setCurrentIndex(qMax(0, index));
     }
 }
 QJsonObject ModelOptionsWidget::options() const

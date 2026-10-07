@@ -1,6 +1,7 @@
 #pragma once
 #include "GenerationProgress.h"
 #include "ImageTypes.h"
+#include "ModelRouting.h"
 #include <QHash>
 #include <QList>
 #include <QObject>
@@ -28,6 +29,9 @@ public:
     QList<ModelInfo> models(ModelCategory category = ModelCategory::Unknown) const;
     QList<ModelInstall> installs() const;
     void requestModels();
+    void requestModelRouting();
+    bool configureModelRouting(const ModelRouting &routing);
+    std::optional<ModelRouting> modelRouting() const;
     QString installModel(ModelCategory category, const QUrl &url, const QUrl &companionUrl = {}, const QJsonObject &recommendedOptions = {}, const QJsonObject &companionUrls = {},
         const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {}, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {}, std::optional<QString> mmprojModelId = {});
     bool configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {}, std::optional<QString> mmprojModelId = {});
@@ -44,6 +48,9 @@ signals:
     void serviceStateChanged(KiraService::ServiceConnectionState state, const QString &code, const QString &detail);
     void capabilitiesChanged(const KiraService::ServiceCapabilities &capabilities);
     void modelsChanged();
+    void modelRoutingChanged();
+    void modelRoutingConfigured();
+    void modelRoutingFailed(const QString &message);
     void installsChanged();
     void modelConfigured(const QString &id, const QJsonObject &options);
     void modelStylesConfigured(const QString &id, const QList<KiraService::PromptStyle> &styles);
@@ -81,6 +88,7 @@ private:
     bool m_modelListAvailable = false;
     ServiceCapabilities m_capabilities;
     QList<ModelInfo> m_models;
+    std::optional<ModelRouting> m_routing;
     QList<ModelInstall> m_installs;
     QHash<QString, PendingJob> m_pendingJobs;
     QQueue<QString> m_resultJobs;

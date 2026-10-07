@@ -7,6 +7,8 @@ find_package(Qt6 6.2 REQUIRED COMPONENTS Core Network WebSockets)
 find_package(LibArchive REQUIRED)
 
 add_library(KiraServiceProtocol STATIC
+    include/kira/service/ModelRouting.h
+    src/ModelRouting.cpp
     include/kira/service/PromptStyle.h
     src/PromptStyle.cpp
     include/kira/service/GenerationProgress.h
@@ -45,6 +47,9 @@ foreach(target KiraServiceProtocol KiraServiceSdk)
         target_compile_options(${target} PRIVATE /W4)
     endif()
 endforeach()
+
+# Routing labels are UTF-8; propagate the source encoding to Windows consumers.
+target_compile_options(KiraServiceProtocol PUBLIC "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
 
 if(KIRA_SERVICE_SDK_INSTALL)
     install(TARGETS KiraServiceProtocol KiraServiceSdk

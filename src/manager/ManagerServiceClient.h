@@ -10,6 +10,7 @@
 
 #include <optional>
 #include <kira/service/PromptStyle.h>
+#include <kira/service/ModelRouting.h>
 
 class QWebSocket;
 
@@ -65,6 +66,10 @@ public:
     QList<ManagedModelInfo> models(const QString &category) const;
     QList<ManagedInstall> installs() const;
     void requestModels();
+    void requestModelRouting();
+    bool supportsModelRouting() const { return m_supportsRouting; }
+    std::optional<KiraService::ModelRouting> modelRouting() const { return m_routing; }
+    bool configureModelRouting(const KiraService::ModelRouting &routing);
     QString installModel(const QString &category, const QUrl &url, const QUrl &companionUrl = {}, const QJsonObject &recommendedOptions = {}, const QJsonObject &companionUrls = {},
         const QString &modelType = QStringLiteral("checkpoint"), const QString &existingModelId = {}, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {}, std::optional<QString> mmprojModelId = {});
     bool configureModel(const QString &id, const QJsonObject &options, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {}, std::optional<QString> mmprojModelId = {});
@@ -76,6 +81,9 @@ public:
 signals:
     void serviceStateChanged(const QString &state, const QString &message);
     void modelsChanged();
+    void modelRoutingChanged();
+    void modelRoutingConfigured();
+    void modelRoutingFailed(const QString &message);
     void installsChanged();
     void modelConfigured(const QString &id, const QJsonObject &options, bool explicitContent);
     void modelStylesConfigured(const QString &id, const QList<KiraService::PromptStyle> &styles);
@@ -102,6 +110,8 @@ private:
     bool m_openingConnection = false;
     bool m_authenticated = false;
     bool m_modelListAvailable = false;
+    bool m_supportsRouting = false;
+    std::optional<KiraService::ModelRouting> m_routing;
     QList<ManagedModelInfo> m_generationModels;
     QList<ManagedModelInfo> m_upscaleModels;
     QList<ManagedModelInfo> m_llmChatModels;
