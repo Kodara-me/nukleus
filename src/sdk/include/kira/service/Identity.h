@@ -8,6 +8,9 @@ struct IdentityPackage {
     QList<QByteArray> references;
     QString identityPrompt;
     QString hairPrompt;
+    // Instructions telling generation and editing how to use the references.
+    QString generationPrompt;
+    QString editPrompt;
     int seed = -1;
 };
 // Version 2 .kiraid ZIP: manifest.json and one to four PNG references.

@@ -263,7 +263,7 @@ the checkout may already have advanced to the fetched revision.
 ## Identity portrait packages
 
 The SDK IdentityPackage helper packages one to four ordered PNG references, face
-and hair prompts and seed metadata locally as a version-2 .kiraid ZIP. It contains
+and hair prompts, generation/edit usage prompts and seed metadata locally as a version-2 .kiraid ZIP. It contains
 manifest.json (type kira-identity, version 2) and reference PNGs only.
 Canvas exports it with a native Save dialog and atomic QSaveFile.
 LibArchive remains the archive dependency; no identity extraction environment

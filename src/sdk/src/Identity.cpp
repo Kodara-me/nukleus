@@ -32,7 +32,8 @@ QByteArray KiraService::packIdentity(const IdentityPackage& identity, QString* e
         inputSize += image.size();
     }
     if (!valid || inputSize > MaxBytes
-        || identity.seed < -1 || identity.identityPrompt.size() + identity.hairPrompt.size() > 65536) {
+        || identity.seed < -1 || identity.identityPrompt.size() + identity.hairPrompt.size()
+            + identity.generationPrompt.size() + identity.editPrompt.size() > 65536) {
         fail(error, QStringLiteral("Identity requires one to four PNG references (maximum 64 MiB)."));
         return {};
     }
@@ -45,7 +46,8 @@ QByteArray KiraService::packIdentity(const IdentityPackage& identity, QString* e
     }
     const auto manifest = QJsonDocument(QJsonObject{{"type", "kira-identity"}, {"version", 2},
         {"references", references}, {"identityPrompt", identity.identityPrompt},
-        {"hairPrompt", identity.hairPrompt}, {"seed", identity.seed}}).toJson(QJsonDocument::Compact);
+        {"hairPrompt", identity.hairPrompt}, {"generationPrompt", identity.generationPrompt},
+        {"editPrompt", identity.editPrompt}, {"seed", identity.seed}}).toJson(QJsonDocument::Compact);
     if (manifest.size() > 256 * 1024) { fail(error, "Identity metadata is too large."); return {}; }
     files.insert("manifest.json", manifest);
     inputSize += manifest.size();
@@ -123,7 +125,9 @@ bool KiraService::unpackIdentity(const QByteArray& package, IdentityPackage& ide
     if (!manifest.contains("references")) references = QJsonArray{QStringLiteral("reference.png")};
     if (references.isEmpty() || references.size() > 4 || files.size() != references.size() + 1
         || (manifest.contains("identityPrompt") && !manifest.value("identityPrompt").isString())
-        || (manifest.contains("hairPrompt") && !manifest.value("hairPrompt").isString()))
+        || (manifest.contains("hairPrompt") && !manifest.value("hairPrompt").isString())
+        || (manifest.contains("generationPrompt") && !manifest.value("generationPrompt").isString())
+        || (manifest.contains("editPrompt") && !manifest.value("editPrompt").isString()))
         return fail(error, "Invalid identity metadata.");
     IdentityPackage decoded;
     for (int i = 0; i < references.size(); ++i) {
@@ -141,6 +145,8 @@ bool KiraService::unpackIdentity(const QByteArray& package, IdentityPackage& ide
     decoded.seed = manifest.value("seed").toInt(-1);
     decoded.identityPrompt = manifest.value("identityPrompt").toString();
     decoded.hairPrompt = manifest.value("hairPrompt").toString();
+    decoded.generationPrompt = manifest.value("generationPrompt").toString();
+    decoded.editPrompt = manifest.value("editPrompt").toString();
     identity = decoded;
     return true;
 }

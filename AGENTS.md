@@ -229,8 +229,8 @@ without Manager UI. Canvas consumes this configuration; deploy service first.
 
 The SDK IdentityPackage helper stores a compressed version-2 .kiraid ZIP:
 manifest.json (type kira-identity, version 2), reference.png and optional ordered
-reference-2.png through reference-4.png. Store face/hair descriptions and seed
-metadata. Canvas generates portraits normally, then packages them locally through
+reference-2.png through reference-4.png. Store face/hair descriptions, seed
+metadata and generationPrompt/editPrompt instructions for using the references. Canvas generates portraits normally, then packages them locally through
 LibArchive and QSaveFile. There is no binary extraction or conditioning payload.
 Reject malformed, duplicate, oversized or unexpected archive entries.
 Removed conditioning/extraction APIs and model categories must not be restored.

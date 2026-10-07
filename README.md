@@ -263,7 +263,8 @@ checkouts and `sd-cli` are not updated. See `--help` for build and installer opt
 Canvas generates portraits through ordinary image generation and packages the
 selected PNGs and face/hair prompts locally. The SDK IdentityPackage helper writes
 a compressed .kiraid ZIP containing manifest.json (type kira-identity, version 2),
-reference.png and up to three additional ordered reference PNGs, plus seed metadata.
+reference.png and up to three additional ordered reference PNGs, plus seed metadata
+and generation/edit prompts describing how to use the references.
 No extraction backend or binary payload is required. Existing user models and
 older identity files are retained on disk.
 

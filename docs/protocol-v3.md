@@ -313,7 +313,8 @@ SDK clients use `canRunPromptFlow(presetId)`, `runPromptFlow(PromptFlowRequest)`
 
 IdentityPackage is a local SDK archive helper, not a WebSocket operation. It stores
 manifest.json (type kira-identity, version 2), one to four ordered PNG references,
-face/hair prompts and seed metadata. No binary conditioning or extraction upload
+face/hair prompts, seed metadata and optional generationPrompt/editPrompt strings
+telling generation and editing how to use the references. No binary conditioning or extraction upload
 is supported. Legacy package files remain untouched on disk.
 
 ## Image-generation models for editing

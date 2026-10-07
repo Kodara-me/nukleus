@@ -174,6 +174,8 @@ void ServiceSdkTest::identityPackages()
     original.references = {png, png + "2", png + "3", png + "4"};
     original.identityPrompt = "adult with green eyes";
     original.hairPrompt = "curly brown hair";
+    original.generationPrompt = "Use the reference images for the face and hair.";
+    original.editPrompt = "Edit the face and hair to match the reference images.";
     original.seed = 123;
     QString error;
     const auto package = KiraService::packIdentity(original, &error);
@@ -184,6 +186,8 @@ void ServiceSdkTest::identityPackages()
     QCOMPARE(decoded.references, original.references);
     QCOMPARE(decoded.identityPrompt, original.identityPrompt);
     QCOMPARE(decoded.hairPrompt, original.hairPrompt);
+    QCOMPARE(decoded.generationPrompt, original.generationPrompt);
+    QCOMPARE(decoded.editPrompt, original.editPrompt);
     QCOMPARE(decoded.seed, original.seed);
     // Verify the exported archive contains only PNG references and its manifest.
     auto* reader = archive_read_new();
