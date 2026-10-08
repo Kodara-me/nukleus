@@ -1,5 +1,6 @@
 #include <QJsonArray>
 #include <QSet>
+#include <algorithm>
 #include <cmath>
 #include <kira/service/ModelRouting.h>
 
@@ -9,48 +10,49 @@ ModelRouting starterModelRouting()
 {
     return {{{"photorealism", "Photorealism", {}, {}, {}, "Photoréalisme"},
              {"illustration", "Illustration", {}, {}, {}, "Illustration"}},
-            {}};
+            {{"edit-low", "Fast", "Rapide"},
+             {"edit-medium", "Balanced", "Équilibré", {}, true},
+             {"edit-high", "Quality", "Qualité"}}};
 }
 
 bool validateModelRouting(const ModelRouting &routing, QString *error)
 {
-    const auto fixed = starterModelRouting();
+    const auto labelValid = [](const QString &label) {
+        return !label.trimmed().isEmpty() && label.size() <= 256;
+    };
     const auto assignmentValid = [](const ModelAssignment &a) {
         return (!a.steps || (*a.steps >= 1 && *a.steps <= 200)) &&
                (!a.cfgScale || (std::isfinite(*a.cfgScale) && *a.cfgScale >= 0 && *a.cfgScale <= 100));
     };
-    const auto flowValid = [](const QList<PromptFlowStep> &steps) {
-        if (steps.size() > 4)
-            return false;
-        QSet<QString> ids;
-        for (const auto &step : steps)
-        {
-            if (step.id.trimmed().isEmpty() || ids.contains(step.id) || step.name.trimmed().isEmpty() ||
-                step.nameFr.trimmed().isEmpty() || step.instructions.size() > 65536)
-                return false;
-            ids.insert(step.id);
-        }
-        return true;
-    };
     const auto identityViewsValid = [](int views) { return views == 1 || views == 2 || views == 4; };
-    bool valid = routing.presets.size() == fixed.presets.size() && assignmentValid(routing.editing);
-    if (valid)
-        for (int i = 0; i < routing.presets.size(); ++i)
-        {
-            const auto &p = routing.presets.at(i);
-            const auto &expected = fixed.presets.at(i);
-            if (p.id != expected.id || p.name != expected.name || p.nameFr != expected.nameFr ||
-                !assignmentValid(p.model) || p.positivePrefix.size() > 65536 || p.negativePrefix.size() > 65536 ||
-                !flowValid(p.promptFlow) || !identityViewsValid(p.identityViews))
-            {
-                valid = false;
-                break;
-            }
-        }
+    const auto fixedQualities = starterModelRouting().editingQualities;
+    bool valid = !routing.presets.isEmpty() && routing.presets.size() <= MaximumGenerationPresets &&
+                 routing.editingQualities.size() == fixedQualities.size();
+    int defaults = 0;
+    for (int i = 0; valid && i < fixedQualities.size(); ++i)
+    {
+        const auto &q = routing.editingQualities.at(i);
+        const auto &expected = fixedQualities.at(i);
+        valid = q.id == expected.id && q.name == expected.name && q.nameFr == expected.nameFr &&
+                assignmentValid(q.model) && q.positivePrefix.size() <= 65536 && q.negativePrefix.size() <= 65536;
+        defaults += q.isDefault ? 1 : 0;
+    }
+    valid = valid && defaults == 1;
+    QSet<QString> presetIds;
+    for (const auto &p : routing.presets)
+    {
+        if (!valid)
+            break;
+        valid = !p.id.trimmed().isEmpty() && p.id.size() <= 64 && !presetIds.contains(p.id) && labelValid(p.name) &&
+                labelValid(p.nameFr) && assignmentValid(p.model) && p.positivePrefix.size() <= 65536 &&
+                p.negativePrefix.size() <= 65536 && identityViewsValid(p.identityViews);
+        presetIds.insert(p.id);
+    }
     if (!valid && error)
-        *error = QStringLiteral("Presets and bilingual labels are fixed. Steps must be 1–200, CFG 0–100 and "
-                                "prefixes at most 65536 characters. Identity views must be 1, 2 or 4. Prompt flows allow at most 4 steps with unique "
-                                "IDs, bilingual names and instructions of at most 65536 characters.");
+        *error = QStringLiteral("Generation needs 1–16 presets with unique IDs and English and French names of at most "
+                                "256 characters. Steps must be 1–200, CFG 0–100 and prefixes at most 65536 characters. "
+                                "Identity views must be 1, 2 or 4. Editing has the fixed Fast, Balanced and Quality qualities, exactly one of them the default, with "
+                                "prefixes of at most 65536 characters.");
     return valid;
 }
 
@@ -66,23 +68,22 @@ QJsonObject modelRoutingToJson(const ModelRouting &routing)
     };
     QJsonArray presets;
     for (const auto &p : routing.presets)
-    {
-        QJsonArray flow;
-        for (const auto &step : p.promptFlow)
-            flow.append(QJsonObject{{"id", step.id},
-                                    {"name", step.name},
-                                    {"nameFr", step.nameFr},
-                                    {"modelId", step.modelId},
-                                    {"instructions", step.instructions}});
         presets.append(assignment(p.model, {{"id", p.id},
                                             {"name", p.name},
                                             {"nameFr", p.nameFr},
                                             {"positivePrefix", p.positivePrefix},
                                             {"negativePrefix", p.negativePrefix},
-                                            {"promptFlow", flow},
                                             {"identityViews", p.identityViews}}));
-    }
-    return {{"version", 5}, {"presets", presets}, {"editing", assignment(routing.editing, {})}};
+    QJsonArray qualities;
+    for (const auto &q : routing.editingQualities)
+        qualities.append(assignment(
+            q.model, {{"id", q.id},
+                      {"name", q.name},
+                      {"nameFr", q.nameFr},
+                      {"default", q.isDefault},
+                      {"positivePrefix", q.positivePrefix},
+                      {"negativePrefix", q.negativePrefix}}));
+    return {{"version", 6}, {"presets", presets}, {"editingQualities", qualities}};
 }
 
 std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QString *error)
@@ -93,12 +94,11 @@ std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QStr
         return std::nullopt;
     };
     const int version = object.value("version").toInt();
-    if (!object.value("version").isDouble() || version < 1 || version > 5 || !object.value("presets").isArray())
+    if (!object.value("version").isDouble() || version < 1 || version > 6 || !object.value("presets").isArray())
         return fail();
     const bool legacy = version == 1;
     // Versions 1–3 stored Fast/Balanced/Quality tiers; only the Fast tier carries over.
     const bool tiered = version < 4;
-    const bool flows = version >= 3;
     const auto parseAssignment = [](const QJsonObject &o, ModelAssignment &a) {
         if (!o.value("modelId").isString())
             return false;
@@ -136,10 +136,58 @@ std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QStr
         return presetId == QStringLiteral("photorealism") ? QStringLiteral("photo-low") : presetId + "-low";
     };
     ModelRouting routing;
-    if (tiered ? !parseFastTier(object.value("editingQualities"), "edit-low", routing.editing)
-               : (!object.value("editing").isObject() ||
-                  !parseAssignment(object.value("editing").toObject(), routing.editing)))
-        return fail();
+    routing.editingQualities = starterModelRouting().editingQualities;
+    if (version == 4 || version == 5)
+    {
+        // Versions 4 and 5 stored one editing assignment; every quality starts with it.
+        ModelAssignment editing;
+        if (!object.value("editing").isObject() || !parseAssignment(object.value("editing").toObject(), editing))
+            return fail();
+        for (auto &quality : routing.editingQualities)
+            quality.model = editing;
+    }
+    else
+    {
+        // Versions 1–3 and 6 store the editing qualities by their fixed IDs. Versions 1–3
+        // marked at most one quality permanent, which becomes the default.
+        if (!object.value("editingQualities").isArray())
+            return fail();
+        bool permanent = false;
+        for (const auto &value : object.value("editingQualities").toArray())
+        {
+            const auto q = value.toObject();
+            if (!value.isObject() || !q.value("id").isString())
+                return fail();
+            auto quality = std::find_if(routing.editingQualities.begin(), routing.editingQualities.end(),
+                                        [&](const EditingQuality &e) { return e.id == q.value("id").toString(); });
+            if (quality == routing.editingQualities.end())
+            {
+                if (version == 6)
+                    return fail();
+                continue; // Earlier versions may hold retired custom entries.
+            }
+            if (!parseAssignment(q, quality->model))
+                return fail();
+            if (version == 6)
+            {
+                if (!q.value("default").isBool())
+                    return fail();
+                quality->isDefault = q.value("default").toBool();
+                // Prefixes are optional; earlier version-6 documents predate them.
+                for (const auto &key : {"positivePrefix", "negativePrefix"})
+                    if (q.contains(key) && !q.value(key).isString())
+                        return fail();
+                quality->positivePrefix = q.value("positivePrefix").toString();
+                quality->negativePrefix = q.value("negativePrefix").toString();
+            }
+            else if (q.value("permanent").toBool() && !permanent)
+            {
+                permanent = true;
+                for (auto &other : routing.editingQualities)
+                    other.isDefault = &other == &*quality;
+            }
+        }
+    }
     QSet<QString> ids;
     for (const auto &item : object.value("presets").toArray())
     {
@@ -164,24 +212,7 @@ std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QStr
         if (tiered ? !parseFastTier(p.value("qualities"), lowTierId(preset.id), preset.model)
                    : !parseAssignment(p, preset.model))
             return fail();
-        // Versions 1 and 2 predate prompt flows and load with an empty flow.
-        if (flows)
-        {
-            if (!p.value("promptFlow").isArray())
-                return fail();
-            for (const auto &value : p.value("promptFlow").toArray())
-            {
-                if (!value.isObject())
-                    return fail();
-                const auto s = value.toObject();
-                for (const auto &key : {"id", "name", "nameFr", "modelId", "instructions"})
-                    if (!s.value(key).isString())
-                        return fail();
-                preset.promptFlow.append({s.value("id").toString(), s.value("name").toString(),
-                                          s.value("nameFr").toString(), s.value("modelId").toString(),
-                                          s.value("instructions").toString()});
-            }
-        }
+        // Prompt flows were removed; a promptFlow stored by earlier documents is ignored.
         // Versions 1–4 predate identity views and load with a single view.
         if (version >= 5)
         {
@@ -204,7 +235,7 @@ std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QStr
                     p.model = old.model;
                     break;
                 }
-        fixed.editing = routing.editing;
+        fixed.editingQualities = routing.editingQualities;
         routing = fixed;
     }
     if (!validateModelRouting(routing, error))

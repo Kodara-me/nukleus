@@ -11,6 +11,7 @@ KiraService::GenerationProgress SdCliProgressParser::begin(int samplingSteps)
     m_percentage = 0;
     m_stage = KiraService::GenerationProgressStage::Preparing;
     m_samplingStarted = false;
+    m_currentStep.reset();
     m_hasProgress = true;
     return {KiraService::GenerationProgressStage::Preparing,
             std::nullopt,
@@ -28,6 +29,12 @@ std::optional<KiraService::GenerationProgress> SdCliProgressParser::processLine(
 {
     if (line.contains(QStringLiteral("loading model from"), Qt::CaseInsensitive)) {
         return update(KiraService::GenerationProgressStage::LoadingModel, 5, QObject::tr("Loading image generation model…"));
+    }
+    // Printed just before the first step, once sampling has started: step 1 is running.
+    if (m_samplingStarted && m_samplingSteps > 0
+        && line.contains(QStringLiteral("sampling using"), Qt::CaseInsensitive)) {
+        return update(KiraService::GenerationProgressStage::Sampling, 15,
+                      QObject::tr("Sampling %1 / %2").arg(1).arg(m_samplingSteps), 1, m_samplingSteps);
     }
     if (line.contains(QStringLiteral("generate_image"), Qt::CaseInsensitive)
         || line.contains(QStringLiteral("sampling using"), Qt::CaseInsensitive)) {
@@ -52,27 +59,39 @@ std::optional<KiraService::GenerationProgress> SdCliProgressParser::processLine(
         return update(KiraService::GenerationProgressStage::Saving, 99, QObject::tr("Saving image…"));
     }
 
-    if (!m_samplingStarted || m_samplingSteps <= 0) {
-        return std::nullopt;
-    }
-
     static const QRegularExpression samplingCounter(QStringLiteral("\\b(\\d+)\\s*/\\s*(\\d+)\\b"));
-    const QRegularExpressionMatch match = samplingCounter.match(line);
-    if (!match.hasMatch()) {
+    return samplingProgress(samplingCounter.match(line));
+}
+
+std::optional<KiraService::GenerationProgress> SdCliProgressParser::processPartialLine(const QString &text)
+{
+    // sd-cli redraws its bar as "\r  |===>   | 19/20 - 1.23s/it" and only ends the line after the
+    // last step, so a counter is complete before its terminator arrives. Require the " -" that
+    // follows it, so a number cut in half by a read is never taken.
+    static const QRegularExpression completeCounter(QStringLiteral("\\b(\\d+)\\s*/\\s*(\\d+)\\s+-"));
+    return samplingProgress(completeCounter.match(text));
+}
+
+std::optional<KiraService::GenerationProgress> SdCliProgressParser::samplingProgress(const QRegularExpressionMatch &match)
+{
+    if (!m_samplingStarted || m_samplingSteps <= 0 || !match.hasMatch()) {
         return std::nullopt;
     }
 
-    const int currentStep = match.captured(1).toInt();
+    const int completedSteps = match.captured(1).toInt();
     const int totalSteps = match.captured(2).toInt();
-    if (currentStep < 0 || currentStep > totalSteps || totalSteps != m_samplingSteps) {
+    if (completedSteps < 0 || completedSteps > totalSteps || totalSteps != m_samplingSteps) {
         return std::nullopt;
     }
 
-    const int percentage = 15 + (currentStep * 75 + totalSteps / 2) / totalSteps;
+    // sd-cli counts completed steps; clients show the step being sampled, so the last step
+    // reads N / N while it runs. The percentage follows completed steps.
+    const int runningStep = std::min(completedSteps + 1, totalSteps);
+    const int percentage = 15 + (completedSteps * 75 + totalSteps / 2) / totalSteps;
     return update(KiraService::GenerationProgressStage::Sampling,
                   percentage,
-                  QObject::tr("Sampling %1 / %2").arg(currentStep).arg(totalSteps),
-                  currentStep,
+                  QObject::tr("Sampling %1 / %2").arg(runningStep).arg(totalSteps),
+                  runningStep,
                   totalSteps);
 }
 
@@ -96,10 +115,17 @@ std::optional<KiraService::GenerationProgress> SdCliProgressParser::update(KiraS
         return std::nullopt;
     }
     percentage = std::max(percentage, m_percentage);
-    if (m_hasProgress && stage == m_stage && percentage == m_percentage && currentStep == std::nullopt) {
+    // A counter read early from a partial line arrives again when its line ends.
+    if (m_hasProgress && stage == m_stage && percentage == m_percentage
+        && (currentStep == std::nullopt || currentStep == m_currentStep)) {
+        return std::nullopt;
+    }
+    // The running step only moves forward.
+    if (currentStep && m_currentStep && stage == m_stage && *currentStep < *m_currentStep) {
         return std::nullopt;
     }
 
+    m_currentStep = currentStep ? currentStep : m_currentStep;
     m_stage = stage;
     m_percentage = percentage;
     m_hasProgress = true;

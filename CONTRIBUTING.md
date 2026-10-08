@@ -58,37 +58,44 @@ The legacy VAE GUI exposes this via Optional files; the compatibility CLI expose
 
 ## Shared manager UI
 
-ModelRouting Protocol types carry fixed English/French labels, preset prefixes
+ModelRouting Protocol types carry English/French labels, preset prefixes
 and one ModelAssignment (model plus optional Steps/CFG snapshot) per preset and
-for editing. Use the shared KiraUi TreeView with fixed Generation/Editing
-branches: Photorealism and Illustration under Generation, each with its prompt
-flow; Editing has no prefixes. The tree cannot rename, add, remove, reorder or
-reparent entries. Selecting a preset shows Model/Steps/CFG and its prefixes;
-selecting Editing shows Model/Steps/CFG only. Model changes initialize the pair
+per fixed editing quality (Fast/Balanced/Quality, exactly one the default). Use the shared KiraUi TreeView with fixed Generation/Editing
+branches: 1–16 presets under Generation (starting with Photorealism and
+Illustration); the three editing qualities under
+Editing, each with its own prefixes. Add/Remove
+preset buttons below the tree create a preset with a generated `preset-…` ID or
+remove the selected one; the tree cannot drag, reorder or reparent entries.
+Selecting a preset shows its English/French names, Model/Steps/CFG and prefixes;
+selecting an editing quality shows Model/Steps/CFG, its prefixes and its Default
+quality checkbox. Model changes initialize the pair
 from recommendations or shared defaults; catalogue refresh preserves it. Save
 persists manual values; Cancel discards them.
 
-Store version-5 JSON atomically beside model metadata; each preset's
-`identityViews` (1, 2 or 4) defaults to 1 for versions 1–4. Versions 1–3 stored
-Fast/Balanced/Quality tiers; parsing keeps each group's Fast (`-low`) tier as its
-assignment and drops the rest. Version-1 parsing maps known preset IDs into the
-fixed catalogue and preserves prefixes; missing parameters are filled from
+Store version-6 JSON atomically beside model metadata; each preset's
+`identityViews` (1, 2 or 4) defaults to 1 for versions 1–4, and versions 4–5
+copy their single `editing` assignment into every editing quality. Versions 1–3
+stored Fast/Balanced/Quality tiers; parsing keeps each preset's Fast (`-low`)
+tier and drops the rest, but keeps all editing tiers, with a permanent one as
+the default. Version-1 parsing maps known preset IDs onto the
+starter presets and preserves prefixes; missing parameters are filled from
 models. Read/migration never writes; explicit Save replaces the file with the
-fixed structure, omitting retired entries.
-Validate the fixed IDs/order/labels and finite numeric bounds (Steps 1–200,
+edited presets, omitting retired entries.
+Validate unique preset IDs, nonblank bilingual names and finite numeric bounds (Steps 1–200,
 CFG 0–100); protect assignments and capabilities, including attachment installs.
-Tests cover bilingual labels, legacy reading, persistence, snapshots, fixed-tree
-behavior and draft Save/Cancel with disposable files and local sockets.
+Tests cover bilingual labels, legacy reading, persistence, snapshots, preset
+addition/removal and draft Save/Cancel with disposable files and local sockets.
 
 Protocol v3 advertises `model-routing`; `model-routing.get/configure` return
 completion messages with `routing`, and saves broadcast `model-routing.changed`.
 Generation is routed by presetId alone; `qualityId` is rejected. Editing is
-unrouted: clients submit the editing assignment's modelId and Steps/CFG.
+routed by an optional `qualityId` resolving that quality's model and Steps/CFG;
+its prefixes lead the prompts sent to sd-cli and never pass through an LLM.
 Resolve models server-side, reject conflicting modelId and legacy styleId mixing,
 validate original prompts, then snapshot prefixes and preset defaults before
 upload/queueing. Fill omitted Steps/CFG from the preset's snapshot; explicit valid
 job values take precedence. Direct-model requests retain their existing defaults.
-Editing adds no preset prefixes. Labels include `name` (English) and `nameFr`;
+Editing adds only its quality's prefixes. Labels include `name` (English) and `nameFr`;
 SDK displayLabel uses French for French locales, English otherwise.
 Manager uses English names explicitly, even with a French system locale.
 The Protocol target propagates MSVC's /utf-8 source encoding so bilingual labels
@@ -168,7 +175,9 @@ metadata preservation using disposable test models.
 Image forms select installed VAE companions and eligible LLM text encoders by
 opaque IDs in recommendedOptions.vaeModelId/textEncoderModelId. Save canEdit and
 canGenerate there with at least one true; missing flags default true. LLM saves
-canBeTextEncoder (default false). The service validates references on installation,
+canBeTextEncoder (default false) and the exclusive defaultPromptEnhancer and
+defaultPromptTranslator roles (default false; saving a role clears it on every
+other LLM in one metadata write). The service validates references on installation,
 configuration and submission, protects referenced models during pending installs,
 and prevents deletion/reclassification until detached. Execution uses --vae/--llm
 and the selected LLM's assigned MMPROJ as --llm_vision. CLIP and image-level mmproj

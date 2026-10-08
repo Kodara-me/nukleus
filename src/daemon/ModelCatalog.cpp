@@ -64,6 +64,23 @@ QUrl normalizedModelUrl(const QUrl &url)
     }
     return url;
 }
+
+// Keeps each exclusive LLM role on at most one entry: the one being saved wins.
+void releaseExclusiveLlmRoles(QJsonObject &metadata, const QString &fileName, const QJsonObject &options)
+{
+    for (const auto &role : KiraService::Protocol::exclusiveLlmRoles()) {
+        if (!options.value(role).toBool()) continue;
+        for (auto it = metadata.begin(); it != metadata.end(); ++it) {
+            if (it.key() == fileName || !it.value().isObject()) continue;
+            auto entry = it.value().toObject();
+            auto recommended = entry.value("recommendedOptions").toObject();
+            if (!recommended.value(role).toBool()) continue;
+            recommended.insert(role, false);
+            entry.insert("recommendedOptions", recommended);
+            it.value() = entry;
+        }
+    }
+}
 }
 
 struct ModelCatalog::InstallJob
@@ -398,6 +415,7 @@ bool ModelCatalog::configure(const QString &id, const QJsonObject &options, QStr
     entry.insert("displayName", name);
     if (mmprojModelId) entry.insert("mmprojModelId", *mmprojModelId);
     metadata->insert(info->fileName, entry);
+    if (category == ModelCategory::LlmChat) releaseExclusiveLlmRoles(*metadata, info->fileName, options);
     if (!writeMetadata(category, *metadata)) { if (error) *error = tr("Could not save model metadata"); return false; }
     return true;
 }
@@ -482,7 +500,7 @@ void ModelCatalog::initializeRoutingOptions(KiraService::ModelRouting &routing) 
         if (!a.cfgScale) a.cfgScale = options.value("cfgScale").toDouble(defaults.value("cfgScale").toDouble());
     };
     for (auto &preset : routing.presets) initialize(preset.model);
-    initialize(routing.editing);
+    for (auto &quality : routing.editingQualities) initialize(quality.model);
 }
 
 bool ModelCatalog::validateRoutingReferences(const KiraService::ModelRouting &routing, QString *error) const
@@ -496,15 +514,11 @@ bool ModelCatalog::validateRoutingReferences(const KiraService::ModelRouting &ro
         }
         return true;
     };
-    for (const auto &p : routing.presets) {
+    for (const auto &p : routing.presets)
         if (!validate(p.model, p.name, "canGenerate")) return false;
-        for (const auto &step : p.promptFlow)
-            if (!step.modelId.isEmpty() && !model(ModelCategory::LlmChat, step.modelId)) {
-                if (error) *error = tr("Prompt flow step %1 must select an installed LLM, or Unassigned").arg(step.name);
-                return false;
-            }
-    }
-    return validate(routing.editing, tr("Editing"), "canEdit");
+    for (const auto &q : routing.editingQualities)
+        if (!validate(q.model, tr("Editing quality %1").arg(q.name), "canEdit")) return false;
+    return true;
 }
 
 bool ModelCatalog::configureRouting(const KiraService::ModelRouting &value, QString *error)
@@ -529,30 +543,21 @@ bool ModelCatalog::configureRouting(const KiraService::ModelRouting &value, QStr
 
 bool ModelCatalog::protectRouting(const QString &id, const QJsonObject *options, QString *error) const
 {
-    const bool llm = id.startsWith("llm-chat:");
-    if (!id.startsWith("image-generation:") && !(llm && !options)) return true;
+    if (!id.startsWith("image-generation:")) return true;
     const auto value = routing(error);
     if (!value) return false;
-    if (llm) {
-        // LLM options carry no routing capability, so only deletion is blocked.
-        for (const auto &p : value->presets)
-            for (const auto &step : p.promptFlow)
-                if (step.modelId == id) {
-                    if (error) *error = tr("This model is assigned to a prompt flow step; clear its assignment first");
-                    return false;
-                }
-        return true;
-    }
     const auto permitted = [&](const KiraService::ModelAssignment &a, const QString &capability) {
         if (a.modelId == id && (!options || !options->value(capability).toBool(true))) {
-            if (error) *error = tr("This model is assigned to a preset or to editing; clear its assignment first");
+            if (error) *error = tr("This model is assigned to a preset or to an editing quality; clear its assignment first");
             return false;
         }
         return true;
     };
     for (const auto &p : value->presets)
         if (!permitted(p.model, "canGenerate")) return false;
-    return permitted(value->editing, "canEdit");
+    for (const auto &q : value->editingQualities)
+        if (!permitted(q.model, "canEdit")) return false;
+    return true;
 }
 
 QString ModelCatalog::rootPath() const
@@ -773,6 +778,8 @@ void ModelCatalog::completeInstall()
     if (m_activeInstall->request.mmprojModelId) entry.insert("mmprojModelId", *m_activeInstall->request.mmprojModelId);
     if (category == ModelCategory::Companion) entry.insert("recommendedOptions", m_activeInstall->request.recommendedOptions.value_or(KiraService::Protocol::defaultModelOptions("companion")));
     metadata->insert(m_activeInstall->fileName, entry);
+    if (category == ModelCategory::LlmChat && m_activeInstall->request.recommendedOptions)
+        releaseExclusiveLlmRoles(*metadata, m_activeInstall->fileName, *m_activeInstall->request.recommendedOptions);
     if (!writeMetadata(category, *metadata)) { failActiveInstall(tr("Could not save model metadata")); return; }
     for (const auto &file : m_activeInstall->files) QFile::remove(file.partPath);
     const auto id = categoryName(category) + ':' + m_activeInstall->fileName;

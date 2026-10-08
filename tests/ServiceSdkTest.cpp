@@ -91,10 +91,33 @@ private slots:
     {
         auto routing = KiraService::Protocol::starterModelRouting();
         routing.presets[0].model = {"image-generation:photo.gguf", 30, 6.5};
-        routing.editing = {"image-generation:edit.gguf", 12, 2.25};
+        routing.editingQualities[2].model = {"image-generation:edit.gguf", 12, 2.25};
+        routing.editingQualities[2].positivePrefix = "sharp details";
+        routing.editingQualities[2].negativePrefix = "blurry";
         const auto json = KiraService::Protocol::modelRoutingToJson(routing);
-        QCOMPARE(json.value("version").toInt(), 5);
-        QVERIFY(!json.contains("editingQualities"));
+        {
+            // Editing quality prefixes round-trip; documents without them load empty.
+            QCOMPARE(json.value("editingQualities").toArray()[2].toObject().value("positivePrefix").toString(),
+                     QString("sharp details"));
+            auto qualities = json.value("editingQualities").toArray();
+            auto quality = qualities[2].toObject();
+            quality.remove("positivePrefix");
+            quality.remove("negativePrefix");
+            qualities[2] = quality;
+            auto withoutPrefixes = json;
+            withoutPrefixes.insert("editingQualities", qualities);
+            QVERIFY(KiraService::Protocol::modelRoutingFromJson(withoutPrefixes)->editingQualities[2].positivePrefix.isEmpty());
+            quality.insert("negativePrefix", 3);
+            qualities[2] = quality;
+            withoutPrefixes.insert("editingQualities", qualities);
+            QVERIFY(!KiraService::Protocol::modelRoutingFromJson(withoutPrefixes));
+            auto tooLong = routing;
+            tooLong.editingQualities[0].negativePrefix = QString(65537, 'x');
+            QVERIFY(!KiraService::Protocol::validateModelRouting(tooLong));
+        }
+        QCOMPARE(json.value("version").toInt(), 6);
+        QVERIFY(!json.contains("editing"));
+        QCOMPARE(json.value("editingQualities").toArray()[1].toObject().value("default").toBool(), true);
         QCOMPARE(KiraService::Protocol::modelRoutingFromJson(json), std::optional(routing));
         QCOMPARE(routing.presets[1].identityViews, 1); // Presets default to a single portrait.
         routing.presets[0].identityViews = 4;
@@ -103,6 +126,7 @@ private slots:
         QCOMPARE(KiraService::Protocol::modelRoutingFromJson(viewsJson), std::optional(routing));
         auto version4 = viewsJson; // Version 4 predates identity views and loads with one.
         version4.insert("version", 4);
+        version4.insert("editing", QJsonObject{{"modelId", QString()}});
         QCOMPARE(KiraService::Protocol::modelRoutingFromJson(version4)->presets[0].identityViews, 1);
         auto invalidViews = viewsJson;
         auto viewPresets = invalidViews.value("presets").toArray();
@@ -118,13 +142,13 @@ private slots:
         routing.presets[0].identityViews = 3;
         QVERIFY(!KiraService::Protocol::validateModelRouting(routing));
         routing.presets[0].identityViews = 4;
-        routing.editing.steps = 0;
+        routing.editingQualities[2].model.steps = 0;
         QVERIFY(!KiraService::Protocol::validateModelRouting(routing));
-        routing.editing.steps = 12;
+        routing.editingQualities[2].model.steps = 12;
         routing.presets[1].model.cfgScale = 101;
         QVERIFY(!KiraService::Protocol::validateModelRouting(routing));
         auto missing = json;
-        missing.remove("editing");
+        missing.remove("editingQualities");
         QVERIFY(!KiraService::Protocol::modelRoutingFromJson(missing));
     }
     void validatesPromptStyles();

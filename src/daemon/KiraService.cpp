@@ -44,7 +44,7 @@ bool validGenerationOptions(const QJsonObject &options)
 {
     const QStringList allowed{"modelId", "prompt", "negativePrompt", "width", "height",
         "steps", "cfgScale", "clipSkip", "seed", "sampler", "scheduler",
-        "hasInput", "inputCount", "baseImageStrength", "styleId", "presetId"};
+        "hasInput", "inputCount", "baseImageStrength", "styleId", "presetId", "qualityId"};
     for (const auto& key : options.keys())
         if (!allowed.contains(key)) return false;
     const auto optionalString = [&options](const QString &key) {
@@ -69,54 +69,14 @@ bool validGenerationOptions(const QJsonObject &options)
         && (!options.contains("hasInput") || options.value("hasInput").isBool());
 }
 
-struct PromptFlowJobStep
-{
-    QString name;
-    QString nameFr;
-    QString modelPath;
-    QJsonObject parameters;
-    QString instructions;
-};
-
-std::optional<std::pair<QString, QString>> parsePromptFlowOutput(const QString &text, const QString &previousNegative)
-{
-    // Models sometimes wrap the object in code fences or prose; keep the outermost object.
-    const auto start = text.indexOf(QLatin1Char('{'));
-    const auto end = text.lastIndexOf(QLatin1Char('}'));
-    if (start < 0 || end < start) return std::nullopt;
-    const auto document = QJsonDocument::fromJson(text.mid(start, end - start + 1).toUtf8());
-    if (!document.isObject()) return std::nullopt;
-    const auto object = document.object();
-    const auto positive = object.value("positive");
-    const auto negative = object.value("negative");
-    if (!positive.isString() || positive.toString().trimmed().isEmpty()
-        || (object.contains("negative") && !negative.isString())) return std::nullopt;
-    return std::pair{positive.toString().trimmed(),
-                     object.contains("negative") ? negative.toString().trimmed() : previousNegative};
 }
-
-}
-
-// A prompt flow's LLM steps, run in order. For routed generation, preset prefixes
-// are then composed once onto the final prompts before the image is generated.
-struct KiraServiceDaemon::PromptFlowRun
-{
-    bool routed = false;
-    QList<PromptFlowJobStep> steps;
-    int index = 0;
-    QString positivePrefix;
-    QString negativePrefix;
-    QString prompt;
-    QString negativePrompt;
-    bool active() const { return index < steps.size(); }
-};
 
 struct KiraServiceDaemon::Submission
 {
     QString id;
     Operation operation = Operation::Generate;
     QJsonObject options;
-    PromptFlowRun flow;
+    std::optional<RoutedPrompts> routedPrompts;
     QString modelPath;
     QString vaePath;
     QString llmPath;
@@ -134,7 +94,7 @@ struct KiraServiceDaemon::Job
     QString id;
     Operation operation = Operation::Generate;
     QJsonObject options;
-    PromptFlowRun flow;
+    std::optional<RoutedPrompts> routedPrompts;
     QString modelPath;
     QString vaePath;
     QString llmPath;
@@ -350,23 +310,43 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     const bool edit = operationName == QStringLiteral("image.edit");
     const bool upscale = operationName == QStringLiteral("image.upscale");
     const bool promptEnhance = operationName == QStringLiteral("prompt.enhance");
-    const bool promptFlow = operationName == QStringLiteral("prompt-flow.run");
     QJsonObject options = message.value(QStringLiteral("options")).toObject();
     const QString jobId = message.value(QStringLiteral("jobId")).toString();
     bool duplicateId = jobForId(jobId) != nullptr;
     for (const auto &pending : m_pendingUploads) {
         duplicateId = duplicateId || pending->id == jobId;
     }
-    if ((!generate && !upscale && !edit && !promptEnhance && !promptFlow) || jobId.isEmpty() || duplicateId) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid job request"), jobId); return; }
+    if ((!generate && !upscale && !edit && !promptEnhance) || jobId.isEmpty() || duplicateId) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid job request"), jobId); return; }
     if (promptEnhance) { submitPromptEnhancement(socket, message); return; }
-    if (promptFlow) { submitPromptFlow(socket, message); return; }
     if (!isImageReady()) {
         sendError(socket, QStringLiteral("backend-not-ready"), tr("The requested service backend is unavailable"), jobId);
         return;
     }
     const ModelCategory category = (generate || edit) ? ModelCategory::ImageGeneration : ModelCategory::Upscaler;
     std::optional<KiraService::GenerationPreset> preset;
-    PromptFlowRun flow;
+    std::optional<KiraService::EditingQuality> quality;
+    std::optional<RoutedPrompts> routedPrompts;
+    if (options.contains("qualityId")) {
+        // Editing is routed by quality; generation is routed by preset only.
+        if (!edit || !options.value("qualityId").isString() || options.value("qualityId").toString().isEmpty()
+            || options.contains("presetId") || !options.value("styleId").toString().isEmpty()
+            || (options.contains("modelId") && !options.value("modelId").isString())) {
+            sendError(socket, "invalid-request", tr("Invalid editing quality selection"), jobId); return;
+        }
+        QString error;
+        const auto routing = m_models->routing(&error);
+        if (!routing) { sendError(socket, "model-routing-unavailable", error, jobId); return; }
+        if (const auto *q = routing->editingQuality(options.value("qualityId").toString())) quality = *q;
+        if (!quality) { sendError(socket, "model-routing-unavailable", tr("The editing quality is unavailable"), jobId); return; }
+        if (quality->model.modelId.isEmpty()) {
+            sendError(socket, "model-routing-unavailable", tr("The editing quality has no assigned model"), jobId); return;
+        }
+        const auto supplied = options.value("modelId").toString();
+        if (!supplied.isEmpty() && supplied != quality->model.modelId) {
+            sendError(socket, "invalid-request", tr("The supplied model conflicts with the editing quality assignment"), jobId); return;
+        }
+        options.insert("modelId", quality->model.modelId);
+    }
     if (options.contains("presetId")) {
         if (!generate || !options.value("presetId").isString() || options.value("presetId").toString().isEmpty()
             || !options.value("styleId").toString().isEmpty()
@@ -387,11 +367,6 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
             sendError(socket, "invalid-request", tr("The supplied model conflicts with the preset assignment"), jobId); return;
         }
         options.insert("modelId", modelId);
-        if (options.contains("skipPromptFlow") && !options.value("skipPromptFlow").isBool()) {
-            sendError(socket, "invalid-request", tr("Invalid prompt flow option"), jobId); return;
-        }
-        flow.routed = true;
-        if (!options.take("skipPromptFlow").toBool() && !preparePromptFlow(socket, jobId, *preset, flow)) return;
     }
     const std::optional<ModelInfo> model = m_models->model(category, options.value(QStringLiteral("modelId")).toString());
     if (!model.has_value()) { sendError(socket, QStringLiteral("model-unavailable"), tr("The requested model is unavailable"), jobId); return; }
@@ -415,6 +390,13 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
             tr("Reference images are only supported for image editing and generation without a base image"), jobId);
         return;
     }
+    if (quality) {
+        if (!options.contains("steps") && quality->model.steps) options.insert("steps", *quality->model.steps);
+        if (!options.contains("cfgScale") && quality->model.cfgScale) options.insert("cfgScale", *quality->model.cfgScale);
+        // The quality's prefixes lead the validated instruction sent to sd-cli; clients never see them.
+        options.insert("prompt", KiraService::Protocol::composeStyledPrompt(quality->positivePrefix, options.value("prompt").toString()));
+        options.insert("negativePrompt", KiraService::Protocol::composeStyledPrompt(quality->negativePrefix, options.value("negativePrompt").toString()));
+    }
     if (preset) {
         if (!options.contains("steps") && preset->model.steps) options.insert("steps", *preset->model.steps);
         if (!options.contains("cfgScale") && preset->model.cfgScale) options.insert("cfgScale", *preset->model.cfgScale);
@@ -426,15 +408,10 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     }
     const QString styleId = options.value("styleId").toString();
     if (preset) {
-        flow.prompt = options.value("prompt").toString().trimmed();
-        flow.negativePrompt = options.value("negativePrompt").toString().trimmed();
-        flow.positivePrefix = preset->positivePrefix;
-        flow.negativePrefix = preset->negativePrefix;
-        // With a prompt flow, prefixes are composed after its last step instead.
-        if (!flow.active()) {
-            options.insert("prompt", KiraService::Protocol::composeStyledPrompt(preset->positivePrefix, flow.prompt));
-            options.insert("negativePrompt", KiraService::Protocol::composeStyledPrompt(preset->negativePrefix, flow.negativePrompt));
-        }
+        routedPrompts = RoutedPrompts{options.value("prompt").toString().trimmed(),
+                                      options.value("negativePrompt").toString().trimmed()};
+        options.insert("prompt", KiraService::Protocol::composeStyledPrompt(preset->positivePrefix, routedPrompts->prompt));
+        options.insert("negativePrompt", KiraService::Protocol::composeStyledPrompt(preset->negativePrefix, routedPrompts->negativePrompt));
     }
     if (!styleId.isEmpty()) {
         const auto style = std::find_if(model->styles.cbegin(), model->styles.cend(),
@@ -456,7 +433,7 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     submission->id = jobId;
     submission->operation = edit ? Operation::Edit : generate ? Operation::Generate : Operation::Upscale;
     submission->options = options;
-    submission->flow = flow;
+    submission->routedPrompts = routedPrompts;
     submission->expectedInputs = options.value("inputCount").toInt(1);
     submission->modelPath = model->filePath;
     if ((generate || edit) && model->companionRole == QStringLiteral("vae") && !model->companionFileName.isEmpty())
@@ -507,7 +484,7 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     job->id = jobId;
     job->operation = submission->operation;
     job->options = options;
-    job->flow = flow;
+    job->routedPrompts = routedPrompts;
     job->modelPath = model->filePath;
     job->vaePath = submission->vaePath;
     job->llmPath = submission->llmPath;
@@ -666,6 +643,8 @@ void KiraServiceDaemon::configureModel(QWebSocket *socket, const QJsonObject &me
         value.insert("companionRole", model.companionRole);
     }
     send(socket, {{"type", "models.configure.completed"}, {"id", id}, {"model", value}});
+    for (auto it = m_authenticatedClients.cbegin(); it != m_authenticatedClients.cend(); ++it)
+        if (it.value() && it.key() != socket) send(it.key(), {{"type", "models.changed"}, {"id", id}});
 }
 
 void KiraServiceDaemon::configureModelStyles(QWebSocket *socket, const QJsonObject &message)
@@ -719,9 +698,7 @@ void KiraServiceDaemon::deleteModel(QWebSocket *socket, const QJsonObject &messa
 bool KiraServiceDaemon::modelInUse(const QString &path) const
 {
     const auto usesModel = [&path](const auto &job) {
-        return job && (job->modelPath == path || job->vaePath == path || job->llmPath == path || job->llmVisionPath == path
-            || std::any_of(job->flow.steps.cbegin() + job->flow.index, job->flow.steps.cend(),
-                           [&path](const PromptFlowJobStep &step) { return step.modelPath == path; }));
+        return job && (job->modelPath == path || job->vaePath == path || job->llmPath == path || job->llmVisionPath == path);
     };
     if (usesModel(m_activeJob)) return true;
     for (const auto &job : m_queue) {
@@ -757,7 +734,7 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket* socket, const QByteArra
     job->id = submission->id;
     job->operation = submission->operation;
     job->options = submission->options;
-    job->flow = submission->flow;
+    job->routedPrompts = submission->routedPrompts;
     job->modelPath = submission->modelPath;
     job->vaePath = submission->vaePath;
     job->llmPath = submission->llmPath;
@@ -804,10 +781,6 @@ void KiraServiceDaemon::runActiveJob()
         startPromptEnhancement();
         return;
     }
-    if (m_activeJob->flow.active()) {
-        startPromptFlowStep();
-        return;
-    }
     if (m_activeJob->operation == Operation::Generate || m_activeJob->operation == Operation::Edit) {
         m_activeJob->outputPath = m_activeJob->directory->filePath(QStringLiteral("result.png"));
         GenerationRequest request;
@@ -837,32 +810,6 @@ void KiraServiceDaemon::runActiveJob()
     }
 }
 
-void KiraServiceDaemon::startPromptFlowStep()
-{
-    const auto job = m_activeJob;
-    const auto &step = job->flow.steps.at(job->flow.index);
-    KiraService::GenerationProgress progress;
-    progress.stage = KiraService::GenerationProgressStage::EnhancingPrompt;
-    progress.statusText = step.name;
-    progress.flowStep = job->flow.index + 1;
-    progress.flowSteps = int(job->flow.steps.size());
-    progress.flowStepName = step.name;
-    progress.flowStepNameFr = step.nameFr;
-    send(job->client, {{"type", "progress"}, {"jobId", job->id}, {"progress", KiraService::Protocol::progressToJson(progress)}});
-    const QString instructions = step.instructions.trimmed().isEmpty()
-        ? QStringLiteral("Improve the image-generation prompts.") : step.instructions.trimmed();
-    const QString system = instructions + QStringLiteral(
-        "\n\nThe input after these instructions is a JSON object {\"positive\": string, \"negative\": string} holding "
-        "the positive and negative image-generation prompts. Reply with only a JSON object of the same shape, without explanations, "
-        "headings or code fences.");
-    const QString input = QString::fromUtf8(QJsonDocument(QJsonObject{
-        {"positive", job->flow.prompt}, {"negative", job->flow.negativePrompt}}).toJson(QJsonDocument::Compact));
-    if (!startLlm(step.modelPath, step.parameters, system, input, false)) {
-        sendError(job->client, "storage-error", tr("Could not prepare prompt flow step “%1”").arg(step.name), job->id);
-        m_activeJob.reset(); startNextJob();
-    }
-}
-
 void KiraServiceDaemon::handleGenerationFinished(const SdCliGenerationResult &result)
 {
     if (!m_activeJob) return;
@@ -883,9 +830,9 @@ void KiraServiceDaemon::handleGenerationFinished(const SdCliGenerationResult &re
             QJsonObject result{{QStringLiteral("type"), QStringLiteral("result")}, {QStringLiteral("jobId"), job->id},
                 {QStringLiteral("operation"), job->operation == Operation::Edit ? QStringLiteral("image.edit") : QStringLiteral("image.generate")},
                 {QStringLiteral("mimeType"), QStringLiteral("image/png")}};
-            if (job->flow.routed) {
-                result.insert("prompt", job->flow.prompt);
-                result.insert("negativePrompt", job->flow.negativePrompt);
+            if (job->routedPrompts) {
+                result.insert("prompt", job->routedPrompts->prompt);
+                result.insert("negativePrompt", job->routedPrompts->negativePrompt);
             }
             send(job->client, result);
             if (job->client) job->client->sendBinaryMessage(bytes);
@@ -909,7 +856,7 @@ void KiraServiceDaemon::cancelJobsFor(QWebSocket *socket)
     while (!m_queue.isEmpty()) { const auto job = m_queue.dequeue(); if (job->client != socket) kept.enqueue(job); }
     m_queue = std::move(kept);
     if (m_activeJob && m_activeJob->client == socket) {
-        if (m_activeJob->operation == Operation::PromptEnhance || m_activeJob->flow.active()) m_promptProcess.kill();
+        if (m_activeJob->operation == Operation::PromptEnhance) m_promptProcess.kill();
         else if (m_sdRunner) m_sdRunner->cancel();
     }
     broadcastQueuePositions();
@@ -930,10 +877,7 @@ void KiraServiceDaemon::sendCapabilities(QWebSocket *socket) const
         operations.append(QStringLiteral("image.upscale"));
         operations.append(QStringLiteral("image.edit"));
     }
-    if (isPromptEnhancementReady()) {
-        operations.append("prompt.enhance");
-        operations.append("prompt-flow.run");
-    }
+    if (isPromptEnhancementReady()) operations.append("prompt.enhance");
     send(socket, {{QStringLiteral("type"), QStringLiteral("capabilities")}, {QStringLiteral("state"), state}, {QStringLiteral("operations"), operations}});
 }
 
@@ -955,68 +899,6 @@ void KiraServiceDaemon::modelRouting(QWebSocket *socket, const QJsonObject &mess
     if (operation == "model-routing.configure")
         for (auto it = m_authenticatedClients.cbegin(); it != m_authenticatedClients.cend(); ++it)
             send(it.key(), {{"type", "model-routing.changed"}});
-}
-
-bool KiraServiceDaemon::preparePromptFlow(QWebSocket *socket, const QString &jobId,
-                                          const KiraService::GenerationPreset &preset, PromptFlowRun &flow) const
-{
-    if (!preset.promptFlow.isEmpty() && !isPromptEnhancementReady()) {
-        sendError(socket, "backend-not-ready", tr("llama-completion is unavailable for the prompt flow"), jobId);
-        return false;
-    }
-    for (const auto &step : preset.promptFlow) {
-        if (step.modelId.isEmpty()) {
-            sendError(socket, "model-routing-unavailable", tr("Prompt flow step “%1” has no assigned LLM").arg(step.name), jobId);
-            return false;
-        }
-        const auto llm = m_models->model(ModelCategory::LlmChat, step.modelId);
-        if (!llm) {
-            sendError(socket, "model-routing-unavailable", tr("The LLM for prompt flow step “%1” is unavailable").arg(step.name), jobId);
-            return false;
-        }
-        if (QFileInfo(llm->filePath).suffix().toLower() != "gguf") {
-            sendError(socket, "llm-format-unsupported", tr("llama-completion requires a compatible GGUF model"), jobId);
-            return false;
-        }
-        flow.steps.append({step.name, step.nameFr, llm->filePath,
-            llm->recommendedOptions.isEmpty() ? KiraService::Protocol::defaultModelOptions("llm-chat") : llm->recommendedOptions,
-            step.instructions});
-    }
-    return true;
-}
-
-void KiraServiceDaemon::submitPromptFlow(QWebSocket *socket, const QJsonObject &message)
-{
-    const auto id = message.value("jobId").toString();
-    const auto options = message.value("options").toObject();
-    for (const auto &key : options.keys())
-        if (key != "presetId" && key != "prompt" && key != "negativePrompt") {
-            sendError(socket, "invalid-request", tr("Unsupported prompt flow field"), id); return;
-        }
-    if (!message.value("options").isObject() || !options.value("presetId").isString() || !options.value("prompt").isString()
-        || options.value("prompt").toString().toUtf8().size() > 65536
-        || (options.contains("negativePrompt") && (!options.value("negativePrompt").isString()
-                                                   || options.value("negativePrompt").toString().toUtf8().size() > 65536))) {
-        sendError(socket, "invalid-request", tr("A prompt flow requires a preset and prompts of at most 64 KiB"), id); return;
-    }
-    QString error;
-    const auto routing = m_models->routing(&error);
-    if (!routing) { sendError(socket, "model-routing-unavailable", error, id); return; }
-    const auto preset = std::find_if(routing->presets.cbegin(), routing->presets.cend(),
-        [&](const KiraService::GenerationPreset &p) { return p.id == options.value("presetId").toString(); });
-    if (preset == routing->presets.cend()) { sendError(socket, "model-routing-unavailable", tr("The preset is unavailable"), id); return; }
-    if (preset->promptFlow.isEmpty()) { sendError(socket, "prompt-flow-empty", tr("The preset has no prompt flow"), id); return; }
-    auto job = std::make_shared<Job>();
-    if (!preparePromptFlow(socket, id, *preset, job->flow)) return;
-    if (m_pendingUploads.contains(socket) || m_queue.size() >= MaximumQueuedJobs) {
-        sendError(socket, "queue-full", tr("An upload is pending or the service queue is full"), id); return;
-    }
-    job->id = id;
-    job->operation = Operation::PromptFlow;
-    job->client = socket;
-    job->flow.prompt = options.value("prompt").toString().trimmed();
-    job->flow.negativePrompt = options.value("negativePrompt").toString().trimmed();
-    enqueue(job);
 }
 
 bool KiraServiceDaemon::isPromptEnhancementReady() const
@@ -1049,6 +931,10 @@ void KiraServiceDaemon::submitPromptEnhancement(QWebSocket* socket, const QJsonO
             if (!overrides.value(key).isString()) { sendError(socket, "invalid-request", tr("System prompt must be a string"), id); return; }
             continue;
         }
+        if (key == "penalizeRepeats") {
+            if (!overrides.value(key).isBool()) { sendError(socket, "invalid-request", tr("penalizeRepeats must be a boolean"), id); return; }
+            continue;
+        }
         if (!parameters.contains(key)) {
             sendError(socket, "invalid-request", tr("Unsupported LLM parameter"), id); return;
         }
@@ -1074,6 +960,8 @@ void KiraServiceDaemon::submitPromptEnhancement(QWebSocket* socket, const QJsonO
     job->modelPath = model->filePath;
     job->options = parameters;
     job->options.insert("systemPrompt", overrides.value("systemPrompt").toString());
+    // Rewrites that must reuse the input's words (translation, faithful improvement) turn it off.
+    job->options.insert("penalizeRepeats", overrides.value("penalizeRepeats").toBool(true));
     job->options.insert("prompt", request.value("prompt"));
     enqueue(job);
 }
@@ -1087,7 +975,8 @@ void KiraServiceDaemon::startPromptEnhancement()
         system = QStringLiteral("Enhance the image-generation prompt that follows these instructions. Return only the enhanced prompt, without explanations, headings, quotation marks or reasoning.");
     const auto input = parameters.value("prompt").toString();
     if (!startLlm(job->modelPath, parameters, system, input.trimmed().isEmpty()
-        ? QStringLiteral("Generate a new description according to the instructions above.") : input)) {
+        ? QStringLiteral("Generate a new description according to the instructions above.") : input,
+        parameters.value("penalizeRepeats").toBool(true))) {
         sendError(job->client, "storage-error", tr("Could not prepare prompt enhancement"), job->id);
         m_activeJob.reset(); startNextJob();
     }
@@ -1110,8 +999,8 @@ bool KiraServiceDaemon::startLlm(const QString &modelPath, const QJsonObject &pa
     QStringList arguments{"--model", modelPath, "--file", promptPath, "--single-turn", "--conversation", "--jinja", "--no-display-prompt", "--simple-io", "--color", "off",
         "--reasoning", "off", "--no-context-shift", "--ctx-size", QString::number(parameters.value("contextLength").toInt()),
         "--n-predict", QString::number(parameters.value("maxTokens").toInt()),
-        // llama.cpp also penalizes prompt tokens. Flow steps repeat their instructions'
-        // words and JSON keys by design, so a penalty there garbles small models.
+        // llama.cpp also penalizes prompt tokens, which pushes faithful rewrites toward
+        // synonyms or another language; such jobs turn the penalty off.
         "--repeat-penalty", penalizeRepeats ? QStringLiteral("1.1") : QStringLiteral("1.0"),
         "--repeat-last-n", penalizeRepeats ? QString::number(parameters.value("contextLength").toInt()) : QStringLiteral("0"),
         "--samplers", "penalties;top_k;top_p;temperature", "--temp",
@@ -1127,8 +1016,7 @@ bool KiraServiceDaemon::startLlm(const QString &modelPath, const QJsonObject &pa
 
 void KiraServiceDaemon::handlePromptEnhancementFinished(int exitCode, QProcess::ExitStatus status)
 {
-    if (!m_activeJob || (m_activeJob->operation != Operation::PromptEnhance && !m_activeJob->flow.active())) return;
-    const bool flowStep = m_activeJob->operation != Operation::PromptEnhance;
+    if (!m_activeJob || m_activeJob->operation != Operation::PromptEnhance) return;
     m_promptTimeout.stop();
     const auto job = m_activeJob;
     m_promptError = (m_promptError + m_promptProcess.readAllStandardError()).right(4096);
@@ -1145,36 +1033,7 @@ void KiraServiceDaemon::handlePromptEnhancementFinished(int exitCode, QProcess::
                 ? "prompt-enhancement-empty-result" : "prompt-enhancement-failed";
         QString detail = tr("Prompt enhancement failed (exit code %1)").arg(exitCode);
         if (!m_promptError.trimmed().isEmpty()) detail += QLatin1Char('\n') + QString::fromUtf8(m_promptError).trimmed();
-        if (flowStep)
-            sendError(job->client, "prompt-flow-failed", tr("Prompt flow step “%1” failed: %2")
-                .arg(job->flow.steps.at(job->flow.index).name, detail), job->id);
-        else sendError(job->client, code, detail, job->id);
-    } else if (flowStep) {
-        auto &flow = job->flow;
-        const auto result = parsePromptFlowOutput(prompt, flow.negativePrompt);
-        if (!result) {
-            sendError(job->client, "prompt-flow-failed", tr("Prompt flow step “%1” returned an invalid result:\n%2")
-                .arg(flow.steps.at(flow.index).name, prompt.left(1024)), job->id);
-        } else {
-            flow.prompt = result->first;
-            flow.negativePrompt = result->second;
-            ++flow.index;
-            if (!flow.active() && job->operation == Operation::PromptFlow) {
-                // A flow preview ends here and returns the final prompts without prefixes.
-                send(job->client, {{"type", "result"}, {"jobId", job->id}, {"operation", "prompt-flow.run"},
-                                   {"prompt", flow.prompt}, {"negativePrompt", flow.negativePrompt}});
-                m_promptOutput.clear(); m_promptError.clear();
-                m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
-                return;
-            }
-            if (!flow.active()) {
-                job->options.insert("prompt", KiraService::Protocol::composeStyledPrompt(flow.positivePrefix, flow.prompt));
-                job->options.insert("negativePrompt", KiraService::Protocol::composeStyledPrompt(flow.negativePrefix, flow.negativePrompt));
-            }
-            m_promptOutput.clear(); m_promptError.clear();
-            runActiveJob();
-            return;
-        }
+        sendError(job->client, code, detail, job->id);
     } else send(job->client, {{"type", "result"}, {"jobId", job->id}, {"operation", "prompt.enhance"}, {"prompt", prompt}});
     m_promptOutput.clear(); m_promptError.clear();
     m_activeJob.reset(); broadcastQueuePositions(); startNextJob();

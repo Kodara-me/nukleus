@@ -131,6 +131,17 @@ QList<ModelInfo> ServiceClient::models(ModelCategory category) const
     return result;
 }
 
+QString ServiceClient::defaultPromptEnhancerModelId() const { return defaultLlmModelId("defaultPromptEnhancer"); }
+
+QString ServiceClient::defaultPromptTranslatorModelId() const { return defaultLlmModelId("defaultPromptTranslator"); }
+
+QString ServiceClient::defaultLlmModelId(const QString &role) const
+{
+    for (const ModelInfo &model : m_models)
+        if (model.category == ModelCategory::LlmChat && model.recommendedOptions.value(role).toBool()) return model.id;
+    return {};
+}
+
 QList<ModelInstall> ServiceClient::installs() const { return m_installs; }
 
 void ServiceClient::requestModels()
@@ -206,6 +217,7 @@ bool ServiceClient::deleteModel(const QString &id)
 QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
 {
     if (!request.presetId.isEmpty() && (!m_capabilities.modelRouting || !request.styleId.isEmpty())) return {};
+    if (!request.qualityId.isEmpty()) return {};
     if (!request.referenceImages.isEmpty() && (!request.baseImageData.isEmpty() || request.referenceImages.size() > 8
         || request.referenceImages.contains(QByteArray()))) return {};
     QJsonObject options{{QStringLiteral("prompt"), request.prompt},
@@ -223,7 +235,6 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
                               {QStringLiteral("modelId"), request.modelId}};
     if (!request.styleId.isEmpty()) options.insert("styleId", request.styleId);
     if (!request.presetId.isEmpty()) options.insert("presetId", request.presetId);
-    if (request.skipPromptFlow) options.insert("skipPromptFlow", true);
     if (!request.referenceImages.isEmpty()) {
         options.insert("inputCount", int(request.referenceImages.size()));
         return submit(ImageOperation::Generate, options, request.referenceImages);
@@ -233,12 +244,15 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
 
 QString ServiceClient::submitEdit(const ImageGenerationRequest &request)
 {
-    if (!request.styleId.isEmpty() || !request.presetId.isEmpty()) return {};
+    if (!request.styleId.isEmpty() || !request.presetId.isEmpty()
+        || (!request.qualityId.isEmpty() && !m_capabilities.modelRouting)) return {};
     if (request.editImages.isEmpty() || request.editImages.size() > 8 || request.editImages.contains(QByteArray()) || request.prompt.trimmed().isEmpty()) return {};
     QJsonObject options{{"modelId", request.modelId}, {"inputCount", int(request.editImages.size())}, {"prompt", request.prompt},
          {"width", request.width}, {"height", request.height}, {"steps", request.steps},
          {"cfgScale", request.cfgScale}, {"sampler", request.sampler},
          {"scheduler", request.scheduler}, {"clipSkip", request.clipSkip}};
+    if (!request.qualityId.isEmpty()) options.insert("qualityId", request.qualityId);
+    if (!request.negativePrompt.isEmpty()) options.insert("negativePrompt", request.negativePrompt);
     return submit(ImageOperation::Edit, options, request.editImages);
 }
 
@@ -270,38 +284,15 @@ QString ServiceClient::enhancePrompt(const PromptEnhancementRequest& request)
     return jobId;
 }
 
-bool ServiceClient::canRunPromptFlow(const QString& presetId) const
-{
-    if (!m_authenticated || !m_capabilities.promptFlow || !m_routing) return false;
-    for (const auto& preset : m_routing->presets)
-        if (preset.id == presetId)
-            return !preset.promptFlow.isEmpty()
-                && std::all_of(preset.promptFlow.cbegin(), preset.promptFlow.cend(), [this](const PromptFlowStep& step) {
-                       return containsModel(step.modelId, ModelCategory::LlmChat);
-                   });
-    return false;
-}
-
-QString ServiceClient::runPromptFlow(const PromptFlowRequest& request)
-{
-    if (!canRunPromptFlow(request.presetId)) return {};
-    const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    PendingJob job;
-    job.promptFlow = true;
-    m_pendingJobs.insert(jobId, job);
-    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
-        {"type", "submit"}, {"jobId", jobId}, {"operation", "prompt-flow.run"},
-        {"options", QJsonObject{{"presetId", request.presetId}, {"prompt", request.prompt},
-                                {"negativePrompt", request.negativePrompt}}}}).toJson(QJsonDocument::Compact)));
-    return jobId;
-}
-
 QString ServiceClient::submit(ImageOperation operation, const QJsonObject &options, const QList<QByteArray> &inputImages)
 {
     QString modelId = options.value("modelId").toString();
     if (modelId.isEmpty() && m_routing && operation == ImageOperation::Generate && options.contains("presetId"))
         for (const auto &preset : m_routing->presets)
             if (preset.id == options.value("presetId").toString()) { modelId = preset.model.modelId; break; }
+    if (modelId.isEmpty() && m_routing && operation == ImageOperation::Edit && options.contains("qualityId"))
+        if (const auto *quality = m_routing->editingQuality(options.value("qualityId").toString()))
+            modelId = quality->model.modelId;
     if (!canSubmit(operation, modelId)) return {};
     const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     PendingJob job;
@@ -339,8 +330,7 @@ void ServiceClient::handleTextMessage(const QString &message)
     if (type == QStringLiteral("capabilities")) {
         const QJsonArray operations = object.value(QStringLiteral("operations")).toArray();
         updateCapabilities({operations.contains("image.generate"), operations.contains("image.upscale"),
-            operations.contains("image.edit"), operations.contains("prompt.enhance"), operations.contains("model-routing"),
-            operations.contains("prompt-flow.run")});
+            operations.contains("image.edit"), operations.contains("prompt.enhance"), operations.contains("model-routing")});
         if (m_capabilities.modelRouting) requestModelRouting();
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
@@ -419,7 +409,7 @@ void ServiceClient::handleTextMessage(const QString &message)
         else if (type == "model-routing.configure.completed") emit modelRoutingConfigured();
         return;
     }
-    if (type == "models.styles.changed") { requestModels(); return; }
+    if (type == "models.styles.changed" || type == "models.changed") { requestModels(); return; }
     if (type == "models.companion.delete.completed") {
         emit companionDeleted(object.value("id").toString(), object.value("role").toString());
         requestModels(); return;
@@ -485,18 +475,6 @@ void ServiceClient::handleTextMessage(const QString &message)
             emit promptEnhancementFinished({jobId, true, object.value("prompt").toString(), {}, {}});
             return;
         }
-        if (m_pendingJobs.value(jobId).promptFlow) {
-            if (object.value("operation") != "prompt-flow.run" || !object.value("prompt").isString()
-                || object.value("prompt").toString().trimmed().isEmpty() || !object.value("negativePrompt").isString()) {
-                failJob(jobId, "invalid-result", tr("The service returned an invalid prompt flow result"));
-                return;
-            }
-            m_pendingJobs.remove(jobId);
-            emit jobStateChanged(jobId, JobState::Completed, -1);
-            emit promptFlowFinished({jobId, true, object.value("prompt").toString(),
-                                     object.value("negativePrompt").toString(), {}, {}});
-            return;
-        }
         auto &job = m_pendingJobs[jobId];
         job.mimeType = object.value(QStringLiteral("mimeType")).toString();
         job.prompt = object.value(QStringLiteral("prompt")).toString();
@@ -518,9 +496,7 @@ void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
 {
     if (m_capabilities.imageGeneration == capabilities.imageGeneration && m_capabilities.imageUpscale == capabilities.imageUpscale && m_capabilities.imageEdit == capabilities.imageEdit
         && m_capabilities.promptEnhancement == capabilities.promptEnhancement
-        && m_capabilities.modelRouting == capabilities.modelRouting
-        && m_capabilities.promptFlow == capabilities.promptFlow
-) return;
+        && m_capabilities.modelRouting == capabilities.modelRouting) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
 }
@@ -576,7 +552,6 @@ void ServiceClient::failJob(const QString &jobId, const QString &errorCode, cons
     m_resultJobs.removeAll(jobId);
     emit jobStateChanged(jobId, JobState::Failed, -1);
     if (job.promptEnhancement) emit promptEnhancementFinished({jobId, false, {}, errorCode, message});
-    else if (job.promptFlow) emit promptFlowFinished({jobId, false, {}, {}, errorCode, message});
     else emit imageJobFinished({jobId, job.operation, false, {}, job.mimeType, errorCode, message});
 }
 

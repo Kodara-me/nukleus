@@ -43,8 +43,13 @@ public:
     quint16 serverPort() const;
 
 private:
-    enum class Operation { Generate, Upscale, Edit, PromptEnhance, PromptFlow };
-    struct PromptFlowRun;
+    enum class Operation { Generate, Upscale, Edit, PromptEnhance };
+    // A routed generation's submitted prompts, returned without preset prefixes.
+    struct RoutedPrompts
+    {
+        QString prompt;
+        QString negativePrompt;
+    };
     struct Submission;
     struct Job;
 
@@ -65,7 +70,6 @@ private:
     void enqueue(std::shared_ptr<Job> job);
     void startNextJob();
     void runActiveJob();
-    void startPromptFlowStep();
     bool startLlm(const QString &modelPath, const QJsonObject &parameters, const QString &system, const QString &input,
                   bool penalizeRepeats = true);
     void cancelJobsFor(QWebSocket *socket);
@@ -74,9 +78,6 @@ private:
     void handleUpscaleFinished(const SdCliUpscaleResult &result);
     bool isPromptEnhancementReady() const;
     void submitPromptEnhancement(QWebSocket* socket, const QJsonObject& message);
-    void submitPromptFlow(QWebSocket *socket, const QJsonObject &message);
-    bool preparePromptFlow(QWebSocket *socket, const QString &jobId, const KiraService::GenerationPreset &preset,
-                           PromptFlowRun &flow) const;
     void startPromptEnhancement();
     void handlePromptEnhancementFinished(int exitCode, QProcess::ExitStatus status);
     void sendCapabilities(QWebSocket *socket) const;

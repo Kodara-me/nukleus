@@ -25,10 +25,13 @@ standard LLM values: temperature 0.8, topP 0.95, contextLength 4096, maxTokens 1
 ```
 
 Per-job overrides accept temperature, topP, contextLength and maxTokens with
-standard LLM validation, and string systemPrompt up to 64 KiB. Unknown keys fail.
+standard LLM validation, string systemPrompt up to 64 KiB and boolean
+penalizeRepeats (default true). false runs repetition penalty 1.0 over no tokens,
+so faithful rewrites (translation, in-language improvement) can
+reuse the input's words. Unknown keys fail.
 Overrides never change model recommendations. Empty input requests a new
 description using the system instructions. Temperature zero selects greedy output.
-The subprocess uses fixed repetition penalty 1.1 and top-k 20.
+The subprocess uses repetition penalty 1.1 (unless penalizeRepeats is false) and top-k 20.
 KIRA_LLAMA_COMPLETION selects the executable. Preserve the ten-minute timeout,
 1 MiB output limit, single-job queue, disconnect cancellation and explicit errors.
 
@@ -88,7 +91,7 @@ when provided, the object must contain exactly the category's complete fields:
 | Category | Fields and validation |
 | --- | --- |
 | image-generation | `width` and `height`: identical integers 256–2048, multiples of 256; `steps`: integer 1–200; `cfgScale`: number 0–100; `sampler` and `scheduler`: allowed strings; `clipSkip`: -1 or integer 1–12 |
-| llm-chat | `temperature`: number 0–2; `topP`: number >0 and ≤1; `contextLength`: integer 256–131072; `maxTokens`: integer 1–contextLength |
+| llm-chat | `temperature`: number 0–2; `topP`: number >0 and ≤1; `contextLength`: integer 256–131072; `maxTokens`: integer 1–contextLength; optional booleans `canBeTextEncoder`, `defaultPromptEnhancer` and `defaultPromptTranslator` (default false) |
 | upscaler | No options: empty object only. No explicit-content classification. |
 | companion | `subtype`: exactly `vae` or `mmproj`; MMPROJ requires GGUF. |
 
@@ -109,6 +112,15 @@ object. Errors include the model `id` and `invalid-model-configure`. The SDK and
 manager expose `configureModel()` and a `modelConfigured` signal. Only successful
 service writes count as saved. Recommendations survive service restarts and are
 removed with the model; existing companion relationships remain intact.
+After a successful configure the service broadcasts `models.changed` with `id`
+to the other authenticated clients; SDK/Manager refresh the catalogue on it.
+
+At most one LLM carries `defaultPromptEnhancer: true` and at most one carries
+`defaultPromptTranslator: true`; the same model may hold both. Installing or
+configuring an LLM with a role set clears that role on every other LLM in the
+same atomic metadata write. Unchecking leaves the role unassigned. The SDK
+exposes `defaultPromptEnhancerModelId()` and `defaultPromptTranslatorModelId()`
+(empty when unassigned). No job uses these roles yet.
 
 Only one model installation is active globally, including its sequential
 companion download. Further requests fail with `model-install-busy` and the
@@ -261,9 +273,9 @@ shell-quoted text for diagnosis; execution still uses QProcess argument lists.
 
 `capabilities.operations` includes `image.edit` when the image backend is ready. Submit an installed Image-generation `modelId`, nonblank `prompt`, source `width`/`height`, and generation options through `submit` with operation `image.edit`. The service requires source bytes through the `upload-required` binary upload flow, even if `hasInput` is omitted. Optional `inputCount` (1–8, default 1) sets the number of images: the service sends one `upload-required` per image (`inputIndex` 0…n-1; role `source` for index 0, `reference` otherwise) and the client answers each with one binary frame in order. The first image is the one to edit; all are passed to sd-cli as repeated `-r` arguments in that order. Validation, queue/progress, result bytes and job errors follow the generation lifecycle. Results identify `image.edit`. Optional installed LLM, VAE and mmproj companions are resolved by the daemon; clients never supply paths. SDK clients use `submitEdit(ImageGenerationRequest)` and `ServiceCapabilities::imageEdit`.
 
-### Preset prompt flows
+### Preset routing
 
-Each `model-routing` preset (routing document version 5) carries an integer
+Each `model-routing` preset (routing document version 6) carries an integer
 `identityViews` of 1, 2 or 4: the number of identity portraits clients request
 sequentially with that preset. The service only stores and validates it;
 documents of versions 1–4 load with 1.
@@ -271,41 +283,31 @@ documents of versions 1–4 load with 1.
 An `image.generate` with a `presetId` is routed: the service uses the preset's
 assigned model and fills omitted `steps`/`cfgScale` from its saved snapshot. An
 unassigned preset fails with `model-routing-unavailable`. Presets have no
-quality tiers; `qualityId` is not accepted. `image.edit` is never routed and
-rejects `presetId`; clients submit the editing assignment's `modelId`.
+quality tiers; `image.generate` rejects `qualityId`.
 
-A routed `image.generate` whose preset has a non-empty `promptFlow` runs its LLM
-steps in order inside the same job, before image generation. Every step must
-have an installed GGUF `llm-chat` model and `llama-completion` must be available;
-otherwise submission fails with `model-routing-unavailable` (naming the step),
-`llm-format-unsupported` or `backend-not-ready`. Each step receives the JSON
-object `{"positive": string, "negative": string}` (the trimmed prompts) in a
-single user message, after its instructions plus a fixed JSON reply contract
-(no separate system prompt, which some chat templates reject without a user
-query), and must reply with an object of the same shape; surrounding text
-or code fences are ignored, and an omitted `negative` keeps the previous value.
-Preset prefixes are composed once onto the final prompts after the last step.
-Before each step the job emits `progress` with stage `enhancing-prompt`,
-`percentage` 0, `statusText` (step name), 1-based `flowStep`, `flowSteps` and
-`flowStepName`/`flowStepNameFr`. A failing step, timeout or unparsable reply
-ends the job with `prompt-flow-failed`, naming the step.
+The routing document's `editingQualities` array holds the fixed `edit-low`
+(Fast), `edit-medium` (Balanced) and `edit-high` (Quality) entries, each with
+`id`, `name`, `nameFr`, `modelId`, optional `steps`/`cfgScale`, a boolean
+`default` and `positivePrefix`/`negativePrefix` strings (empty when absent); exactly one is the default, which clients preselect and use when the
+user makes no quality choice. An `image.edit` with a `qualityId` is routed: the
+service uses that quality's model and fills omitted `steps`/`cfgScale` from its
+snapshot. After validating the original `prompt`, it places the quality's
+prefixes first (comma-separated) in the prompt and negative prompt passed to
+sd-cli. Prefixes never pass through an LLM and results never include them. It rejects `presetId`, `styleId` and a conflicting `modelId` with
+`invalid-request`; an unknown or unassigned quality fails with
+`model-routing-unavailable`. An `image.edit` without `qualityId` uses its
+`modelId` directly.
 
 The routed generation `result` message carries `prompt` and `negativePrompt`:
-the final prompts without preset prefixes. Optional boolean `skipPromptFlow`
-(routed generation only) submits the prompts as final prompts and runs no step.
-SDK clients set `ImageGenerationRequest::skipPromptFlow` and read
-`ImageJobResult::prompt`/`negativePrompt` and the `GenerationProgress` flow
-fields.
+the submitted (trimmed) prompts without preset prefixes. SDK clients read
+`ImageJobResult::prompt`/`negativePrompt`.
 
-`capabilities.operations` includes `prompt-flow.run` with `prompt.enhance`.
-Submit operation `prompt-flow.run` with exactly `presetId`, `prompt` and optional
-`negativePrompt` (strings of at most 64 KiB) to preview a preset's flow without
-generating an image. It shares the single job queue, step validation, progress
-and `prompt-flow-failed` errors; a preset without steps fails with
-`prompt-flow-empty`. Success sends `{type: "result", operation:
-"prompt-flow.run", prompt, negativePrompt}` with the final unprefixed prompts.
-SDK clients use `canRunPromptFlow(presetId)`, `runPromptFlow(PromptFlowRequest)`,
-`promptFlowFinished(PromptFlowResult)` and `ServiceCapabilities::promptFlow`.
+Presets have no prompt flows: a routed generation never runs an LLM, and there is
+no `prompt-flow.run` operation or `skipPromptFlow` option (an unknown option fails
+with `invalid-request`). Routing documents saved with a `promptFlow` still load;
+it is ignored and no longer written. Clients translate or improve prompts
+themselves through `prompt.enhance` with the LLMs marked `defaultPromptTranslator`
+and `defaultPromptEnhancer`.
 
 
 

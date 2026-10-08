@@ -15,13 +15,15 @@ QJsonObject defaultModelOptions(const QString &category)
                 {"sampler", ""}, {"scheduler", ""}, {"canEdit", true}, {"canGenerate", true},
                 {"vaeModelId", ""}, {"textEncoderModelId", ""}};
     if (category == "llm-chat")
-        return {{"temperature", 0.8}, {"topP", 0.95}, {"contextLength", 4096}, {"maxTokens", 1024}, {"canBeTextEncoder", false}};
+        return {{"temperature", 0.8}, {"topP", 0.95}, {"contextLength", 4096}, {"maxTokens", 1024}, {"canBeTextEncoder", false},
+                {"defaultPromptEnhancer", false}, {"defaultPromptTranslator", false}};
     if (category == "upscaler")
         return {};
     if (category == "companion")
         return {{"subtype", "vae"}};
     return {};
 }
+QStringList exclusiveLlmRoles() { return {"defaultPromptEnhancer", "defaultPromptTranslator"}; }
 bool validateModelOptions(const QString &category, const QJsonObject &options, QString *error)
 {
     const auto fail = [error]
@@ -36,7 +38,8 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
     auto required = defaults;
     if (category == "image-generation")
         for (const auto &key : {"canEdit", "canGenerate", "vaeModelId", "textEncoderModelId"}) required.remove(key);
-    if (category == "llm-chat") required.remove("canBeTextEncoder");
+    if (category == "llm-chat")
+        for (const auto &key : QStringList{"canBeTextEncoder"} + exclusiveLlmRoles()) required.remove(key);
     for (auto it = required.begin(); it != required.end(); ++it)
         if (!options.contains(it.key())) return fail();
     for (auto it = options.begin(); it != options.end(); ++it)
@@ -66,7 +69,8 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
     }
     else if (category == "llm-chat")
     {
-        if (options.contains("canBeTextEncoder") && !options.value("canBeTextEncoder").isBool()) return fail();
+        for (const auto &key : QStringList{"canBeTextEncoder"} + exclusiveLlmRoles())
+            if (options.contains(key) && !options.value(key).isBool()) return fail();
         if (!number("temperature", 0, 2) || !number("topP", 0, 1) || options.value("topP").toDouble() == 0 ||
             !number("contextLength", 256, 131072, true) ||
             !number("maxTokens", 1, options.value("contextLength").toDouble(), true))

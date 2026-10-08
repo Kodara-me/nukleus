@@ -97,6 +97,12 @@ class ManagerUiTest final : public QObject
         auto *eligible = form.findChild<QCheckBox*>("canBeTextEncoder");
         QVERIFY(!eligible->isChecked()); eligible->setChecked(true);
         QVERIFY(form.options().value("canBeTextEncoder").toBool());
+        for (const auto &role : {"defaultPromptEnhancer", "defaultPromptTranslator"}) {
+            auto *roleCheck = form.findChild<QCheckBox*>(role);
+            QVERIFY(roleCheck && !roleCheck->isChecked()); roleCheck->setChecked(true);
+            QVERIFY(form.options().value(role).toBool());
+        }
+        QVERIFY(KiraService::Protocol::validateModelOptions("llm-chat", form.options()));
     }
     void savesConnectionOnlyAfterAuthentication()
     {
@@ -166,7 +172,6 @@ class ManagerUiTest final : public QObject
         QTRY_VERIFY(client.modelListAvailable());
         send({{"type", "capabilities"}, {"operations", QJsonArray{"model-routing"}}});
         auto routing = KiraService::Protocol::starterModelRouting();
-        routing.presets[1].promptFlow = {{"enhance", "Enhance", "Améliorer", {}, "Improve."}};
         send({{"type", "model-routing.get.completed"}, {"routing", KiraService::Protocol::modelRoutingToJson(routing)}});
         QTRY_VERIFY(client.modelRouting().has_value());
         const auto originalLocale = QLocale();
@@ -177,7 +182,6 @@ class ManagerUiTest final : public QObject
         QVERIFY(tree);
         QCOMPARE(tree->dragDropMode(), QAbstractItemView::NoDragDrop);
         QCOMPARE(tree->editTriggers(), QAbstractItemView::EditTriggers(QAbstractItemView::NoEditTriggers));
-        QVERIFY(!dialog.findChild<QAction *>("addPreset"));
         QVERIFY(!dialog.findChild<QAction *>("addQuality"));
         QVERIFY(!dialog.findChild<QAction *>("removeRoutingItem"));
         auto *model = qobject_cast<QStandardItemModel *>(tree->model());
@@ -185,11 +189,12 @@ class ManagerUiTest final : public QObject
         auto *editing = model->item(1);
         QCOMPARE(generation->rowCount(), 2);
         auto *preset = generation->child(0);
-        QCOMPARE(preset->rowCount(), 1);
+        QCOMPARE(preset->rowCount(), 0); // Presets have no prompt flow children.
         QCOMPARE(preset->text(), QString("Photorealism"));
-        QCOMPARE(preset->child(0)->text(), QString("Prompt flow (0 steps)"));
-        QCOMPARE(generation->child(1)->child(0)->text(), QString("Prompt flow (1 step)"));
-        QCOMPARE(editing->rowCount(), 0);
+        QCOMPARE(editing->rowCount(), 3);
+        QCOMPARE(editing->child(0)->text(), QString("Fast"));
+        QCOMPARE(editing->child(1)->text(), QString("Balanced"));
+        QCOMPARE(editing->child(2)->text(), QString("Quality"));
         QVERIFY(!(preset->flags() & Qt::ItemIsEditable));
         QVERIFY(!(preset->flags() & Qt::ItemIsDragEnabled));
         QVERIFY(!dialog.findChild<QCheckBox *>("qualityPermanent"));
@@ -227,45 +232,31 @@ class ManagerUiTest final : public QObject
         assignment->setCurrentIndex(1);
         QCOMPARE(steps->value(), 88); QCOMPARE(cfg->value(), 9.25);
         steps->setValue(4); cfg->setValue(1.0);
+        auto *defaultQuality = dialog.findChild<QCheckBox *>("editingDefaultQuality");
+        QVERIFY(defaultQuality);
         tree->setCurrentIndex(editing->index());
-        QVERIFY(!positive->isVisible()); QVERIFY(assignment->isVisible());
+        QVERIFY(!assignment->isVisible()); // The Editing group holds the qualities.
+        tree->setCurrentIndex(generation->child(0)->index());
+        QVERIFY(!defaultQuality->isVisible());
+        tree->setCurrentIndex(editing->child(1)->index());
+        QVERIFY(positive->isVisible()); QVERIFY(assignment->isVisible()); // Qualities have prefixes...
+        QVERIFY(!identityViews->isVisible()); // ...but no names or identity views.
+        QVERIFY(!dialog.findChild<QLineEdit *>("presetName")->isVisible());
+        QVERIFY(positive->toPlainText().isEmpty());
+        positive->setPlainText("sharp details");
+        negative->setPlainText("blurry");
+        QVERIFY(defaultQuality->isVisible());
+        QVERIFY(defaultQuality->isChecked()); QVERIFY(!defaultQuality->isEnabled()); // Balanced starts as the default.
         assignment->setCurrentIndex(1);
         QCOMPARE(steps->value(), 88); QCOMPARE(cfg->value(), 9.25);
         steps->setValue(12); cfg->setValue(2.25);
-        auto *flowItem = generation->child(1)->child(0);
-        auto *flowSteps = dialog.findChild<QListWidget *>("flowSteps");
-        auto *stepName = dialog.findChild<QLineEdit *>("flowStepName");
-        auto *stepModel = dialog.findChild<QComboBox *>("flowStepModel");
-        auto *instructions = dialog.findChild<QPlainTextEdit *>("flowStepInstructions");
-        auto *addStep = dialog.findChild<QAbstractButton *>("addFlowStep");
-        auto *removeStep = dialog.findChild<QAbstractButton *>("removeFlowStep");
-        auto *moveDown = dialog.findChild<QAbstractButton *>("moveFlowStepDown");
-        QVERIFY(flowSteps && stepName && stepModel && instructions && addStep && removeStep && moveDown);
-        tree->setCurrentIndex(preset->child(0)->index());
-        QVERIFY(flowSteps->isVisible());
-        QCOMPARE(flowSteps->count(), 0);
-        QVERIFY(!stepName->isEnabled()); QVERIFY(!removeStep->isEnabled());
-        tree->setCurrentIndex(flowItem->index());
-        QCOMPARE(flowSteps->count(), 1);
-        QCOMPARE(flowSteps->item(0)->text(), QString("1. Enhance — Unassigned"));
-        QCOMPARE(stepName->text(), QString("Enhance"));
-        QCOMPARE(instructions->toPlainText(), QString("Improve."));
-        QCOMPARE(stepModel->currentData().toString(), QString());
-        QTest::keyClicks(stepName, "d");
-        QCOMPARE(flowSteps->item(0)->text(), QString("1. Enhanced — Unassigned"));
-        for (int i = 0; i < 3; ++i) addStep->click();
-        QCOMPARE(flowSteps->count(), 4);
-        QCOMPARE(flowItem->text(), QString("Prompt flow (4 steps)"));
-        QVERIFY(!addStep->isEnabled()); // At most four steps.
-        QCOMPARE(flowSteps->currentRow(), 3);
-        removeStep->click(); removeStep->click();
-        QCOMPARE(flowSteps->count(), 2);
-        flowSteps->setCurrentRow(0);
-        QCOMPARE(stepName->text(), QString("Enhanced"));
-        moveDown->click();
-        QCOMPARE(flowSteps->currentRow(), 1);
-        QCOMPARE(flowSteps->item(1)->text(), QString("2. Enhanced — Unassigned"));
-        instructions->setPlainText("Translate to English.");
+        tree->setCurrentIndex(editing->child(2)->index());
+        QVERIFY(!defaultQuality->isChecked()); QVERIFY(defaultQuality->isEnabled());
+        defaultQuality->click(); // Moving the default clears it from Balanced.
+        QVERIFY(!defaultQuality->isEnabled());
+        tree->setCurrentIndex(editing->child(1)->index());
+        QVERIFY(!defaultQuality->isChecked());
+        QVERIFY(!dialog.findChild<QWidget *>("promptFlowPage"));
         if (qEnvironmentVariableIsSet("KIRA_MANAGER_SCREENSHOT_DIR")) {
             const QDir directory(qEnvironmentVariable("KIRA_MANAGER_SCREENSHOT_DIR"));
             QVERIFY(directory.mkpath("."));
@@ -275,14 +266,11 @@ class ManagerUiTest final : public QObject
             tree->setCurrentIndex(preset->index());
             QCoreApplication::processEvents();
             QVERIFY(dialog.grab().save(directory.filePath("routing-preset.png")));
-            tree->setCurrentIndex(flowItem->index());
-            QCoreApplication::processEvents();
-            QVERIFY(dialog.grab().save(directory.filePath("routing-flow.png")));
         }
         QVERIFY(save->isEnabled()); save->click();
         QTRY_VERIFY(m_messages.last().value("type") == "model-routing.configure");
         const auto sent = m_messages.last().value("routing").toObject();
-        QCOMPARE(sent.value("version").toInt(), 5);
+        QCOMPARE(sent.value("version").toInt(), 6);
         const auto presets = sent.value("presets").toArray();
         QCOMPARE(presets.size(), 2);
         const auto savedPreset = presets.first().toObject();
@@ -292,14 +280,7 @@ class ManagerUiTest final : public QObject
         QVERIFY(!savedPreset.contains("qualities"));
         const auto parsed = KiraService::Protocol::modelRoutingFromJson(sent);
         QVERIFY(parsed);
-        const auto &flow = parsed->presets[1].promptFlow;
-        QCOMPARE(flow.size(), 2);
-        QCOMPARE(flow[0].name, QString("Step 2"));
-        QCOMPARE(flow[0].nameFr, QString("Étape 2"));
-        QCOMPARE(flow[1].id, QString("enhance"));
-        QCOMPARE(flow[1].name, QString("Enhanced"));
-        QCOMPARE(flow[1].instructions, QString("Translate to English."));
-        QVERIFY(parsed->presets[0].promptFlow.isEmpty());
+        QVERIFY(!savedPreset.contains("promptFlow"));
         QCOMPARE(parsed->presets[0].identityViews, 4);
         QCOMPARE(parsed->presets[1].identityViews, 1);
         QCOMPARE(parsed->presets[0].model.modelId, assignedModelId);
@@ -307,9 +288,16 @@ class ManagerUiTest final : public QObject
         QCOMPARE(parsed->presets[0].model.cfgScale, std::optional<double>(1.0));
         QCOMPARE(parsed->presets[1].model.steps, std::optional<int>(37));
         QCOMPARE(parsed->presets[1].model.cfgScale, std::optional<double>(5.75));
-        QCOMPARE(parsed->editing.modelId, assignedModelId);
-        QCOMPARE(sent.value("editing").toObject().value("steps").toInt(), 12);
-        QCOMPARE(sent.value("editing").toObject().value("cfgScale").toDouble(), 2.25);
+        QCOMPARE(parsed->editingQualities[1].model.modelId, assignedModelId);
+        QVERIFY(parsed->editingQualities[0].model.modelId.isEmpty());
+        QCOMPARE(parsed->defaultEditingQuality()->id, QString("edit-high"));
+        const auto balanced = sent.value("editingQualities").toArray()[1].toObject();
+        QCOMPARE(parsed->editingQualities[1].positivePrefix, QString("sharp details"));
+        QCOMPARE(parsed->editingQualities[1].negativePrefix, QString("blurry"));
+        QVERIFY(parsed->editingQualities[2].positivePrefix.isEmpty());
+        QCOMPARE(parsed->presets[0].positivePrefix, QString("line one\nline two")); // Kept apart from qualities.
+        QCOMPARE(balanced.value("steps").toInt(), 12);
+        QCOMPARE(balanced.value("cfgScale").toDouble(), 2.25);
         QVERIFY(dialog.isVisible()); QVERIFY(!save->isEnabled());
         send({{"type", "error"}, {"operation", "model-routing.configure"}, {"message", "Retry"}});
         QTRY_VERIFY(save->isEnabled());
@@ -325,6 +313,65 @@ class ManagerUiTest final : public QObject
         QMetaObject::invokeMethod(&canceled, "reject");
         QCOMPARE(m_messages.size(), count);
         QCOMPARE(client.modelRouting()->presets.first().positivePrefix, QString("line one\nline two"));
+    }
+    void addsAndRemovesPresets()
+    {
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false); client.connectToService();
+        QTRY_VERIFY(client.modelListAvailable());
+        send({{"type", "capabilities"}, {"operations", QJsonArray{"model-routing"}}});
+        const auto routing = KiraService::Protocol::starterModelRouting();
+        send({{"type", "model-routing.get.completed"}, {"routing", KiraService::Protocol::modelRoutingToJson(routing)}});
+        QTRY_VERIFY(client.modelRouting().has_value());
+        ModelRoutingDialog dialog(&client); dialog.show();
+        auto *tree = dialog.findChild<KiraUi::TreeView *>("routingTree");
+        auto *generation = qobject_cast<QStandardItemModel *>(tree->model())->item(0);
+        auto *editing = qobject_cast<QStandardItemModel *>(tree->model())->item(1);
+        auto *add = dialog.findChild<QAbstractButton *>("addPreset");
+        auto *remove = dialog.findChild<QAbstractButton *>("removePreset");
+        auto *name = dialog.findChild<QLineEdit *>("presetName");
+        auto *nameFr = dialog.findChild<QLineEdit *>("presetNameFr");
+        auto *save = dialog.findChild<QPushButton *>("saveRouting");
+        QVERIFY(add && remove && name && nameFr && save);
+        QVERIFY(add->isEnabled()); QVERIFY(remove->isEnabled());
+        tree->setCurrentIndex(editing->index());
+        QVERIFY(!remove->isEnabled()); // Editing is not a preset.
+        add->click();
+        QCOMPARE(generation->rowCount(), 3);
+        auto *added = generation->child(2);
+        QCOMPARE(tree->currentIndex(), added->index());
+        QCOMPARE(added->rowCount(), 0);
+        QCOMPARE(name->text(), QString("New preset"));
+        QCOMPARE(nameFr->text(), QString("Nouveau préréglage"));
+        name->selectAll(); QTest::keyClicks(name, "Portrait");
+        QCOMPARE(added->text(), QString("Portrait"));
+        nameFr->selectAll(); QTest::keyClick(nameFr, Qt::Key_Delete);
+        QVERIFY(!save->isEnabled()); // Both names are required.
+        QTest::keyClicks(nameFr, "Portrait FR");
+        QVERIFY(save->isEnabled());
+        tree->setCurrentIndex(generation->child(0)->index());
+        remove->click();
+        QCOMPARE(generation->rowCount(), 2);
+        QCOMPARE(generation->child(0)->text(), QString("Illustration"));
+        tree->setCurrentIndex(generation->child(0)->index());
+        remove->click();
+        QCOMPARE(generation->rowCount(), 1);
+        QVERIFY(!remove->isEnabled()); // Generation keeps at least one preset.
+        for (int i = 1; i < KiraService::Protocol::MaximumGenerationPresets; ++i) add->click();
+        QVERIFY(!add->isEnabled());
+        for (int i = 1; i < KiraService::Protocol::MaximumGenerationPresets; ++i) {
+            tree->setCurrentIndex(generation->child(1)->index());
+            remove->click();
+        }
+        save->click();
+        QTRY_VERIFY(m_messages.last().value("type") == "model-routing.configure");
+        const auto parsed = KiraService::Protocol::modelRoutingFromJson(m_messages.last().value("routing").toObject());
+        QVERIFY(parsed);
+        QCOMPARE(parsed->presets.size(), 1);
+        QVERIFY(parsed->presets[0].id.startsWith("preset-"));
+        QCOMPARE(parsed->presets[0].name, QString("Portrait"));
+        QCOMPARE(parsed->presets[0].nameFr, QString("Portrait FR"));
+        QCOMPARE(parsed->presets[0].identityViews, 1);
     }
     void initTestCase()
     {

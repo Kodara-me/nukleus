@@ -234,6 +234,12 @@ void SdCliRunner::appendGenerationOutput(const QByteArray &data, bool standardEr
         newlineIndex = pending.indexOf(QLatin1Char('\n'));
         carriageReturnIndex = pending.indexOf(QLatin1Char('\r'));
     }
+    // The progress bar's current counter has no terminator until the next redraw; read it now
+    // instead of one step late. Its full line is still logged when it ends.
+    if (!pending.isEmpty()) {
+        if (const auto progress = m_progressParser.processPartialLine(pending))
+            emit generationProgressChanged(*progress);
+    }
 }
 
 void SdCliRunner::flushGenerationOutput(bool standardError)

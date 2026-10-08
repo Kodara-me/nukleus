@@ -27,6 +27,9 @@ public:
     bool canSubmit(ImageOperation operation, const QString &modelId) const;
     bool modelListAvailable() const;
     QList<ModelInfo> models(ModelCategory category = ModelCategory::Unknown) const;
+    // Opaque ID of the listed LLM marked as the service-wide default for this role, or empty.
+    QString defaultPromptEnhancerModelId() const;
+    QString defaultPromptTranslatorModelId() const;
     QList<ModelInstall> installs() const;
     void requestModels();
     void requestModelRouting();
@@ -44,9 +47,6 @@ public:
     QString submitUpscale(const ImageUpscaleRequest &request);
     bool canEnhancePrompt(const QString& modelId) const;
     QString enhancePrompt(const PromptEnhancementRequest& request);
-    // True when the preset has a prompt flow whose every step has an available LLM.
-    bool canRunPromptFlow(const QString& presetId) const;
-    QString runPromptFlow(const PromptFlowRequest& request);
 signals:
     void serviceStateChanged(KiraService::ServiceConnectionState state, const QString &code, const QString &detail);
     void capabilitiesChanged(const KiraService::ServiceCapabilities &capabilities);
@@ -65,15 +65,14 @@ signals:
     void generationProgressChanged(const QString &jobId, const KiraService::GenerationProgress &progress);
     void imageJobFinished(const KiraService::ImageJobResult &result);
     void promptEnhancementFinished(const KiraService::PromptEnhancementResult& result);
-    void promptFlowFinished(const KiraService::PromptFlowResult& result);
 private:
+    QString defaultLlmModelId(const QString &role) const;
     struct PendingJob
     {
         ImageOperation operation = ImageOperation::Generate;
         QList<QByteArray> inputImages;
         QString mimeType;
         bool promptEnhancement = false;
-        bool promptFlow = false;
         QString prompt;
         QString negativePrompt;
     };

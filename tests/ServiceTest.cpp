@@ -1,6 +1,8 @@
 #include "KiraService.h"
 #include "ModelCatalog.h"
 #include "ServicePaths.h"
+#include "SdCliProgressParser.h"
+#include "SdCliRunner.h"
 #include <kira/service/ServiceProtocol.h>
 #include <kira/service/ModelOptions.h>
 #include <kira/service/ServiceClient.h>
@@ -81,12 +83,15 @@ private slots:
     void persistsAndProtectsModelRouting();
     void fixedRoutingLabelsAndLegacyMigration();
     void configuresModelRoutingThroughSdk();
+    void keepsSingleDefaultPromptLlms();
     void persistsPromptStyles();
     void enhancesPromptThroughSdk();
-    void runsPresetPromptFlowBeforeGeneration();
+    void routesPresetGenerationWithoutLlm();
     void configuresStylesOverProtocol();
     void generatesWithValidatedOptionsAndVae();
     void validatesRecommendedOptions();
+    void reportsTheRunningSamplingStep();
+    void readsProgressBeforeTheLineEnds();
     void assignsImageReferencesAndProtectsSharedModels();
     void persistsOptionsAndLegacyMetadata();
     void reservesSingleInstallAndCancels();
@@ -125,7 +130,9 @@ void ServiceTest::persistsAndProtectsModelRouting()
     QCOMPARE(routing->presets.size(), 2);
     QCOMPARE(routing->presets.first().name, QString("Photorealism"));
     QVERIFY(routing->presets.first().model.modelId.isEmpty());
-    QVERIFY(routing->editing.modelId.isEmpty());
+    QCOMPARE(routing->editingQualities.size(), 3);
+    QCOMPARE(routing->defaultEditingQuality()->id, QString("edit-medium"));
+    for (const auto &quality : routing->editingQualities) QVERIFY(quality.model.modelId.isEmpty());
     QVERIFY(routing->presets.first().positivePrefix.isEmpty());
     QVERIFY(!QFileInfo::exists(directory.filePath("model-routing.json")));
     QFile model(directory.filePath("test.gguf"));
@@ -136,12 +143,13 @@ void ServiceTest::persistsAndProtectsModelRouting()
     QVERIFY2(catalog.configure(id, options, &error, {}, "Test"), qPrintable(error));
     routing->presets[0].model.modelId = id;
     routing->presets[1].model.modelId = id;
-    routing->editing.modelId = id;
+    routing->editingQualities[2].model.modelId = id;
     QVERIFY2(catalog.configureRouting(*routing, &error), qPrintable(error));
     routing = catalog.routing(&error);
     QCOMPARE(routing->presets[0].model.steps, std::optional<int>(37));
     QCOMPARE(routing->presets[0].model.cfgScale, std::optional<double>(5.75));
-    QCOMPARE(routing->editing.steps, std::optional<int>(37));
+    QCOMPARE(routing->editingQualities[2].model.steps, std::optional<int>(37));
+    QVERIFY(!routing->editingQualities[0].model.steps); // Unassigned qualities keep no snapshot.
     routing->presets[0].model.steps = 4;
     routing->presets[0].model.cfgScale = 1.0;
     QVERIFY(catalog.configureRouting(*routing, &error));
@@ -155,24 +163,13 @@ void ServiceTest::persistsAndProtectsModelRouting()
     const QString llmId = "llm-chat:chat.gguf";
     const auto llmOptions = KiraService::Protocol::defaultModelOptions("llm-chat");
     QVERIFY2(catalog.configure(llmId, llmOptions, &error, {}, "Chat"), qPrintable(error));
-    auto flowRouting = *routing;
-    flowRouting.presets[1].promptFlow = {{"enhance", "Enhance", "Améliorer", llmId, "Translate to English."},
-                                         {"specialist", "Specialist", "Spécialiste", {}, {}}};
-    QVERIFY2(catalog.configureRouting(flowRouting, &error), qPrintable(error));
-    QCOMPARE(catalog.routing(), std::optional<KiraService::ModelRouting>(flowRouting));
-    QVERIFY(!catalog.remove(llmId, &error)); // Assigned flow models cannot be deleted.
-    QVERIFY2(catalog.configure(llmId, llmOptions, &error, {}, "Chat"), qPrintable(error));
-    auto missingFlowModel = flowRouting;
-    missingFlowModel.presets[1].promptFlow[1].modelId = "llm-chat:missing.gguf";
-    QVERIFY(!catalog.configureRouting(missingFlowModel, &error));
-    QVERIFY(catalog.configureRouting(*routing, &error));
-    QVERIFY2(catalog.remove(llmId, &error), qPrintable(error));
+    QVERIFY2(catalog.remove(llmId, &error), qPrintable(error)); // Routing never holds LLMs.
     auto invalid = *routing;
-    invalid.presets[0].name = "Renamed";
+    invalid.presets[0].name = " ";
     QVERIFY(!catalog.configureRouting(invalid, &error));
     invalid = *routing; invalid.presets[0].model.modelId = "image-generation:missing.gguf";
     QVERIFY(!catalog.configureRouting(invalid, &error));
-    invalid = *routing; invalid.editing.modelId = "image-generation:missing.gguf";
+    invalid = *routing; invalid.editingQualities[0].model.modelId = "image-generation:missing.gguf";
     QVERIFY(!catalog.configureRouting(invalid, &error));
     QVERIFY(model.remove());
     QCOMPARE(catalog.routing(), routing); // External disappearance preserves the assignment.
@@ -234,55 +231,85 @@ void ServiceTest::fixedRoutingLabelsAndLegacyMigration()
     QCOMPARE(migrated->presets[0].negativePrefix, QString("saved negative"));
     QCOMPARE(migrated->presets[0].model, (KiraService::ModelAssignment{"image-generation:photo-low", 4, 1.25}));
     QCOMPARE(migrated->presets[1].model, (KiraService::ModelAssignment{"image-generation:drawn-low", 4, 1.25}));
-    QCOMPARE(migrated->editing, (KiraService::ModelAssignment{"image-generation:edit-low", 4, 1.25}));
-    QCOMPARE(migrated->presets[0].promptFlow.size(), 1);
-    auto version2 = tiered; version2.insert("version", 2); // Earlier versions load with empty flows.
+    // Editing keeps all three tiers; the permanent Balanced tier becomes the default.
+    QCOMPARE(migrated->editingQualities[0].model, (KiraService::ModelAssignment{"image-generation:edit-low", 4, 1.25}));
+    QCOMPARE(migrated->editingQualities[1].model, (KiraService::ModelAssignment{"image-generation:edit-medium", 5, 2.25}));
+    QCOMPARE(migrated->editingQualities[2].model, (KiraService::ModelAssignment{"image-generation:edit-high", 6, 3.25}));
+    QCOMPARE(migrated->defaultEditingQuality()->id, QString("edit-medium"));
+    QCOMPARE(migrated->editingQualities[0].name, QString("Fast"));
+    auto version2 = tiered; version2.insert("version", 2); // Retired prompt flows are ignored.
     migrated = KiraService::Protocol::modelRoutingFromJson(version2);
     QVERIFY(migrated.has_value());
-    QVERIFY(migrated->presets[0].promptFlow.isEmpty());
     QCOMPARE(migrated->presets[0].identityViews, 1);
     QCOMPARE(migrated->presets[0].model.modelId, QString("image-generation:photo-low"));
     QCOMPARE(KiraService::Protocol::modelRoutingFromJson(KiraService::Protocol::modelRoutingToJson(fixed)),
         std::optional<KiraService::ModelRouting>(fixed));
-    auto withFlow = fixed;
-    withFlow.presets[0].promptFlow = {{"enhance", "Enhance", "Améliorer", "llm-chat:chat.gguf", "Improve."}};
-    const auto flowJson = KiraService::Protocol::modelRoutingToJson(withFlow);
-    QCOMPARE(flowJson.value("version").toInt(), 5);
-    QCOMPARE(KiraService::Protocol::modelRoutingFromJson(flowJson), std::optional<KiraService::ModelRouting>(withFlow));
-    QCOMPARE(withFlow.presets[0].promptFlow[0].displayLabel(QLocale("fr_CA")), QString("Améliorer"));
-    auto unknownVersion = flowJson; unknownVersion.insert("version", 6);
+    const auto fixedJson = KiraService::Protocol::modelRoutingToJson(fixed);
+    QCOMPARE(fixedJson.value("version").toInt(), 6);
+    QVERIFY(!fixedJson.value("presets").toArray().first().toObject().contains("promptFlow"));
+    auto legacyFlow = fixedJson; // Version-6 documents saved before the removal still load.
+    auto legacyPresets = legacyFlow.value("presets").toArray();
+    auto legacyPreset = legacyPresets[0].toObject();
+    legacyPreset.insert("promptFlow", QJsonArray{QJsonObject{{"id", "enhance"}, {"name", "Enhance"}}});
+    legacyPresets[0] = legacyPreset;
+    legacyFlow.insert("presets", legacyPresets);
+    QCOMPARE(KiraService::Protocol::modelRoutingFromJson(legacyFlow), std::optional<KiraService::ModelRouting>(fixed));
+    auto unknownVersion = fixedJson; unknownVersion.insert("version", 7);
     QVERIFY(!KiraService::Protocol::modelRoutingFromJson(unknownVersion));
-    auto missingFlow = flowJson;
-    auto flowPresets = missingFlow.value("presets").toArray();
-    auto flowPreset = flowPresets[1].toObject(); flowPreset.remove("promptFlow"); flowPresets[1] = flowPreset;
-    missingFlow.insert("presets", flowPresets);
-    QVERIFY(!KiraService::Protocol::modelRoutingFromJson(missingFlow));
-    auto invalidFlow = withFlow; invalidFlow.presets[0].promptFlow.append(invalidFlow.presets[0].promptFlow.first());
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalidFlow)); // Duplicate step ID.
-    invalidFlow = withFlow; invalidFlow.presets[0].promptFlow[0].nameFr = " ";
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalidFlow));
-    invalidFlow = withFlow; invalidFlow.presets[0].promptFlow[0].instructions = QString(65537, 'x');
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalidFlow));
-    invalidFlow = withFlow;
-    for (int i = 1; i < 5; ++i)
-        invalidFlow.presets[0].promptFlow.append({QString("step-%1").arg(i), "Step", "Étape", {}, {}});
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalidFlow)); // At most four steps.
-    invalidFlow.presets[0].promptFlow.removeLast();
-    QVERIFY(KiraService::Protocol::validateModelRouting(invalidFlow));
     auto invalid = fixed; invalid.presets.swapItemsAt(0, 1);
+    QVERIFY(KiraService::Protocol::validateModelRouting(invalid)); // Presets may be reordered.
+    invalid = fixed; invalid.presets.append({"portrait", "Portrait", {}, {}, {}, "Portrait"});
+    QVERIFY(KiraService::Protocol::validateModelRouting(invalid)); // Presets may be added...
+    QCOMPARE(KiraService::Protocol::modelRoutingFromJson(KiraService::Protocol::modelRoutingToJson(invalid)),
+        std::optional<KiraService::ModelRouting>(invalid));
+    invalid.presets.removeFirst();
+    invalid.presets.removeFirst();
+    QVERIFY(KiraService::Protocol::validateModelRouting(invalid)); // ...and removed, keeping at least one.
+    invalid.presets.clear();
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    invalid = fixed; invalid.presets[1].id = invalid.presets[0].id;
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid)); // Duplicate preset ID.
+    invalid = fixed; invalid.presets[0].nameFr = " ";
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    invalid = fixed; invalid.presets[0].name = QString(257, 'x');
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    invalid = fixed;
+    while (invalid.presets.size() < KiraService::Protocol::MaximumGenerationPresets)
+        invalid.presets.append({QString("extra-%1").arg(invalid.presets.size()), "Extra", {}, {}, {}, "Extra"});
+    QVERIFY(KiraService::Protocol::validateModelRouting(invalid));
+    invalid.presets.append({"one-too-many", "Extra", {}, {}, {}, "Extra"});
     QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
     invalid = fixed; invalid.presets[0].model.steps = 201;
     QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
-    invalid = fixed; invalid.editing.steps = 0;
+    invalid = fixed; invalid.editingQualities[0].model.steps = 0;
     QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
-    invalid = fixed; invalid.editing.cfgScale = 101;
+    invalid = fixed; invalid.editingQualities[2].model.cfgScale = 101;
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    invalid = fixed; invalid.editingQualities[0].isDefault = true;
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid)); // Exactly one default.
+    invalid = fixed; invalid.editingQualities[1].isDefault = false;
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    invalid = fixed; invalid.editingQualities[0].name = "Rapid";
+    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid)); // Qualities stay fixed.
+    invalid = fixed; invalid.editingQualities.removeLast();
     QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
     for (const QJsonValue bad : {QJsonValue(1.5), QJsonValue("4"), QJsonValue(false)}) {
         auto json = KiraService::Protocol::modelRoutingToJson(fixed);
-        auto editing = json.value("editing").toObject(); editing.insert("steps", bad);
-        json.insert("editing", editing);
+        auto qualities = json.value("editingQualities").toArray();
+        auto quality = qualities[0].toObject(); quality.insert("steps", bad); qualities[0] = quality;
+        json.insert("editingQualities", qualities);
         QVERIFY(!KiraService::Protocol::modelRoutingFromJson(json));
     }
+    // Versions 4 and 5 stored one editing assignment, copied into every quality.
+    auto version5 = KiraService::Protocol::modelRoutingToJson(fixed);
+    version5.insert("version", 5);
+    version5.remove("editingQualities");
+    version5.insert("editing", QJsonObject{{"modelId", "image-generation:edit.gguf"}, {"steps", 12}, {"cfgScale", 2.25}});
+    const auto copied = KiraService::Protocol::modelRoutingFromJson(version5);
+    QVERIFY(copied.has_value());
+    for (const auto &quality : copied->editingQualities)
+        QCOMPARE(quality.model, (KiraService::ModelAssignment{"image-generation:edit.gguf", 12, 2.25}));
+    QCOMPARE(copied->defaultEditingQuality()->id, QString("edit-medium"));
     QTemporaryDir directory;
     QFile weights(directory.filePath("legacy.gguf"));
     QVERIFY(weights.open(QIODevice::WriteOnly)); weights.write("weights"); weights.close();
@@ -307,19 +334,21 @@ void ServiceTest::fixedRoutingLabelsAndLegacyMigration()
     QCOMPARE(upgraded->presets[0].model.modelId, QString("image-generation:legacy.gguf"));
     QCOMPARE(upgraded->presets[0].model.steps, std::optional<int>(37));
     QVERIFY(upgraded->presets[1].model.modelId.isEmpty());
-    QCOMPARE(upgraded->editing.cfgScale, std::optional<double>(5.75));
+    QCOMPARE(upgraded->editingQualities[0].model.cfgScale, std::optional<double>(5.75));
+    QVERIFY(upgraded->editingQualities[1].model.modelId.isEmpty());
     QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), bytes); file.close(); // Reading never rewrites.
     upgraded->presets[0].model.steps = 4;
     QVERIFY(catalog.configureRouting(*upgraded, &error));
     options.insert("steps", 88); options.insert("cfgScale", 9.25);
     QVERIFY(catalog.configure("image-generation:legacy.gguf", options, &error, {}, "Legacy"));
     QCOMPARE(catalog.routing()->presets[0].model.steps, std::optional<int>(4));
-    QCOMPARE(catalog.routing()->editing.steps, std::optional<int>(37));
+    QCOMPARE(catalog.routing()->editingQualities[0].model.steps, std::optional<int>(37));
     QVERIFY(file.open(QIODevice::ReadOnly));
     const auto saved = QJsonDocument::fromJson(file.readAll()).object();
     file.close();
-    QCOMPARE(saved.value("version").toInt(), 5);
-    QVERIFY(!saved.contains("editingQualities"));
+    QCOMPARE(saved.value("version").toInt(), 6);
+    QVERIFY(!saved.contains("editing"));
+    QCOMPARE(saved.value("editingQualities").toArray().size(), 3);
     QCOMPARE(saved.value("presets").toArray()[0].toObject().value("steps").toInt(), 4);
 }
 
@@ -351,6 +380,48 @@ void ServiceTest::configuresModelRoutingThroughSdk()
     QVERIFY(client.configureModelRouting(routing));
     QTRY_COMPARE(saved.size(), 2);
     QTRY_COMPARE(client.modelRouting(), std::optional<KiraService::ModelRouting>(routing));
+}
+
+void ServiceTest::keepsSingleDefaultPromptLlms()
+{
+    QTemporaryDir directory;
+    QVERIFY(QDir(directory.path()).mkpath("llm"));
+    for (const auto &name : {"first.gguf", "second.gguf"}) {
+        QFile file(directory.filePath(QString("llm/") + name)); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("llm");
+    }
+    KiraServiceConfiguration configuration;
+    configuration.port = 0; configuration.modelRootPath = directory.path();
+    KiraServiceDaemon daemon(configuration);
+    QString error; QVERIFY2(daemon.start(&error), qPrintable(error));
+    KiraService::ServiceClient client, observer;
+    client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
+    observer.setConfiguration(client.endpoint(), {});
+    client.connectToService(); observer.connectToService();
+    QTRY_VERIFY(client.modelListAvailable() && observer.modelListAvailable());
+    QVERIFY(client.defaultPromptEnhancerModelId().isEmpty());
+    QVERIFY(client.defaultPromptTranslatorModelId().isEmpty());
+    auto both = KiraService::Protocol::defaultModelOptions("llm-chat");
+    QVERIFY(!both.value("defaultPromptEnhancer").toBool() && !both.value("defaultPromptTranslator").toBool());
+    both.insert("defaultPromptEnhancer", true); both.insert("defaultPromptTranslator", true);
+    QVERIFY(client.configureModel("llm-chat:first.gguf", both, std::nullopt, QString("First")));
+    QTRY_COMPARE(observer.defaultPromptEnhancerModelId(), QString("llm-chat:first.gguf"));
+    QTRY_COMPARE(observer.defaultPromptTranslatorModelId(), QString("llm-chat:first.gguf"));
+    // Taking one role moves only that role; the other stays on the first model.
+    auto enhancer = KiraService::Protocol::defaultModelOptions("llm-chat");
+    enhancer.insert("defaultPromptEnhancer", true);
+    QVERIFY(client.configureModel("llm-chat:second.gguf", enhancer, std::nullopt, QString("Second")));
+    QTRY_COMPARE(observer.defaultPromptEnhancerModelId(), QString("llm-chat:second.gguf"));
+    QCOMPARE(observer.defaultPromptTranslatorModelId(), QString("llm-chat:first.gguf"));
+    ModelCatalog restored(directory.path(), true);
+    QVERIFY(!restored.modelById("llm-chat:first.gguf")->recommendedOptions.value("defaultPromptEnhancer").toBool());
+    QVERIFY(restored.modelById("llm-chat:first.gguf")->recommendedOptions.value("defaultPromptTranslator").toBool());
+    QVERIFY(restored.modelById("llm-chat:second.gguf")->recommendedOptions.value("defaultPromptEnhancer").toBool());
+    // Unchecking leaves the role unassigned.
+    enhancer.insert("defaultPromptEnhancer", false);
+    QVERIFY(restored.configure("llm-chat:second.gguf", enhancer, &error));
+    QVERIFY(!restored.modelById("llm-chat:first.gguf")->recommendedOptions.value("defaultPromptEnhancer").toBool());
+    enhancer.insert("defaultPromptTranslator", "yes");
+    QVERIFY(!KiraService::Protocol::validateModelOptions("llm-chat", enhancer));
 }
 
 void ServiceTest::persistsPromptStyles()
@@ -900,7 +971,9 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     routing.presets[0].positivePrefix = "  realism  ";
     routing.presets[0].negativePrefix = "  cartoon  ";
     routing.presets[0].model = {"image-generation:plain.gguf", 4, 1.0};
-    routing.editing = {"image-generation:edit.gguf", 12, 2.25};
+    routing.editingQualities[2].model = {"image-generation:edit.gguf", 12, 2.25};
+    routing.editingQualities[2].positivePrefix = "  sharp details  ";
+    routing.editingQualities[2].negativePrefix = "  blurry  ";
     QVERIFY(styleCatalog.configureRouting(routing, &error));
     const QJsonObject routed{{"presetId", "photorealism"},
         {"prompt", "  subject  "}, {"negativePrompt", "  noise  "}, {"hasInput", true}};
@@ -933,15 +1006,39 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
         QTRY_VERIFY(terminal("invalid-route"));
         QCOMPARE(messages.last().value("type").toString(), QString("error"));
     }
-    // Editing is unrouted: clients submit the editing assignment's model directly.
-    for (const auto &field : QList<QPair<QString, QJsonValue>>{{"qualityId", "edit-medium"}, {"presetId", "photorealism"}}) {
-        messages.clear();
+    // Editing is routed by quality: the service resolves its model and fills Steps/CFG.
+    const auto sendEdit = [&](const QString &id, const QJsonObject &options) {
         socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
-            {"type", "submit"}, {"operation", "image.edit"}, {"jobId", "routed-edit"},
-            {"options", QJsonObject{{"modelId", "image-generation:edit.gguf"}, {field.first, field.second},
-                                    {"prompt", "change background"}, {"hasInput", true}}}}).toJson()));
+            {"type", "submit"}, {"operation", "image.edit"}, {"jobId", id}, {"options", options}}).toJson()));
+    };
+    messages.clear();
+    sendEdit("quality-edit", {{"qualityId", "edit-high"}, {"prompt", "change background"}, {"hasInput", true}});
+    QTRY_VERIFY(requestedUpload("quality-edit"));
+    socket.sendBinaryMessage(image);
+    QTRY_VERIFY(terminal("quality-edit"));
+    ++completed;
+    QTRY_COMPARE(images.count(), completed);
+    args = arguments();
+    QVERIFY(args.contains(QDir(root).filePath("edit.gguf")));
+    QCOMPARE(args.value(args.indexOf("--steps") + 1), QString("12"));
+    QCOMPARE(args.value(args.indexOf("--cfg-scale") + 1), QString("2.25"));
+    // The quality's prefixes lead the prompts sent to sd-cli.
+    QCOMPARE(args.value(args.indexOf("--prompt") + 1), QString("sharp details, change background"));
+    QCOMPARE(args.value(args.indexOf("--negative-prompt") + 1), QString("blurry"));
+    for (const auto &field : QList<QPair<QString, QJsonValue>>{
+        {"presetId", "photorealism"}, {"modelId", "image-generation:plain.gguf"}, {"qualityId", ""},
+        {"qualityId", false}, {"styleId", "cinematic"}}) {
+        auto invalidEdit = QJsonObject{{"qualityId", "edit-high"}, {"prompt", "change background"}, {"hasInput", true}};
+        invalidEdit.insert(field.first, field.second);
+        messages.clear(); sendEdit("routed-edit", invalidEdit);
         QTRY_VERIFY(terminal("routed-edit"));
         QCOMPARE(messages.last().value("code").toString(), QString("invalid-request"));
+    }
+    for (const QString quality : {"edit-low", "missing"}) { // Unassigned or unknown quality.
+        messages.clear();
+        sendEdit("unrouted-edit", {{"qualityId", quality}, {"prompt", "change background"}, {"hasInput", true}});
+        QTRY_VERIFY(terminal("unrouted-edit"));
+        QCOMPARE(messages.last().value("code").toString(), QString("model-routing-unavailable"));
     }
     QVERIFY(styleCatalog.configureRouting(KiraService::Protocol::starterModelRouting(), &error));
 
@@ -985,6 +1082,68 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
 
     QVERIFY(detail.contains("Klein'\\''s test"));
 
+}
+
+void ServiceTest::reportsTheRunningSamplingStep()
+{
+    using Stage = KiraService::GenerationProgressStage;
+    SdCliProgressParser parser;
+    parser.begin(4);
+    QVERIFY(parser.processLine("generating image: 1/1 - seed 42").has_value());
+    // The first step starts right after "sampling using": 1 / 4 is running.
+    auto progress = parser.processLine("sampling using Euler method");
+    QVERIFY(progress && progress->stage == Stage::Sampling);
+    QCOMPARE(progress->currentStep, std::optional<int>(1));
+    QCOMPARE(progress->percentage, 15);
+    // sd-cli counts completed steps; the running one is shown.
+    progress = parser.processPartialLine("  |=====>            | 1/4 - 1.00s/it\x1b[K");
+    QVERIFY(progress);
+    QCOMPARE(progress->currentStep, std::optional<int>(2));
+    QCOMPARE(progress->totalSteps, std::optional<int>(4));
+    QCOMPARE(progress->percentage, 34);
+    // The same counter arriving again when its line ends is not repeated.
+    QVERIFY(!parser.processLine("  |=====>            | 1/4 - 1.00s/it\x1b[K"));
+    // A counter cut by a read is ignored until it is complete.
+    QVERIFY(!parser.processPartialLine("  |==========>       | 2/"));
+    QVERIFY(!parser.processPartialLine("  |==========>       | 2/4"));
+    progress = parser.processPartialLine("  |===============>  | 3/4 - 1.00s/it\x1b[K");
+    QCOMPARE(progress->currentStep, std::optional<int>(4)); // The last step shows 4 / 4 while it runs.
+    QCOMPARE(progress->percentage, 71);
+    progress = parser.processLine("  |====================| 4/4 - 1.00s/it\x1b[K");
+    QCOMPARE(progress->currentStep, std::optional<int>(4));
+    QCOMPARE(progress->percentage, 90);
+    QVERIFY(!parser.processLine("sampling completed, taking 4.00s"));
+    QCOMPARE(parser.processLine("decoding 1 latents")->stage, Stage::Decoding);
+}
+
+void ServiceTest::readsProgressBeforeTheLineEnds()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli fixture requires a POSIX shell.");
+#endif
+    QTemporaryDir directory;
+    QFile executable(directory.filePath("sd-cli"));
+    QVERIFY(executable.open(QIODevice::WriteOnly));
+    // Like sd-cli, redraw the bar with a leading carriage return and no line end, then keep sampling.
+    executable.write("#!/bin/sh\nprintf 'generating image: 1/1 - seed 1\\n'\nprintf 'sampling using Euler method\\n'\n"
+                     "printf '\\r  |=====>     | 1/2 - 1.00s/it\\033[K'\nexec sleep 30\n");
+    executable.close();
+    QVERIFY(executable.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+    SdCliRunner runner(executable.fileName());
+    QList<KiraService::GenerationProgress> progress;
+    connect(&runner, &SdCliRunner::generationProgressChanged, this,
+            [&](const KiraService::GenerationProgress &value) { progress.append(value); });
+    GenerationRequest request;
+    request.steps = 2;
+    request.modelPath = directory.filePath("model.gguf");
+    request.outputPath = directory.filePath("output.png");
+    QVERIFY(runner.runGeneration(request));
+    // Step 1 is done and step 2 runs while sd-cli is still sampling, not after its next redraw.
+    QTRY_VERIFY_WITH_TIMEOUT(!progress.isEmpty() && progress.last().currentStep == 2, 10000);
+    QCOMPARE(progress.last().totalSteps, std::optional<int>(2));
+    QSignalSpy finished(&runner, &SdCliRunner::generationFinished);
+    runner.cancel();
+    QTRY_VERIFY(!finished.isEmpty());
 }
 
 void ServiceTest::validatesRecommendedOptions()
@@ -1370,7 +1529,7 @@ void ServiceTest::installsModelAtomically()
     QVERIFY(QFileInfo::exists(finalPath)); QVERIFY(!QFileInfo::exists(finalPath + QStringLiteral(".part")));
 }
 
-void ServiceTest::runsPresetPromptFlowBeforeGeneration()
+void ServiceTest::routesPresetGenerationWithoutLlm()
 {
 #ifdef Q_OS_WIN
     QSKIP("The fake sd-cli and llama-completion fixtures require a POSIX shell.");
@@ -1395,17 +1554,8 @@ void ServiceTest::runsPresetPromptFlowBeforeGeneration()
                           "for argument in \"$@\"; do\n"
                           "if [ \"$previous\" = --output ]; then cp \"$root/fixture.png\" \"$argument\"; fi\n"
                           "previous=\"$argument\"\ndone\n");
-    // The first step answers inside code fences; the second omits negative, which is kept.
-    writeScript("completion", "#!/bin/sh\nroot=$(dirname \"$0\")\nprintf '%s\\n' \"$@\" > \"$root/llm-args\"\n"
-                              "previous=\nfor argument in \"$@\"; do\n"
-                              // The instructions open the message; the JSON input is its last line.
-                              "if [ \"$previous\" = --file ]; then cat \"$argument\" > \"$root/system\"; "
-                              "tail -n 1 \"$argument\" >> \"$root/inputs\"; echo >> \"$root/inputs\"; fi\n"
-                              "previous=\"$argument\"\ndone\n"
-                              "if [ -f \"$root/bad\" ]; then printf 'not json'; exit 0; fi\n"
-                              "if [ -f \"$root/first-done\" ]; then rm \"$root/first-done\"; printf '{\"positive\": \"specialised\"}'; exit 0; fi\n"
-                              "touch \"$root/first-done\"\n"
-                              "printf '```json\\n{\"positive\": \"enhanced\", \"negative\": \"blurry\"}\\n```\\n[end of text]\\n'\n");
+    // Generation never calls an LLM; any call leaves a marker.
+    writeScript("completion", "#!/bin/sh\ntouch \"$(dirname \"$0\")/llm-called\"\nprintf 'unexpected'\n");
     const QString root = directory.filePath("models");
     QVERIFY(QDir().mkpath(QDir(root).filePath("llm")));
     for (const auto &name : {QString("image.gguf"), QString("llm/chat.gguf")}) {
@@ -1420,9 +1570,9 @@ void ServiceTest::runsPresetPromptFlowBeforeGeneration()
         KiraService::Protocol::defaultModelOptions("llm-chat"), &error), qPrintable(error));
     auto routing = KiraService::Protocol::starterModelRouting();
     routing.presets[1].positivePrefix = "illustration";
+    routing.presets[1].negativePrefix = "lowres";
     routing.presets[1].model.modelId = "image-generation:image.gguf";
-    routing.presets[1].promptFlow = {{"enhance", "Enhance", "Améliorer", "llm-chat:chat.gguf", "Translate to English."},
-                                     {"specialist", "Specialist", "Spécialiste", "llm-chat:chat.gguf", ""}};
+    routing.editingQualities[0].model.modelId = "image-generation:image.gguf";
     QVERIFY2(catalog.configureRouting(routing, &error), qPrintable(error));
     KiraServiceConfiguration configuration;
     configuration.port = 0; configuration.modelRootPath = root;
@@ -1432,13 +1582,11 @@ void ServiceTest::runsPresetPromptFlowBeforeGeneration()
     KiraService::ServiceClient client;
     client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
     QSignalSpy finished(&client, &KiraService::ServiceClient::imageJobFinished);
-    QList<KiraService::GenerationProgress> progress;
-    connect(&client, &KiraService::ServiceClient::generationProgressChanged, this,
-            [&](const QString &, const KiraService::GenerationProgress &value) { progress.append(value); });
     client.connectToService();
     QTRY_VERIFY(client.modelRouting().has_value() && client.canSubmit(KiraService::ImageOperation::Generate, "image-generation:image.gguf"));
     KiraService::ImageGenerationRequest request;
     request.prompt = "  un chat roux  ";
+    request.negativePrompt = "blurry";
     request.presetId = "illustration";
     request.width = 512; request.height = 512;
     const auto read = [&](const QString &name) {
@@ -1456,76 +1604,26 @@ void ServiceTest::runsPresetPromptFlowBeforeGeneration()
     QVERIFY(!client.submitGeneration(request).isEmpty());
     auto result = takeResult();
     QVERIFY2(result.succeeded, qPrintable(result.message));
-    QCOMPARE(result.prompt, QString("specialised"));
+    // The result carries the submitted prompts; prefixes reach sd-cli only.
+    QCOMPARE(result.prompt, QString("un chat roux"));
     QCOMPARE(result.negativePrompt, QString("blurry"));
-    QCOMPARE(argument("--prompt"), QString("illustration, specialised")); // Prefixes follow the last step.
-    QCOMPARE(argument("--negative-prompt"), QString("blurry"));
-    const auto inputs = read("inputs").split('\n', Qt::SkipEmptyParts);
-    QCOMPARE(inputs.size(), 2);
-    QCOMPARE(QJsonDocument::fromJson(inputs[0].toUtf8()).object(), (QJsonObject{{"positive", "un chat roux"}, {"negative", ""}}));
-    QCOMPARE(QJsonDocument::fromJson(inputs[1].toUtf8()).object(), (QJsonObject{{"positive", "enhanced"}, {"negative", "blurry"}}));
-    QVERIFY(read("system").startsWith("Improve the image-generation prompts."));
-    QVERIFY(read("system").contains("{\"positive\": string, \"negative\": string}"));
-    // Templates such as Qwen3.5 reject a system prompt formatted without a user query.
-    QVERIFY(!read("llm-args").contains("--system-prompt-file"));
-    // Flow steps disable the repetition penalty, which would also penalize the instructions.
-    QVERIFY(read("llm-args").contains("--repeat-penalty\n1.0\n"));
-    QVERIFY(read("llm-args").contains("--repeat-last-n\n0\n"));
-    QList<int> steps;
-    for (const auto &value : progress)
-        if (value.stage == KiraService::GenerationProgressStage::EnhancingPrompt) {
-            QCOMPARE(value.flowSteps, std::optional<int>(2));
-            steps.append(value.flowStep.value_or(0));
-        }
-    QCOMPARE(steps, (QList<int>{1, 2}));
-    const auto names = std::find_if(progress.cbegin(), progress.cend(), [](const auto &value) { return value.flowStep == 2; });
-    QCOMPARE(names->flowStepName, QString("Specialist"));
-    QCOMPARE(names->flowStepNameFr, QString("Spécialiste"));
-    // Skipping the flow submits the prompts as final prompts without LLM calls.
-    request.prompt = "final words";
-    request.skipPromptFlow = true;
-    QVERIFY(!client.submitGeneration(request).isEmpty());
+    QCOMPARE(argument("--prompt"), QString("illustration, un chat roux"));
+    QCOMPARE(argument("--negative-prompt"), QString("lowres, blurry"));
+    QVERIFY(!QFileInfo::exists(directory.filePath("llm-called")));
+    request.qualityId = "edit-low";
+    QVERIFY(client.submitGeneration(request).isEmpty()); // Generation is routed by preset only.
+    KiraService::ImageGenerationRequest edit;
+    edit.qualityId = "edit-low";
+    edit.prompt = "make it blue";
+    edit.width = 512; edit.height = 512;
+    edit.editImages = {QByteArray::fromBase64(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=")};
+    QVERIFY(!client.submitEdit(edit).isEmpty()); // The SDK resolves the quality's model.
     result = takeResult();
     QVERIFY2(result.succeeded, qPrintable(result.message));
-    QCOMPARE(result.prompt, QString("final words"));
-    QCOMPARE(argument("--prompt"), QString("illustration, final words"));
-    QCOMPARE(read("inputs").split('\n', Qt::SkipEmptyParts).size(), 2);
-    request.skipPromptFlow = false;
-    // A flow preview runs the same steps and returns the final prompts without an image.
-    QSignalSpy previews(&client, &KiraService::ServiceClient::promptFlowFinished);
-    QVERIFY(client.capabilities().promptFlow);
-    QVERIFY(client.canRunPromptFlow("illustration"));
-    QVERIFY(!client.canRunPromptFlow("photorealism")); // Its flow is empty.
-    QVERIFY(client.runPromptFlow({"photorealism", "chat", {}}).isEmpty());
-    QVERIFY(!client.runPromptFlow({"illustration", "un chien", "flou"}).isEmpty());
-    QTRY_COMPARE(previews.count(), 1);
-    auto preview = qvariant_cast<KiraService::PromptFlowResult>(previews.takeFirst().at(0));
-    QVERIFY2(preview.succeeded, qPrintable(preview.message));
-    QCOMPARE(preview.prompt, QString("specialised"));
-    QCOMPARE(preview.negativePrompt, QString("blurry"));
-    QCOMPARE(QJsonDocument::fromJson(read("inputs").split('\n', Qt::SkipEmptyParts).value(2).toUtf8()).object(),
-             (QJsonObject{{"positive", "un chien"}, {"negative", "flou"}}));
-    QCOMPARE(finished.count(), 0);
-    QFile bad(directory.filePath("bad"));
-    QVERIFY(bad.open(QIODevice::WriteOnly)); bad.close();
-    QVERIFY(!client.runPromptFlow({"illustration", "un chien", {}}).isEmpty());
-    QTRY_COMPARE(previews.count(), 1);
-    preview = qvariant_cast<KiraService::PromptFlowResult>(previews.takeFirst().at(0));
-    QVERIFY(!preview.succeeded);
-    QCOMPARE(preview.errorCode, QString("prompt-flow-failed"));
-    QVERIFY(!client.submitGeneration(request).isEmpty());
-    result = takeResult();
-    QVERIFY(!result.succeeded);
-    QCOMPARE(result.errorCode, QString("prompt-flow-failed"));
-    QVERIFY(result.message.contains("Enhance"));
-    QVERIFY(bad.remove());
-    routing.presets[1].promptFlow[1].modelId.clear();
-    QVERIFY2(catalog.configureRouting(routing, &error), qPrintable(error));
-    QVERIFY(!client.submitGeneration(request).isEmpty());
-    result = takeResult();
-    QVERIFY(!result.succeeded);
-    QCOMPARE(result.errorCode, QString("model-routing-unavailable"));
-    QVERIFY(result.message.contains("Specialist"));
+    QVERIFY(read("sd-args").contains(QDir(root).filePath("image.gguf")));
+    edit.qualityId = "edit-medium";
+    QVERIFY(client.submitEdit(edit).isEmpty()); // Unassigned qualities cannot submit.
 }
 
 void ServiceTest::enhancesPromptThroughSdk()
@@ -1605,6 +1703,12 @@ void ServiceTest::enhancesPromptThroughSdk()
     };
     expectFailure({"llm-chat:llm.gguf", "person", {{"unknownOption", true}}}, "invalid-request");
     expectFailure({"llm-chat:llm.gguf", "person", {{"temperature", "hot"}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", "person", {{"penalizeRepeats", "no"}}}, "invalid-request");
+    // Faithful rewrites may reuse the input's words: penalizeRepeats false lifts the penalty.
+    QVERIFY(!client.enhancePrompt({"llm-chat:llm.gguf", "une personne", {{"penalizeRepeats", false}}}).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::PromptEnhancementResult>(finished.takeFirst().at(0)).succeeded);
+    QVERIFY(read("args").contains("--repeat-penalty\n1.0\n--repeat-last-n\n0\n"));
     const auto marker = [&](const QString& name) { QFile file(directory.filePath(name)); return file.open(QIODevice::WriteOnly); };
     QVERIFY(marker("fail"));
     expectFailure({"llm-chat:llm.gguf", "person", {}}, "prompt-enhancement-failed");

@@ -4,16 +4,15 @@
 #include <KiraUi/PlainTextEdit.h>
 #include <KiraUi/PrimaryButton.h>
 #include <KiraUi/TreeView.h>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QItemSelectionModel>
-#include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
-#include <QListWidget>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSpinBox>
@@ -31,9 +30,8 @@ enum Kind
     Generation,
     Editing,
     Preset,
-    PromptFlow
+    EditingQuality
 };
-constexpr int MaximumFlowSteps = 4;
 enum Role
 {
     KindRole = Qt::UserRole + 1,
@@ -43,8 +41,9 @@ enum Role
     ModelRole,
     StepsRole,
     CfgRole,
-    FlowRole,
-    IdentityViewsRole
+    IdentityViewsRole,
+    NameFrRole,
+    DefaultRole
 };
 QStandardItem *entry(const QString &name, Kind kind, const QString &id = {})
 {
@@ -54,10 +53,14 @@ QStandardItem *entry(const QString &name, Kind kind, const QString &id = {})
     item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
     return item;
 }
-// Presets and the Editing node each carry one model assignment.
+// Presets and editing qualities each carry one model assignment.
 bool assignable(const QStandardItem *item)
 {
-    return item && (item->data(KindRole).toInt() == Preset || item->data(KindRole).toInt() == Editing);
+    return item && (item->data(KindRole).toInt() == Preset || item->data(KindRole).toInt() == EditingQuality);
+}
+QStandardItem *selectedPreset(QStandardItem *item)
+{
+    return item && item->data(KindRole).toInt() == Preset ? item : nullptr;
 }
 
 } // namespace
@@ -70,7 +73,20 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
     auto *body = new QWidget(this);
     auto *layout = new QVBoxLayout(body);
     auto *splitter = new QSplitter(Qt::Horizontal, body);
-    m_tree = new KiraUi::TreeView(splitter);
+    auto *treePane = new QWidget(splitter);
+    auto *treeLayout = new QVBoxLayout(treePane);
+    treeLayout->setContentsMargins(0, 0, 0, 0);
+    m_tree = new KiraUi::TreeView(treePane);
+    treeLayout->addWidget(m_tree, 1);
+    auto *presetActions = new QHBoxLayout;
+    m_addPreset = new KiraUi::IconButton(KiraUi::Icon::Plus, tr("Add preset"), treePane);
+    m_addPreset->setObjectName("addPreset");
+    m_removePreset = new KiraUi::IconButton(KiraUi::Icon::Close, tr("Remove preset"), treePane);
+    m_removePreset->setObjectName("removePreset");
+    presetActions->addWidget(m_addPreset);
+    presetActions->addWidget(m_removePreset);
+    presetActions->addStretch();
+    treeLayout->addLayout(presetActions);
     m_tree->setObjectName("routingTree");
     m_tree->setHeaderHidden(true);
     m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -109,30 +125,23 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
     };
     for (const auto &preset : routing.presets)
     {
-        auto *item = entry(preset.name, Preset, preset.id);
-        item->setData(preset.positivePrefix, PositiveRole);
-        item->setData(preset.negativePrefix, NegativeRole);
-        item->setData(preset.identityViews, IdentityViewsRole);
+        auto *item = addPresetItem(preset);
         setAssignment(item, preset.model);
-        m_generation->appendRow(item);
-        QJsonArray flow;
-        for (const auto &step : preset.promptFlow)
-            flow.append(QJsonObject{{"id", step.id},
-                                    {"name", step.name},
-                                    {"nameFr", step.nameFr},
-                                    {"modelId", step.modelId},
-                                    {"instructions", step.instructions}});
-        auto *flowItem = entry({}, PromptFlow, preset.id);
-        item->appendRow(flowItem);
-        setFlow(flowItem, flow);
     }
-    setAssignment(m_editing, routing.editing);
+    for (const auto &quality : routing.editingQualities)
+    {
+        auto *item = entry(quality.name, EditingQuality, quality.id);
+        item->setData(quality.nameFr, NameFrRole);
+        item->setData(quality.isDefault, DefaultRole);
+        item->setData(quality.positivePrefix, PositiveRole);
+        item->setData(quality.negativePrefix, NegativeRole);
+        setAssignment(item, quality.model);
+        m_editing->appendRow(item);
+    }
     m_tree->expandAll();
 
     m_editor = new QStackedWidget(splitter);
-    auto *empty = new QLabel(
-        tr("Select a preset or Editing to choose its model and settings, or a prompt flow to edit its steps."),
-        m_editor);
+    auto *empty = new QLabel(tr("Select a preset or an editing quality to choose its model and settings."), m_editor);
     empty->setWordWrap(true);
     empty->setAlignment(Qt::AlignCenter);
     m_editor->addWidget(empty);
@@ -156,18 +165,31 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
     form->addRow(tr("Steps:"), m_steps);
     form->addRow(tr("CFG Scale:"), m_cfg);
     assignmentLayout->addLayout(form);
-    // Editing has no prefixes or identity views, so it only shows the model form.
+    m_defaultQuality = new QCheckBox(tr("Default quality"), assignment);
+    m_defaultQuality->setObjectName("editingDefaultQuality");
+    m_defaultQuality->setToolTip(tr("Selected first in Canvas and used by features that edit without a quality "
+                                    "choice, such as applying an identity."));
+    assignmentLayout->addWidget(m_defaultQuality);
+    // Presets and editing qualities both have prefixes; only presets have names and identity views.
     m_prefixes = new QWidget(assignment);
     auto *prefixLayout = new QVBoxLayout(m_prefixes);
     prefixLayout->setContentsMargins(0, 0, 0, 0);
-    m_identityViews = new QComboBox(m_prefixes);
+    m_presetFields = new QWidget(m_prefixes);
+    m_identityViews = new QComboBox(m_presetFields);
     m_identityViews->setObjectName("presetIdentityViews");
     m_identityViews->addItem(tr("1 portrait"), 1);
     m_identityViews->addItem(tr("2 portraits"), 2);
     m_identityViews->addItem(tr("4 portraits"), 4);
-    auto *presetForm = new QFormLayout;
+    m_presetName = new QLineEdit(m_presetFields);
+    m_presetName->setObjectName("presetName");
+    m_presetNameFr = new QLineEdit(m_presetFields);
+    m_presetNameFr->setObjectName("presetNameFr");
+    auto *presetForm = new QFormLayout(m_presetFields);
+    presetForm->setContentsMargins(0, 0, 0, 0);
+    presetForm->addRow(tr("Name (English):"), m_presetName);
+    presetForm->addRow(tr("Name (French):"), m_presetNameFr);
     presetForm->addRow(tr("Identity portraits:"), m_identityViews);
-    prefixLayout->addLayout(presetForm);
+    prefixLayout->addWidget(m_presetFields);
     m_positive = new KiraUi::PlainTextEdit(m_prefixes);
     m_positive->setObjectName("presetPositive");
     m_negative = new KiraUi::PlainTextEdit(m_prefixes);
@@ -179,56 +201,6 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
     assignmentLayout->addWidget(m_prefixes, 1);
     assignmentLayout->addStretch();
     m_editor->addWidget(assignment);
-    auto *flowPage = new QWidget(m_editor);
-    flowPage->setObjectName("promptFlowPage");
-    auto *flowLayout = new QVBoxLayout(flowPage);
-    flowLayout->setContentsMargins(0, 0, 0, 0);
-    auto *flowHint = new QLabel(tr("User prompt → each step in order → image generation. Every step receives and "
-                                   "returns the positive and negative prompts as JSON."),
-                                flowPage);
-    flowHint->setWordWrap(true);
-    flowLayout->addWidget(flowHint);
-    auto *stepsRow = new QHBoxLayout;
-    m_flowSteps = new QListWidget(flowPage);
-    m_flowSteps->setObjectName("flowSteps");
-    m_flowSteps->setMaximumHeight(140);
-    stepsRow->addWidget(m_flowSteps, 1);
-    auto *stepActions = new QVBoxLayout;
-    const auto stepButton = [&](KiraUi::Icon icon, const QString &label, const char *name) {
-        auto *button = new KiraUi::IconButton(icon, label, flowPage);
-        button->setObjectName(name);
-        stepActions->addWidget(button);
-        return button;
-    };
-    m_addStep = stepButton(KiraUi::Icon::Plus, tr("Add step"), "addFlowStep");
-    m_moveStepUp = stepButton(KiraUi::Icon::ChevronUp, tr("Move step up"), "moveFlowStepUp");
-    m_moveStepDown = stepButton(KiraUi::Icon::ChevronDown, tr("Move step down"), "moveFlowStepDown");
-    m_removeStep = stepButton(KiraUi::Icon::Close, tr("Remove step"), "removeFlowStep");
-    stepActions->addStretch();
-    stepsRow->addLayout(stepActions);
-    flowLayout->addLayout(stepsRow);
-    m_stepEditor = new QWidget(flowPage);
-    auto *stepLayout = new QVBoxLayout(m_stepEditor);
-    stepLayout->setContentsMargins(0, 0, 0, 0);
-    auto *stepForm = new QFormLayout;
-    m_stepName = new QLineEdit(m_stepEditor);
-    m_stepName->setObjectName("flowStepName");
-    m_stepNameFr = new QLineEdit(m_stepEditor);
-    m_stepNameFr->setObjectName("flowStepNameFr");
-    m_stepModel = new QComboBox(m_stepEditor);
-    m_stepModel->setObjectName("flowStepModel");
-    m_stepModel->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    m_stepModel->setMinimumContentsLength(12);
-    stepForm->addRow(tr("Name (English):"), m_stepName);
-    stepForm->addRow(tr("Name (French):"), m_stepNameFr);
-    stepForm->addRow(tr("LLM:"), m_stepModel);
-    stepLayout->addLayout(stepForm);
-    m_stepInstructions = new KiraUi::PlainTextEdit(m_stepEditor);
-    m_stepInstructions->setObjectName("flowStepInstructions");
-    stepLayout->addWidget(new QLabel(tr("Instructions"), m_stepEditor));
-    stepLayout->addWidget(m_stepInstructions, 1);
-    flowLayout->addWidget(m_stepEditor, 1);
-    m_editor->addWidget(flowPage);
     splitter->setStretchFactor(0, 1);
     splitter->setStretchFactor(1, 2);
     layout->addWidget(splitter, 1);
@@ -253,13 +225,47 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
     connect(m_model, &QStandardItemModel::rowsRemoved, this, [this] { updateActions(); });
     connect(m_positive, &QPlainTextEdit::textChanged, this, [this] {
         if (!m_showing)
-            if (auto *item = selectedItem(); item && item->data(KindRole).toInt() == Preset)
+            if (auto *item = selectedItem(); assignable(item))
                 item->setData(m_positive->toPlainText(), PositiveRole);
     });
     connect(m_negative, &QPlainTextEdit::textChanged, this, [this] {
         if (!m_showing)
-            if (auto *item = selectedItem(); item && item->data(KindRole).toInt() == Preset)
+            if (auto *item = selectedItem(); assignable(item))
                 item->setData(m_negative->toPlainText(), NegativeRole);
+    });
+    connect(m_presetName, &QLineEdit::textEdited, this, [this](const QString &text) {
+        if (auto *item = selectedItem(); item && item->data(KindRole).toInt() == Preset)
+            item->setText(text);
+    });
+    connect(m_presetNameFr, &QLineEdit::textEdited, this, [this](const QString &text) {
+        if (auto *item = selectedItem(); item && item->data(KindRole).toInt() == Preset)
+            item->setData(text, NameFrRole);
+    });
+    connect(m_addPreset, &QAbstractButton::clicked, this, [this] {
+        KiraService::GenerationPreset preset{"preset-" + QUuid::createUuid().toString(QUuid::Id128).left(12),
+                                             tr("New preset"), {}, {}, {}};
+        preset.nameFr = QStringLiteral("Nouveau préréglage");
+        auto *item = addPresetItem(preset);
+        m_tree->expand(item->index());
+        m_tree->setCurrentIndex(item->index());
+        m_presetName->setFocus();
+        m_presetName->selectAll();
+    });
+    connect(m_removePreset, &QAbstractButton::clicked, this, [this] {
+        auto *preset = selectedPreset(selectedItem());
+        if (!preset || m_generation->rowCount() <= 1)
+            return;
+        const int row = preset->row();
+        m_generation->removeRow(row);
+        m_tree->setCurrentIndex(m_generation->child(qMin(row, m_generation->rowCount() - 1))->index());
+    });
+    connect(m_defaultQuality, &QCheckBox::toggled, this, [this](bool checked) {
+        auto *item = selectedItem();
+        if (m_showing || !checked || !item || item->data(KindRole).toInt() != EditingQuality)
+            return;
+        for (int row = 0; row < m_editing->rowCount(); ++row)
+            m_editing->child(row)->setData(m_editing->child(row) == item, DefaultRole);
+        m_defaultQuality->setEnabled(false);
     });
     connect(m_identityViews, &QComboBox::currentIndexChanged, this, [this] {
         if (!m_showing)
@@ -302,53 +308,6 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
         if (!m_showing)
             if (auto *item = selectedItem(); assignable(item))
                 item->setData(cfg, CfgRole);
-    });
-    connect(m_flowSteps, &QListWidget::currentRowChanged, this, [this](int row) {
-        if (!m_showing)
-            showFlow(row);
-    });
-    connect(m_stepName, &QLineEdit::textEdited, this, [this](const QString &text) { editStep("name", text); });
-    connect(m_stepNameFr, &QLineEdit::textEdited, this, [this](const QString &text) { editStep("nameFr", text); });
-    connect(m_stepModel, &QComboBox::currentIndexChanged, this,
-            [this] { editStep("modelId", m_stepModel->currentData().toString()); });
-    connect(m_stepInstructions, &QPlainTextEdit::textChanged, this,
-            [this] { editStep("instructions", m_stepInstructions->toPlainText()); });
-    connect(m_addStep, &QAbstractButton::clicked, this, [this] {
-        auto *item = selectedItem();
-        auto flow = item->data(FlowRole).toJsonArray();
-        const int number = int(flow.size()) + 1;
-        flow.append(QJsonObject{{"id", "step-" + QUuid::createUuid().toString(QUuid::Id128).left(12)},
-                                {"name", QString("Step %1").arg(number)},
-                                {"nameFr", QString("Étape %1").arg(number)},
-                                {"modelId", QString()},
-                                {"instructions", QString()}});
-        setFlow(item, flow);
-        showFlow(int(flow.size()) - 1);
-    });
-    const auto moveStep = [this](int offset) {
-        auto *item = selectedItem();
-        auto flow = item->data(FlowRole).toJsonArray();
-        const int row = m_flowSteps->currentRow();
-        const int target = row + offset;
-        if (row < 0 || target < 0 || target >= flow.size())
-            return;
-        const auto step = flow.at(row);
-        flow.removeAt(row);
-        flow.insert(target, step);
-        setFlow(item, flow);
-        showFlow(target);
-    };
-    connect(m_moveStepUp, &QAbstractButton::clicked, this, [moveStep] { moveStep(-1); });
-    connect(m_moveStepDown, &QAbstractButton::clicked, this, [moveStep] { moveStep(1); });
-    connect(m_removeStep, &QAbstractButton::clicked, this, [this] {
-        auto *item = selectedItem();
-        auto flow = item->data(FlowRole).toJsonArray();
-        const int row = m_flowSteps->currentRow();
-        if (row < 0 || row >= flow.size())
-            return;
-        flow.removeAt(row);
-        setFlow(item, flow);
-        showFlow(qMin(row, int(flow.size()) - 1));
     });
     connect(m_cancel, &QPushButton::clicked, this, &ModelRoutingDialog::reject);
     connect(m_save, &QPushButton::clicked, this, [this] {
@@ -393,11 +352,16 @@ void ModelRoutingDialog::showSelection()
     auto *item = selectedItem();
     const int kind = item ? item->data(KindRole).toInt() : -1;
     const bool model = assignable(item);
-    m_editor->setCurrentIndex(model ? 1 : kind == PromptFlow ? 2 : 0);
-    m_prefixes->setVisible(kind == Preset);
-    m_flowSteps->clear(); // A newly selected flow starts at its first step.
-    m_positive->setPlainText(kind == Preset ? item->data(PositiveRole).toString() : QString());
-    m_negative->setPlainText(kind == Preset ? item->data(NegativeRole).toString() : QString());
+    m_editor->setCurrentIndex(model ? 1 : 0);
+    m_presetFields->setVisible(kind == Preset);
+    m_defaultQuality->setVisible(kind == EditingQuality);
+    m_defaultQuality->setChecked(kind == EditingQuality && item->data(DefaultRole).toBool());
+    // Exactly one quality is the default: choosing another one moves it.
+    m_defaultQuality->setEnabled(!m_defaultQuality->isChecked());
+    m_presetName->setText(kind == Preset ? item->text() : QString());
+    m_presetNameFr->setText(kind == Preset ? item->data(NameFrRole).toString() : QString());
+    m_positive->setPlainText(model ? item->data(PositiveRole).toString() : QString());
+    m_negative->setPlainText(model ? item->data(NegativeRole).toString() : QString());
     m_identityViews->setCurrentIndex(
         qMax(0, m_identityViews->findData(kind == Preset ? item->data(IdentityViewsRole).toInt() : 1)));
     refreshModels();
@@ -422,7 +386,7 @@ void ModelRoutingDialog::refreshModels()
     auto *item = selectedItem();
     if (assignable(item))
     {
-        const bool editing = item == m_editing;
+        const bool editing = item->data(KindRole).toInt() == EditingQuality;
         for (const auto &model : m_client->models("image-generation"))
             if (model.recommendedOptions.value(editing ? "canEdit" : "canGenerate").toBool(true))
                 m_assignment->addItem(model.displayLabel(), model.id);
@@ -436,83 +400,23 @@ void ModelRoutingDialog::refreshModels()
         m_assignment->setCurrentIndex(index);
     }
     m_showing = false;
-    if (item && item->data(KindRole).toInt() == PromptFlow)
-        showFlow(m_flowSteps->currentRow());
 }
 
-void ModelRoutingDialog::setFlow(QStandardItem *item, const QJsonArray &flow)
+QStandardItem *ModelRoutingDialog::addPresetItem(const KiraService::GenerationPreset &preset)
 {
-    item->setText(flow.size() == 1 ? tr("Prompt flow (1 step)") : tr("Prompt flow (%1 steps)").arg(flow.size()));
-    item->setData(flow, FlowRole);
-}
-
-QString ModelRoutingDialog::stepLabel(int row, const QJsonObject &step) const
-{
-    const auto id = step.value("modelId").toString();
-    QString model = id.isEmpty() ? tr("Unassigned") : tr("Unavailable — %1").arg(id);
-    for (const auto &info : m_client->models("llm-chat"))
-        if (info.id == id)
-            model = info.displayLabel();
-    return QString("%1. %2 — %3").arg(row + 1).arg(step.value("name").toString(), model);
-}
-
-void ModelRoutingDialog::showFlow(int row)
-{
-    auto *item = selectedItem();
-    if (!item || item->data(KindRole).toInt() != PromptFlow)
-        return;
-    const auto flow = item->data(FlowRole).toJsonArray();
-    const int count = int(flow.size());
-    if (row < 0 && count > 0)
-        row = 0;
-    row = qMin(row, count - 1);
-    m_showing = true;
-    m_flowSteps->clear();
-    for (int i = 0; i < count; ++i)
-        m_flowSteps->addItem(stepLabel(i, flow.at(i).toObject()));
-    m_flowSteps->setCurrentRow(row);
-    const auto step = row >= 0 ? flow.at(row).toObject() : QJsonObject{};
-    m_stepName->setText(step.value("name").toString());
-    m_stepNameFr->setText(step.value("nameFr").toString());
-    m_stepInstructions->setPlainText(step.value("instructions").toString());
-    m_stepModel->clear();
-    m_stepModel->addItem(tr("Unassigned"), QString());
-    for (const auto &model : m_client->models("llm-chat"))
-        m_stepModel->addItem(model.displayLabel(), model.id);
-    const auto id = step.value("modelId").toString();
-    int index = m_stepModel->findData(id);
-    if (index < 0)
-    {
-        m_stepModel->addItem(tr("Unavailable — %1").arg(id), id);
-        index = m_stepModel->count() - 1;
-    }
-    m_stepModel->setCurrentIndex(index);
-    m_stepEditor->setEnabled(row >= 0);
-    m_addStep->setEnabled(count < MaximumFlowSteps);
-    m_moveStepUp->setEnabled(row > 0);
-    m_moveStepDown->setEnabled(row >= 0 && row < count - 1);
-    m_removeStep->setEnabled(row >= 0);
-    m_showing = false;
-}
-
-void ModelRoutingDialog::editStep(const QString &key, const QString &value)
-{
-    auto *item = selectedItem();
-    const int row = m_flowSteps->currentRow();
-    if (m_showing || !item || item->data(KindRole).toInt() != PromptFlow || row < 0)
-        return;
-    auto flow = item->data(FlowRole).toJsonArray();
-    auto step = flow.at(row).toObject();
-    step.insert(key, value);
-    flow[row] = step;
-    setFlow(item, flow);
-    // Update the label in place so typing keeps focus in the editor.
-    m_flowSteps->item(row)->setText(stepLabel(row, step));
+    auto *item = entry(preset.name, Preset, preset.id);
+    item->setData(preset.nameFr, NameFrRole);
+    item->setData(preset.positivePrefix, PositiveRole);
+    item->setData(preset.negativePrefix, NegativeRole);
+    item->setData(preset.identityViews, IdentityViewsRole);
+    item->setData(preset.model.modelId, ModelRole);
+    m_generation->appendRow(item);
+    return item;
 }
 
 KiraService::ModelRouting ModelRoutingDialog::configuration() const
 {
-    auto routing = KiraService::Protocol::starterModelRouting();
+    KiraService::ModelRouting routing;
     const auto assignment = [](KiraService::ModelAssignment &a, const QStandardItem *item) {
         a.modelId = item->data(ModelRole).toString();
         if (item->data(StepsRole).isValid())
@@ -520,27 +424,30 @@ KiraService::ModelRouting ModelRoutingDialog::configuration() const
         if (item->data(CfgRole).isValid())
             a.cfgScale = item->data(CfgRole).toDouble();
     };
-    for (int row = 0; row < routing.presets.size(); ++row)
+    for (int row = 0; row < m_generation->rowCount(); ++row)
     {
         const auto *item = m_generation->child(row);
-        if (!item)
-            continue;
-        auto &preset = routing.presets[row];
+        auto &preset = routing.presets.emplace_back();
+        preset.id = item->data(IdRole).toString();
+        preset.name = item->text();
+        preset.nameFr = item->data(NameFrRole).toString();
         preset.positivePrefix = item->data(PositiveRole).toString();
         preset.negativePrefix = item->data(NegativeRole).toString();
         preset.identityViews = item->data(IdentityViewsRole).toInt();
         assignment(preset.model, item);
-        for (int child = 0; child < item->rowCount(); ++child)
-            if (item->child(child)->data(KindRole).toInt() == PromptFlow)
-                for (const auto &value : item->child(child)->data(FlowRole).toJsonArray())
-                {
-                    const auto step = value.toObject();
-                    preset.promptFlow.append({step.value("id").toString(), step.value("name").toString(),
-                                              step.value("nameFr").toString(), step.value("modelId").toString(),
-                                              step.value("instructions").toString()});
-                }
     }
-    assignment(routing.editing, m_editing);
+    for (int row = 0; row < m_editing->rowCount(); ++row)
+    {
+        const auto *item = m_editing->child(row);
+        auto &quality = routing.editingQualities.emplace_back();
+        quality.id = item->data(IdRole).toString();
+        quality.name = item->text();
+        quality.nameFr = item->data(NameFrRole).toString();
+        quality.isDefault = item->data(DefaultRole).toBool();
+        quality.positivePrefix = item->data(PositiveRole).toString();
+        quality.negativePrefix = item->data(NegativeRole).toString();
+        assignment(quality.model, item);
+    }
     return routing;
 }
 
@@ -550,6 +457,9 @@ void ModelRoutingDialog::updateActions()
     const bool valid = KiraService::Protocol::validateModelRouting(configuration(), &error);
     m_save->setEnabled(!m_saving && m_client->isAuthenticated() && m_client->supportsModelRouting() && valid);
     m_tree->setEnabled(!m_saving);
+    m_addPreset->setEnabled(!m_saving &&
+                            m_generation->rowCount() < KiraService::Protocol::MaximumGenerationPresets);
+    m_removePreset->setEnabled(!m_saving && selectedPreset(selectedItem()) && m_generation->rowCount() > 1);
     m_editor->setEnabled(!m_saving);
     m_cancel->setEnabled(!m_saving);
     if (!m_saving)

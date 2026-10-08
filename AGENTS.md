@@ -42,9 +42,11 @@ never overwrite weights and keep companions scoped to the final primary name.
 - Prompt enhancement executes installed LLM (llm-chat) models through the shared
   FIFO and llama-completion subprocess, using saved temperature/topP/contextLength/
   maxTokens recommendations or shared LLM defaults. Per-job overrides accept these
-  fields and a string systemPrompt up to 64 KiB, without changing model metadata.
+  fields, a string systemPrompt up to 64 KiB and a boolean penalizeRepeats (default
+  true; false disables the prompt-wide repetition penalty for faithful rewrites),
+  without changing model metadata.
   Unknown/invalid fields fail before queueing. Empty text requests a new description.
-  Send instructions (systemPrompt or flow step instructions) at the start of the
+  Send the systemPrompt instructions at the start of the
   single user message, never through `--system-prompt-file`: llama-completion
   formats a system prompt alone, and templates requiring a user query (Qwen3.5
   and similar) abort on it.
@@ -72,7 +74,12 @@ never overwrite weights and keep companions scoped to the final primary name.
 - ModelOptions in the Protocol target owns category defaults and validation.
   Image generation use square resolution, steps, CFG, sampler, scheduler,
   capability flags and shared VAE/text encoder IDs; LLM uses temperature/top-p/context/max tokens
-  and canBeTextEncoder (default false). Clip Skip has no configuration control. Upscalers have no
+  and canBeTextEncoder (default false). LLM "Default prompt enhancer" and "Default prompt
+  translator" checkboxes save exclusive defaultPromptEnhancer/defaultPromptTranslator
+  booleans (default false): at most one LLM per role, the same LLM may hold both, and
+  saving a role clears it on other LLMs atomically. Configure broadcasts `models.changed`
+  to other clients; the SDK exposes defaultPromptEnhancerModelId()/defaultPromptTranslatorModelId().
+  No job consumes the roles yet. Clip Skip has no configuration control. Upscalers have no
   recommended options or explicit-content control. Companion models expose only
   their VAE/mmproj subtype; hide unrelated fields and recommendations hints.
 - Preserve legacy metadata.json companion strings and untouched entries when
@@ -126,6 +133,13 @@ Replacement uses the existing attachment install operation; it is a separate ste
 so a failed replacement leaves the removed role absent. Legacy single-companion
 metadata is supported and updated without discarding unrelated metadata.
 
+Sampling progress reports the step being sampled: sd-cli prints completed steps, so
+currentStep is completed + 1 (capped at totalSteps; "sampling using" starts at 1) while
+the percentage follows completed steps. sd-cli redraws its bar as "\r ... n/N - ..."
+without a line end until the last step, so the runner also reads a complete "n/N -"
+counter from unterminated output instead of waiting for the next redraw; repeated
+counters are not re-emitted and the running step never moves backwards.
+
 Generation failures include the attempted sd-cli command (executable and quoted
 arguments), exit code and up to 4096 trailing stderr characters in the job error
 message. This diagnostic intentionally exposes the submitting client's prompts
@@ -162,44 +176,52 @@ Sibling checkouts and sd-cli are not updated by this script.
 ## Service-owned presets
 
 Manager Presets… uses a shared KiraUi tree with fixed Generation and Editing roots.
-Generation presets are Photorealism / Photoréalisme and Illustration, with stable
-IDs and order. There is no quality layer: each preset and Editing carry exactly
-one ModelAssignment (modelId plus optional Steps/CFG snapshot).
-No addition, removal, rename, drag/drop or reparenting is permitted.
-Preset selection edits Model, Steps, CFG and optional positive/negative prefixes;
-Editing selection edits only Model, Steps and CFG. Choosing a model snapshots its
+Generation starts with Photorealism / Photoréalisme and Illustration. Add preset
+and Remove preset icon buttons under the tree add a preset (generated unique
+`preset-…` ID, default bilingual names, unassigned, one identity portrait, empty
+prefixes) or remove the selected preset;
+Generation keeps 1–16 presets. Preset IDs are never edited. Presets have no
+quality layer: each carries exactly one ModelAssignment (modelId plus optional
+Steps/CFG snapshot). Editing has the fixed qualities Fast / Rapide (`edit-low`),
+Balanced / Équilibré (`edit-medium`) and Quality / Qualité (`edit-high`), each
+with its own ModelAssignment; exactly one is the default (Balanced initially),
+which clients preselect and use when they edit without a quality choice.
+Qualities cannot be added, removed or renamed. Drag/drop and reparenting are
+not permitted. Preset selection edits English/French names, Model, Steps, CFG
+and optional positive/negative prefixes; editing quality selection edits Model,
+Steps, CFG, optional positive/negative prefixes and a "Default quality" checkbox (checking it moves the default; the
+default cannot be unchecked). Choosing a model snapshots its
 recommendations, or shared defaults when absent. Save persists those values
 including manual edits; catalogue refresh must not replace them. Unassigned
 clears the assignment and snapshot.
 Keep only Save/Cancel buttons; await acknowledgment and discard drafts on Cancel.
 
-Store version-5 model-routing.json beside model metadata through QSaveFile:
-presets carry modelId/steps/cfgScale and the top-level `editing` object carries
-the editing assignment.
+Store version-6 model-routing.json beside model metadata through QSaveFile:
+presets carry modelId/steps/cfgScale and the top-level `editingQualities` array
+carries each quality's id/name/nameFr/modelId/steps/cfgScale, boolean `default`
+and positivePrefix/negativePrefix strings (optional on read, empty when absent;
+at most 65536 characters).
+Versions 4 and 5 stored one `editing` assignment, copied into every quality.
 Each preset carries `identityViews` (1, 2 or 4; default 1): the number of
 sequential identity portraits clients request with it. The service does not use
 it for generation. Manager edits it as "Identity portraits" on the preset page
-(hidden for Editing). Versions 1–4 load with 1.
-Each generation preset carries an ordered `promptFlow` of at most 4 LLM steps
-(id, name, nameFr, modelId, instructions). Step IDs are unique within the preset,
-bilingual names are nonblank, instructions are at most 65536 characters and
-modelId is an installed `llm-chat` model or empty (unassigned). Assigned flow
-LLMs cannot be deleted; reconfiguring them is allowed. Versions 1 and 2 load
-with empty flows. In Manager, a "Prompt flow (n steps)" node is each
-preset's child; its page lists steps with Add/Move up/Move down/Remove
-icon buttons (Add disabled at 4) above the selected step's English/French names,
-LLM selector (Unassigned, installed llm-chat models, Unavailable — id) and
-instructions. New steps get a generated unique ID and default names; flow edits
-follow the same Save/Cancel draft rules.
-Transmit name (English) and nameFr for every preset. SDK displayLabel
-uses French for French locales, English otherwise. Validate fixed IDs, ordering
-and bilingual labels plus numeric bounds (Steps 1–200, finite CFG 0–100).
+(hidden for editing qualities). Versions 1–4 load with 1.
+Preset prompt flows are removed: presets hold no LLM steps, reads ignore a
+`promptFlow` stored by earlier documents (versions 3–6) and Save no longer writes
+it. LLM roles live only in the exclusive defaultPromptEnhancer/
+defaultPromptTranslator LLM options; clients run them through prompt.enhance.
+Transmit name (English) and nameFr for every preset and quality. SDK displayLabel
+uses French for French locales, English otherwise. Validate 1–16 presets
+with unique nonblank IDs (at most 64 characters) and nonblank English/French
+names (at most 256 characters), the fixed editing qualities with exactly one
+default, plus numeric bounds (Steps 1–200, finite CFG 0–100).
 Versions 1–3 stored Fast/Balanced/Quality tiers: reads keep only each preset's
-and Editing's Fast (`photo-low`, `illustration-low`, `edit-low`) tier as its
-assignment and drop the other tiers and permanent flags. Version-1 reads project
+Fast (`photo-low`, `illustration-low`) tier as its assignment and drop the other
+preset tiers, but keep all three editing tiers; a permanent editing tier becomes
+the default (Balanced otherwise). Version-1 reads project
 known preset IDs onto the fixed structure, retaining known prefixes. Missing
 parameters are initialized from model recommendations.
-Do not write during reads; Save writes version 5 and retires legacy entries.
+Do not write during reads; Save writes version 6 and retires legacy entries.
 Reject malformed/unreadable storage without overwriting. Block mapped-model
 deletion and disabling required capabilities, including companion installs.
 External disappearance leaves assignments intact.
@@ -207,22 +229,22 @@ Manager displays preset names in English explicitly.
 
 Additive protocol-v3 model-routing.get/configure return .completed with routing;
 broadcast model-routing.changed on Save and advertise model-routing capability.
-Generation routing requires only presetId; `qualityId` is no longer accepted.
-Editing is unrouted: clients submit the editing assignment's modelId and
-Steps/CFG directly, and image.edit rejects presetId.
+Generation routing requires only presetId and rejects `qualityId`. image.edit is
+routed by an optional `qualityId`: the service resolves the quality's model,
+rejects a conflicting modelId, presetId or styleId, and fills omitted Steps/CFG
+from its snapshot. After validating the original instruction, it composes the
+quality's positive/negative prefixes first (comma-separated) onto the prompt and
+negative prompt sent to sd-cli; prefixes never pass through an LLM
+and are never returned to clients; an unknown or unassigned quality fails with
+model-routing-unavailable. Edits without qualityId keep direct-model behavior.
 Resolve the model on the service and reject conflicting modelId or mixed styleId.
 Validate the original prompt, compose generation prefixes once, and snapshot before
 upload/queueing. Omitted job Steps/CFG use the preset's snapshot; explicit valid
 job values take precedence. Direct-model requests retain their prior behavior.
-A routed generation runs its preset's prompt flow first, as described in
-docs/protocol-v3.md: each step's LLM receives/returns `{positive, negative}`
-JSON through llama-completion, progress uses stage `enhancing-prompt`, failures
-use `prompt-flow-failed`, and prefixes are composed after the last step instead
-of at submission. Results return the final unprefixed prompts; `skipPromptFlow`
-bypasses the flow. Validate every step's LLM at submission. The
-`prompt-flow.run` operation previews a preset's flow through the same job queue
-and returns only the final prompts.
-Editing adds no prefixes. Preserve legacy style APIs/metadata for old clients,
+A routed generation never runs an LLM; its result returns the submitted
+(trimmed) prompts without preset prefixes. There is no `prompt-flow.run`
+operation or `skipPromptFlow` option; an unknown option is rejected.
+Editing adds only its quality's prefixes, never preset prefixes. Preserve legacy style APIs/metadata for old clients,
 without Manager UI. Canvas consumes this configuration; deploy service first.
 
 ## Identity package contract

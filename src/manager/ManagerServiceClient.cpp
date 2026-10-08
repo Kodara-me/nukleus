@@ -284,7 +284,7 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
         if (styles) emit modelStylesConfigured(object.value("id").toString(), *styles);
         return;
     }
-    if (type == "models.styles.changed") { requestModels(); return; }
+    if (type == "models.styles.changed" || type == "models.changed") { requestModels(); return; }
     if (type == "models.companion.delete.completed") {
         emit companionDeleted(object.value("id").toString(), object.value("role").toString());
         requestModels(); return;

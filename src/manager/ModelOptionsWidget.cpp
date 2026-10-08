@@ -97,6 +97,10 @@ void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &
     else if (category == "llm-chat")
     {
         check("canBeTextEncoder", tr("Can be used as text encoder"), false);
+        check("defaultPromptEnhancer", tr("Default prompt enhancer"), false);
+        m_fields.value("defaultPromptEnhancer")->setToolTip(tr("Only one LLM is the default prompt enhancer; saving replaces the current one."));
+        check("defaultPromptTranslator", tr("Default prompt translator"), false);
+        m_fields.value("defaultPromptTranslator")->setToolTip(tr("Only one LLM is the default prompt translator; saving replaces the current one."));
         decimal("temperature", tr("Temperature:"), 0, 2, 2);
         decimal("topP", tr("Top-p:"), 0.01, 1, 2);
         integer("contextLength", tr("Context length:"), 256, 131072);
