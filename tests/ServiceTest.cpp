@@ -2077,6 +2077,39 @@ void ServiceTest::chatsThroughServerEngine()
     QVERIFY(serverAlive());
     QTRY_VERIFY_WITH_TIMEOUT(!serverAlive(), 5000);
 
+    // text.chat.load preloads the model with the chat's own settings; text.chat.unload frees it.
+    QVERIFY(client.capabilities().chatModelControl);
+    QSignalSpy modelFinished(&client, &KiraService::ServiceClient::chatModelFinished);
+    const auto control = [&](const QString& jobId) {
+        KiraService::ChatModelResult result;
+        if (jobId.isEmpty() || !QTest::qWaitFor([&] { return modelFinished.count() == 1; }, 5000)) return result;
+        return qvariant_cast<KiraService::ChatModelResult>(modelFinished.takeFirst().at(0));
+    };
+    const auto launchesBeforeLoad = launches();
+    QFile::remove(directory.filePath("request.json"));
+    auto loaded = control(client.loadChatModel("llm-chat:llm.gguf", turn));
+    QVERIFY2(loaded.succeeded, qPrintable(loaded.message)); QVERIFY(loaded.load); QVERIFY(loaded.coldStart);
+    QVERIFY(loaded.durationMs >= 0);
+    QCOMPARE(launches(), launchesBeforeLoad + 1); QVERIFY(serverAlive());
+    QVERIFY(!QFileInfo::exists(directory.filePath("request.json")));
+    loaded = control(client.loadChatModel("llm-chat:llm.gguf", turn));
+    QVERIFY(loaded.succeeded); QVERIFY(!loaded.coldStart); QCOMPARE(launches(), launchesBeforeLoad + 1);
+    result = chat(turn);
+    QVERIFY(result.succeeded); QVERIFY(!result.coldStart); QCOMPARE(launches(), launchesBeforeLoad + 1);
+    auto unloaded = control(client.unloadChatModel());
+    QVERIFY(unloaded.succeeded); QVERIFY(!unloaded.load); QVERIFY(unloaded.unloaded);
+    QTRY_VERIFY(!serverAlive());
+    unloaded = control(client.unloadChatModel());
+    QVERIFY(unloaded.succeeded); QVERIFY(!unloaded.unloaded);
+    auto completionLoad = turn; completionLoad.insert("engine", "completion");
+    loaded = control(client.loadChatModel("llm-chat:llm.gguf", completionLoad));
+    QVERIFY(!loaded.succeeded); QCOMPARE(loaded.errorCode, QString("invalid-request"));
+    QVERIFY(marker("load-fail"));
+    loaded = control(client.loadChatModel("llm-chat:llm.gguf", turn));
+    QVERIFY(!loaded.succeeded); QCOMPARE(loaded.errorCode, QString("chat-failed"));
+    QVERIFY(loaded.message.contains("out of memory"));
+    QVERIFY(QFile::remove(directory.filePath("load-fail")));
+
     // Disconnecting cancels the active chat and kills the server.
     QVERIFY(marker("hang"));
     QFile::remove(directory.filePath("request.json"));

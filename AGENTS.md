@@ -66,7 +66,10 @@ never overwrite weights and keep companions scoped to the final primary name.
   Unload it before every other job and after the idle period, so it never
   competes with sd-cli or llama-completion for GPU memory. `gpuLayers` other
   than `auto` passes `--fit off`: a model that does not fit must fail, not spill
-  onto the CPU. Tests use the fake server and must never start a real one.
+  onto the CPU. text.chat.load and text.chat.unload are FIFO jobs: load takes
+  text.chat's model and parameters without messages and keeps the first-chat
+  lazy load; unload relies on the rule that every non-server-chat job stops
+  llama-server. Tests use the fake server and must never start a real one.
 
 - Link only the manager/UI tests to KiraUi::Widgets 0.2. Default to the sibling
   checkout, allow KIRA_UI_SOURCE_DIR, and fall back to an installed package.

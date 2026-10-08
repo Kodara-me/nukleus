@@ -141,6 +141,34 @@ backend's trailing output, for example a model that does not fit in memory),
 an active `server` chat kills llama-server. SDK clients use `canChat()`,
 `submitChat(TextChatRequest)` and `chatFinished(TextChatResult)`.
 
+### Loading and unloading the chat model
+
+The `server` engine loads its model on the first chat that needs it. Clients
+may also control it explicitly; both operations go through the service FIFO,
+so they never interrupt a running job.
+
+```json
+{"type":"submit","operation":"text.chat.load","jobId":"load-1","options":{"modelId":"llm-chat:model.gguf","parameters":{"gpuLayers":"all","kvCacheType":"q8_0"}}}
+{"type":"result","operation":"text.chat.load","jobId":"load-1","coldStart":true,"durationMs":8150}
+{"type":"submit","operation":"text.chat.unload","jobId":"unload-1"}
+{"type":"result","operation":"text.chat.unload","jobId":"unload-1","unloaded":true,"durationMs":310}
+```
+
+- `text.chat.load` takes the same `modelId` and `parameters` as `text.chat`,
+  without `messages`, so a client can send its chat parameters unchanged; only
+  the load settings (model, `contextLength`, `gpuLayers`, `kvCacheLocation`,
+  `kvCacheType`, `flashAttention`, `chatTemplate`, `reasoning`) are used.
+  `engine` must be `server` or absent. It succeeds once llama-server is ready;
+  `coldStart` is false when the model was already loaded with those settings.
+  The next chat with the same settings then starts warm. Load failures use the
+  chat error codes, for example `chat-failed` for a model that does not fit.
+- `text.chat.unload` takes no options and stops llama-server; `unloaded` tells
+  whether a model was loaded.
+- A loaded model still unloads before any other job and after the idle period.
+- `capabilities.operations` lists both when the `server` engine is ready. SDK
+  clients use `loadChatModel(modelId, parameters)`, `unloadChatModel()` and
+  `chatModelFinished(ChatModelResult)`.
+
 ## Per-model prompt styles (additive v3 extension)
 
 Image-generation catalogue entries include an ordered `styles` array:

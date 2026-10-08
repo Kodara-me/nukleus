@@ -20,6 +20,13 @@ constexpr int HealthPollMs = 250;
 constexpr qint64 MaximumReplyBytes = 1024 * 1024;
 constexpr int LogTailBytes = 4096;
 
+LlamaServerReply loadedReply()
+{
+    LlamaServerReply reply;
+    reply.succeeded = true;
+    return reply;
+}
+
 quint16 freeLoopbackPort()
 {
     QTcpServer probe;
@@ -87,7 +94,8 @@ void LlamaServerRunner::run(const LlamaServerLaunch &launch, const QJsonObject &
     m_timeout.start(timeoutMs);
     if (reuse) {
         m_coldStart = false;
-        sendRequest();
+        if (m_body.isEmpty()) finish(loadedReply());
+        else sendRequest();
         return;
     }
     m_launch = launch;
@@ -161,7 +169,8 @@ void LlamaServerRunner::pollHealth()
         if (!m_active || m_ready || reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200) return;
         m_ready = true;
         m_healthTimer.stop();
-        sendRequest();
+        if (m_body.isEmpty()) finish(loadedReply());
+        else sendRequest();
     });
 }
 

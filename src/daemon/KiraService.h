@@ -56,7 +56,7 @@ public:
     quint16 serverPort() const;
 
 private:
-    enum class Operation { Generate, Upscale, Edit, PromptEnhance, TextChat };
+    enum class Operation { Generate, Upscale, Edit, PromptEnhance, TextChat, TextChatLoad, TextChatUnload };
     // A routed generation's submitted prompts, returned without preset prefixes.
     struct RoutedPrompts
     {
@@ -94,7 +94,8 @@ private:
     void startPromptEnhancement();
     QStringList readyTextChatEngines() const;
     QStringList builtInChatTemplates(const QString &executable) const;
-    void submitTextChat(QWebSocket* socket, const QJsonObject& message);
+    void submitTextChat(QWebSocket* socket, const QJsonObject& message, Operation operation);
+    void submitTextChatUnload(QWebSocket* socket, const QJsonObject& message);
     void startTextChat();
     void handleLlmFinished(int exitCode, QProcess::ExitStatus status);
     void handleLlamaServerFinished(const LlamaServerReply &reply);

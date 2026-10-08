@@ -49,6 +49,9 @@ public:
     QString enhancePrompt(const PromptEnhancementRequest& request);
     bool canChat(const QString& modelId) const;
     QString submitChat(const TextChatRequest& request);
+    // Preloads the server engine with the same model and parameters as later chat requests.
+    QString loadChatModel(const QString& modelId, const QJsonObject& parameters = {});
+    QString unloadChatModel();
 signals:
     void serviceStateChanged(KiraService::ServiceConnectionState state, const QString &code, const QString &detail);
     void capabilitiesChanged(const KiraService::ServiceCapabilities &capabilities);
@@ -68,6 +71,7 @@ signals:
     void imageJobFinished(const KiraService::ImageJobResult &result);
     void promptEnhancementFinished(const KiraService::PromptEnhancementResult& result);
     void chatFinished(const KiraService::TextChatResult& result);
+    void chatModelFinished(const KiraService::ChatModelResult& result);
 private:
     QString defaultLlmModelId(const QString &role) const;
     struct PendingJob
@@ -77,6 +81,7 @@ private:
         QString mimeType;
         bool promptEnhancement = false;
         bool textChat = false;
+        QString chatModelOperation; // "text.chat.load" or "text.chat.unload".
         QString prompt;
         QString negativePrompt;
     };

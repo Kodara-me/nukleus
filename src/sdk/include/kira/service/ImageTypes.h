@@ -125,6 +125,20 @@ struct ServiceCapabilities
     bool modelRouting = false;
     bool textChat = false;
     QStringList textChatEngines; // Ready text.chat engines: "server", "completion".
+    bool chatModelControl = false; // text.chat.load and text.chat.unload.
+};
+
+// Result of text.chat.load (load true) or text.chat.unload (load false).
+struct ChatModelResult
+{
+    QString jobId;
+    bool load = true;
+    bool succeeded = false;
+    bool coldStart = false; // load: the request loaded the model; false when it was already loaded.
+    bool unloaded = false; // unload: a model was loaded and has been unloaded.
+    qint64 durationMs = -1;
+    QString errorCode;
+    QString message;
 };
 
 struct TextChatMessage
@@ -200,6 +214,7 @@ Q_DECLARE_METATYPE(KiraService::PromptEnhancementRequest)
 Q_DECLARE_METATYPE(KiraService::PromptEnhancementResult)
 Q_DECLARE_METATYPE(KiraService::TextChatRequest)
 Q_DECLARE_METATYPE(KiraService::TextChatResult)
+Q_DECLARE_METATYPE(KiraService::ChatModelResult)
 Q_DECLARE_METATYPE(KiraService::ServiceCapabilities)
 Q_DECLARE_METATYPE(KiraService::ServiceConnectionState)
 Q_DECLARE_METATYPE(KiraService::JobState)

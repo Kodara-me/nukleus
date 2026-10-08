@@ -25,8 +25,10 @@ the service knows nothing about the client's domain. Its default `server`
 engine runs llama.cpp's `llama-server` on loopback and keeps the model loaded
 between turns; the `completion` engine reuses `llama-completion` and reloads
 the model on every turn. Clients choose the engine, sampling, GPU layer count
-and KV-cache placement per request. The service unloads `llama-server` before
-any other job and after ten minutes without a chat. Set `KIRA_LLAMA_SERVER` to
+and KV-cache placement per request. `llama-server` starts on the first chat
+that needs it, or earlier through `text.chat.load`; `text.chat.unload` stops
+it. The service also unloads it before any other job and after ten minutes
+without a chat. Set `KIRA_LLAMA_SERVER` to
 override the executable and `KIRA_LLAMA_SERVER_IDLE_SECONDS` to change the
 idle period, for example in `/etc/kira-service/kira-service.conf`. See
 [`docs/protocol-v3.md`](docs/protocol-v3.md).

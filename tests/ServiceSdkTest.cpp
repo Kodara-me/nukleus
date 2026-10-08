@@ -31,7 +31,7 @@ public:
                 const QString type = message.value(QStringLiteral("type")).toString();
                 if (type == QStringLiteral("authenticate")) {
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"authenticated\"}"));
-                    socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\",\"image.upscale\",\"image.edit\",\"text.chat\"],\"textChatEngines\":[\"server\",\"completion\"]}"));
+                    socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\",\"image.upscale\",\"image.edit\",\"text.chat\",\"text.chat.load\",\"text.chat.unload\"],\"textChatEngines\":[\"server\",\"completion\"]}"));
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list.result\",\"categories\":[{\"category\":\"image-generation\",\"models\":[{\"id\":\"image-generation:test.safetensors\",\"name\":\"Test\",\"fileName\":\"test.safetensors\",\"bytes\":1,\"modelType\":\"diffusion\",\"explicitContent\":true,\"companionFiles\":{\"clip-l\":\"companions/test.safetensors/clip-l/clip_l.safetensors\"},\"companionFileName\":\"companions/test.safetensors/vae.safetensors\",\"companionRole\":\"vae\",\"displayName\":\"Test\"}]},{\"category\":\"upscaler\",\"models\":[{\"id\":\"upscaler:test.gguf\",\"name\":\"Test 2x\",\"fileName\":\"test.gguf\",\"bytes\":2,\"displayName\":\"Test 2x\"}]},{\"category\":\"llm-chat\",\"models\":[{\"id\":\"llm-chat:test.gguf\",\"name\":\"Test LLM\",\"fileName\":\"llm.gguf\",\"bytes\":3,\"companionFileName\":\"companions/llm.gguf/mmproj.gguf\",\"companionRole\":\"mmproj\",\"displayName\":\"Test LLM\"}]}]}"));
                 } else if (type == "models.configure") {
                     const QJsonObject reply{{"type", "models.configure.completed"}, {"id", message.value("id")}, {"model", QJsonObject{{"recommendedOptions", message.value("recommendedOptions")}}}};
@@ -43,7 +43,11 @@ public:
                 } else if (type == QStringLiteral("submit")) {
                     const QString jobId = message.value(QStringLiteral("jobId")).toString();
                     const auto options = message.value("options").toObject();
-                    if (message.value("operation") == "text.chat") {
+                    if (message.value("operation") == "text.chat.load" || message.value("operation") == "text.chat.unload") {
+                        const QJsonObject reply{{"type", "result"}, {"jobId", jobId}, {"operation", message.value("operation")},
+                            {"coldStart", true}, {"unloaded", true}, {"durationMs", 50}};
+                        socket->sendTextMessage(QString::fromUtf8(QJsonDocument(reply).toJson(QJsonDocument::Compact)));
+                    } else if (message.value("operation") == "text.chat") {
                         const bool fail = options.value("messages").toArray().last().toObject().value("content") == "fail";
                         const QJsonObject reply = fail
                             ? QJsonObject{{"type", "error"}, {"jobId", jobId}, {"code", "chat-context-exceeded"}, {"message", "too long"}}
@@ -323,6 +327,25 @@ void ServiceSdkTest::submitsTextChat()
     QVERIFY(!failure.succeeded); QCOMPARE(failure.errorCode, QString("chat-context-exceeded"));
     QCOMPARE(failure.message, QString("too long")); QVERIFY(failure.text.isEmpty());
     QVERIFY(!service.messages().last().value("options").toObject().contains("parameters"));
+
+    QVERIFY(client.capabilities().chatModelControl);
+    QSignalSpy modelFinished(&client, &KiraService::ServiceClient::chatModelFinished);
+    QVERIFY(client.loadChatModel("missing", parameters).isEmpty());
+    const auto loadId = client.loadChatModel("llm-chat:test.gguf", parameters);
+    QVERIFY(!loadId.isEmpty());
+    QTRY_COMPARE(modelFinished.count(), 1);
+    const auto load = service.messages().last();
+    QCOMPARE(load.value("operation").toString(), QString("text.chat.load"));
+    QCOMPARE(load.value("options").toObject(), QJsonObject({{"modelId", "llm-chat:test.gguf"}, {"parameters", parameters}}));
+    auto model = qvariant_cast<KiraService::ChatModelResult>(modelFinished.takeFirst().at(0));
+    QVERIFY(model.succeeded); QVERIFY(model.load); QVERIFY(model.coldStart); QCOMPARE(model.jobId, loadId);
+    QCOMPARE(model.durationMs, 50);
+    QVERIFY(!client.unloadChatModel().isEmpty());
+    QTRY_COMPARE(modelFinished.count(), 1);
+    QCOMPARE(service.messages().last().value("operation").toString(), QString("text.chat.unload"));
+    QVERIFY(!service.messages().last().contains("options"));
+    model = qvariant_cast<KiraService::ChatModelResult>(modelFinished.takeFirst().at(0));
+    QVERIFY(model.succeeded); QVERIFY(!model.load); QVERIFY(model.unloaded);
 }
 
 void ServiceSdkTest::submitsBinaryInputAndReturnsBinaryOutput()

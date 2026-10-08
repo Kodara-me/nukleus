@@ -46,7 +46,8 @@ public:
     ~LlamaServerRunner() override;
     bool isAvailable() const;
     bool isRunning() const;
-    // Starts or reuses the server, waits until it is healthy and posts one chat completion.
+    // Starts or reuses the server, waits until it is healthy and posts one chat completion. An empty
+    // body only loads the model and reports success once it is ready.
     void run(const LlamaServerLaunch &launch, const QJsonObject &body, int timeoutMs);
     // Abandons the active request and kills the server; finished() reports chat-canceled.
     void cancel();

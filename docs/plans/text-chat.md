@@ -15,7 +15,8 @@ implementation added chat-only sampling overrides beyond this plan (`topK`,
 `minP`, `repeatPenalty`, `seed`, `flashAttention`, `reasoning`, DRY and XTC
 values, a validated built-in `chatTemplate`), schema-constrained
 structured replies (`jsonSchema`, the decoded `json` result and
-`chat-invalid-json`), `durationMs` and `coldStart` results, a private API-key file instead of `--api-key`, and the
+`chat-invalid-json`), explicit `text.chat.load` and `text.chat.unload`
+operations, `durationMs` and `coldStart` results, a private API-key file instead of `--api-key`, and the
 `chat-canceled` code reported internally when a disconnect cancels a chat.
 
 ## Goal

@@ -477,15 +477,19 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     const bool upscale = operationName == QStringLiteral("image.upscale");
     const bool promptEnhance = operationName == QStringLiteral("prompt.enhance");
     const bool textChat = operationName == QStringLiteral("text.chat");
+    const bool textChatLoad = operationName == QStringLiteral("text.chat.load");
+    const bool textChatUnload = operationName == QStringLiteral("text.chat.unload");
     QJsonObject options = message.value(QStringLiteral("options")).toObject();
     const QString jobId = message.value(QStringLiteral("jobId")).toString();
     bool duplicateId = jobForId(jobId) != nullptr;
     for (const auto &pending : m_pendingUploads) {
         duplicateId = duplicateId || pending->id == jobId;
     }
-    if ((!generate && !upscale && !edit && !promptEnhance && !textChat) || jobId.isEmpty() || duplicateId) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid job request"), jobId); return; }
+    if ((!generate && !upscale && !edit && !promptEnhance && !textChat && !textChatLoad && !textChatUnload)
+        || jobId.isEmpty() || duplicateId) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid job request"), jobId); return; }
     if (promptEnhance) { submitPromptEnhancement(socket, message); return; }
-    if (textChat) { submitTextChat(socket, message); return; }
+    if (textChat || textChatLoad) { submitTextChat(socket, message, textChat ? Operation::TextChat : Operation::TextChatLoad); return; }
+    if (textChatUnload) { submitTextChatUnload(socket, message); return; }
     if (!isImageReady()) {
         sendError(socket, QStringLiteral("backend-not-ready"), tr("The requested service backend is unavailable"), jobId);
         return;
@@ -945,19 +949,27 @@ void KiraServiceDaemon::startNextJob()
 
 bool KiraServiceDaemon::isServerChat(const Job &job) const
 {
-    return job.operation == Operation::TextChat && job.options.value("engine").toString() == "server";
+    return job.operation == Operation::TextChatLoad
+        || (job.operation == Operation::TextChat && job.options.value("engine").toString() == "server");
 }
 
 void KiraServiceDaemon::runActiveJob()
 {
     m_activeJobClock.start();
+    const bool chatModelLoaded = m_llamaServer->isRunning();
     // A loaded chat model would compete with any other GPU work for memory.
     if (!isServerChat(*m_activeJob)) m_llamaServer->stop();
+    if (m_activeJob->operation == Operation::TextChatUnload) {
+        send(m_activeJob->client, {{"type", "result"}, {"jobId", m_activeJob->id}, {"operation", "text.chat.unload"},
+            {"unloaded", chatModelLoaded}, {"durationMs", m_activeJobClock.elapsed()}});
+        m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
+        return;
+    }
     if (m_activeJob->operation == Operation::PromptEnhance) {
         startPromptEnhancement();
         return;
     }
-    if (m_activeJob->operation == Operation::TextChat) {
+    if (m_activeJob->operation == Operation::TextChat || m_activeJob->operation == Operation::TextChatLoad) {
         startTextChat();
         return;
     }
@@ -1062,6 +1074,10 @@ void KiraServiceDaemon::sendCapabilities(QWebSocket *socket) const
     if (isPromptEnhancementReady()) operations.append("prompt.enhance");
     const auto chatEngines = readyTextChatEngines();
     if (!chatEngines.isEmpty()) operations.append("text.chat");
+    if (chatEngines.contains("server")) {
+        operations.append("text.chat.load");
+        operations.append("text.chat.unload");
+    }
     send(socket, {{QStringLiteral("type"), QStringLiteral("capabilities")}, {QStringLiteral("state"), state}, {QStringLiteral("operations"), operations},
         {QStringLiteral("textChatEngines"), QJsonArray::fromStringList(chatEngines)}});
 }
@@ -1191,17 +1207,22 @@ QStringList KiraServiceDaemon::readyTextChatEngines() const
     return engines;
 }
 
-void KiraServiceDaemon::submitTextChat(QWebSocket* socket, const QJsonObject& message)
+void KiraServiceDaemon::submitTextChat(QWebSocket* socket, const QJsonObject& message, Operation operation)
 {
     const auto id = message.value("jobId").toString();
     const auto request = message.value("options").toObject();
     const auto overrides = request.value("parameters").toObject();
+    // text.chat.load takes the same model and parameters as text.chat, without messages, so a client can
+    // preload exactly what its chat requests will use; only the load settings matter to it.
+    const bool load = operation == Operation::TextChatLoad;
     bool knownKeys = true;
-    for (const auto& key : request.keys()) knownKeys = knownKeys && (key == "modelId" || key == "messages" || key == "parameters");
+    for (const auto& key : request.keys())
+        knownKeys = knownKeys && (key == "modelId" || key == "parameters" || (!load && key == "messages"));
     if (!message.value("options").isObject() || !knownKeys || !request.value("modelId").isString()
-        || !validChatMessages(request.value("messages"))
+        || (!load && !validChatMessages(request.value("messages")))
+        || (load && overrides.value("engine").toString("server") != "server")
         || (request.contains("parameters") && !request.value("parameters").isObject()) || !validChatOverrides(overrides)) {
-        sendError(socket, "invalid-request", tr("Invalid text chat request"), id);
+        sendError(socket, "invalid-request", load ? tr("Invalid text chat load request") : tr("Invalid text chat request"), id);
         return;
     }
     const auto model = m_models->model(ModelCategory::LlmChat, request.value("modelId").toString());
@@ -1230,11 +1251,11 @@ void KiraServiceDaemon::submitTextChat(QWebSocket* socket, const QJsonObject& me
     }
     auto job = std::make_shared<Job>();
     job->id = id;
-    job->operation = Operation::TextChat;
+    job->operation = operation;
     job->client = socket;
     job->modelPath = model->filePath;
     job->options = parameters;
-    job->options.insert("messages", request.value("messages"));
+    if (!load) job->options.insert("messages", request.value("messages"));
     job->options.insert("penalizeRepeats", overrides.value("penalizeRepeats").toBool(true));
     job->options.insert("stop", overrides.value("stop").toArray());
     job->options.insert("engine", engine);
@@ -1259,14 +1280,33 @@ void KiraServiceDaemon::submitTextChat(QWebSocket* socket, const QJsonObject& me
     enqueue(job);
 }
 
+void KiraServiceDaemon::submitTextChatUnload(QWebSocket* socket, const QJsonObject& message)
+{
+    const auto id = message.value("jobId").toString();
+    if ((message.contains("options") && !message.value("options").isObject()) || !message.value("options").toObject().isEmpty()) {
+        sendError(socket, "invalid-request", tr("text.chat.unload takes no options"), id); return;
+    }
+    if (m_pendingUploads.contains(socket) || m_queue.size() >= MaximumQueuedJobs) {
+        sendError(socket, "queue-full", tr("An upload is pending or the service queue is full"), id); return;
+    }
+    // Queued like any job, so it never interrupts a chat in progress; running it unloads the model.
+    auto job = std::make_shared<Job>();
+    job->id = id;
+    job->operation = Operation::TextChatUnload;
+    job->client = socket;
+    enqueue(job);
+}
+
 void KiraServiceDaemon::startTextChat()
 {
     const auto job = m_activeJob;
     if (isServerChat(*job)) {
         // Reasoning is a launch setting of llama-server; llama-completion receives it in startLlm.
         const auto arguments = chatLaunchArguments(job->options) + QStringList{"--reasoning", job->options.value("reasoning").toString()};
+        // An empty body only loads the model.
         m_llamaServer->run({job->modelPath, job->options.value("contextLength").toInt(), arguments},
-                           chatCompletionBody(job->options), m_configuration.promptEnhancementTimeoutMs);
+                           job->operation == Operation::TextChatLoad ? QJsonObject() : chatCompletionBody(job->options),
+                           m_configuration.promptEnhancementTimeoutMs);
         return;
     }
     // llama-completion runs a single user turn, so the conversation is flattened into it as a transcript.
@@ -1371,6 +1411,13 @@ void KiraServiceDaemon::handleLlamaServerFinished(const LlamaServerReply &reply)
 {
     if (!m_activeJob || !isServerChat(*m_activeJob)) return;
     const auto job = m_activeJob;
+    if (job->operation == Operation::TextChatLoad) {
+        if (!reply.succeeded) sendError(job->client, reply.errorCode, reply.message, job->id);
+        else send(job->client, {{"type", "result"}, {"jobId", job->id}, {"operation", "text.chat.load"},
+            {"coldStart", reply.coldStart}, {"durationMs", m_activeJobClock.elapsed()}});
+        m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
+        return;
+    }
     const QString text = cleanChatReply(reply.content, job->options.value("stop").toArray());
     if (!reply.succeeded) sendError(job->client, reply.errorCode, reply.message, job->id);
     else if (text.isEmpty()) sendError(job->client, "chat-empty-result", tr("The model returned an empty reply"), job->id);
