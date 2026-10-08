@@ -10,6 +10,8 @@ add_executable(kira-service-test
     ../src/sdk/include/kira/service/GenerationProgress.h
     ../src/daemon/KiraService.cpp
     ../src/daemon/KiraService.h
+    ../src/daemon/LlamaServerRunner.cpp
+    ../src/daemon/LlamaServerRunner.h
     ../src/daemon/ModelCatalog.cpp
     ../src/daemon/ModelCatalog.h
     ../src/daemon/SdCliRunner.cpp
@@ -25,6 +27,12 @@ target_include_directories(kira-service-test PRIVATE
     ../src/daemon
 )
 target_link_libraries(kira-service-test PRIVATE KiraService::SDK Qt6::Network Qt6::Test Qt6::WebSockets)
+# Stand-in for llama-server, so tests never start the real one installed on the host.
+add_executable(kira-service-fake-llama-server FakeLlamaServer.cpp)
+target_link_libraries(kira-service-fake-llama-server PRIVATE Qt6::Network)
+add_dependencies(kira-service-test kira-service-fake-llama-server)
+target_compile_definitions(kira-service-test PRIVATE
+    KIRA_FAKE_LLAMA_SERVER="$<TARGET_FILE:kira-service-fake-llama-server>")
 add_test(NAME kira-service-test COMMAND kira-service-test)
 
 add_executable(kira-service-sdk-test ServiceSdkTest.cpp)

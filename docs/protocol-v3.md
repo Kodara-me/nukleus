@@ -41,6 +41,106 @@ Success returns one JSON message without binary data:
 {"type":"result","operation":"prompt.enhance","jobId":"enhance-1","prompt":"..."}
 ```
 
+## Text chat (additive v3 extension)
+
+text.chat sends an ordered conversation to an installed LLM (llm-chat) and
+returns one complete reply. It is generic: the service knows nothing about the
+client's domain.
+
+```json
+{"type":"submit","operation":"text.chat","jobId":"chat-1","options":{"modelId":"llm-chat:model.gguf","messages":[{"role":"system","content":"You are Mia."},{"role":"user","content":"Hi."}],"parameters":{"maxTokens":512,"stop":["\nUser:"],"minP":0.05,"gpuLayers":"all","kvCacheLocation":"ram","kvCacheType":"q8_0"}}}
+```
+
+`messages` holds 1–1024 objects with exactly string `role` and `content`. A
+`system` message may appear only first; other roles are `user` and
+`assistant`; the last message is `user`. System and user content must not be
+blank. The serialized messages total at most 1 MiB.
+
+Optional `parameters`: `temperature`, `topP`, `contextLength` and `maxTokens`
+(standard LLM validation, model recommendations as defaults);
+`stop` (0–4 nonempty strings of at most 256 bytes); `topK` (integer 0–1000,
+default 20); `minP` (0–1, default 0, disabled); `penalizeRepeats` (boolean,
+default true) and `repeatPenalty` (1–2, default 1.1; `penalizeRepeats: false`
+forces 1.0 over no tokens); `seed` (-1–2147483647, default -1, random);
+`engine` (`server` or `completion`, default `server`); `gpuLayers` (`all`,
+`auto` or an integer 0–999, default `all`); `kvCacheLocation` (`gpu` or
+`ram`, default `gpu`); `kvCacheType` (`f16`, `q8_0` or `q4_0`, default
+`f16`); `flashAttention` (`auto`, `on` or `off`, default `auto`); `jsonSchema`
+(a JSON Schema object of at most 64 KiB; not combinable with `stop`);
+`reasoning` (`off` or `on`, default `off`; reasoning text is always removed
+from the reply, but its tokens count toward `maxTokens` and the turn's time);
+DRY repetition control `dryMultiplier` (0–10, default 0, disabled), `dryBase`
+(1–10, default 1.75), `dryAllowedLength` (integer 0–100, default 2) and
+`dryPenaltyLastN` (integer -1–131072, default 64, -1 = whole context); XTC
+`xtcProbability` (0–1, default 0, disabled) and `xtcThreshold` (0–1, default
+0.1); `chatTemplate` (a llama.cpp built-in template name such as `chatml` or
+`mistral-v7`, default: the model's own template). The service reads the
+built-in names from the engine executable's `--help` and refuses others,
+because llama.cpp would otherwise treat an unknown name as a literal Jinja
+template. Unknown keys fail with `invalid-request`. Overrides never change model recommendations,
+and none of these chat-only keys affect prompt.enhance or image jobs.
+
+Load settings map to llama.cpp arguments: `gpuLayers` to `--n-gpu-layers`,
+with `--fit on` for `auto` (fill the GPU, run the remaining layers on the CPU)
+and `--fit off` otherwise, so a model that does not fit fails instead of
+silently spilling; `kvCacheLocation: "ram"` to `--no-kv-offload`;
+`kvCacheType` to `--cache-type-k` and `--cache-type-v`; `flashAttention` to
+`--flash-attn`; `chatTemplate` to `--chat-template`; `reasoning` to
+`--reasoning`. Sampling uses the order penalties, DRY, top-k, top-p, min-p,
+XTC, temperature.
+
+Engines:
+
+- `server` (default) runs a llama-server child on 127.0.0.1 with a random
+  port and a private API-key file. The model stays loaded between turns and
+  the processed conversation prefix is reused (`cache_prompt`). A request
+  whose model, `contextLength`, `gpuLayers`, `kvCacheLocation`, `kvCacheType`,
+  `flashAttention`, `chatTemplate` or `reasoning` differs from the loaded one
+  restarts it. The service
+  unloads it before any other job (image work, prompt.enhance, a `completion`
+  chat) and after an idle period: ten minutes, or
+  `KIRA_LLAMA_SERVER_IDLE_SECONDS`. `KIRA_LLAMA_SERVER` selects the
+  executable.
+- `completion` runs llama-completion through the shared FIFO like
+  prompt.enhance and reloads the model on every turn: the system content opens
+  the single user turn, followed by the conversation as `User:`/`Assistant:`
+  lines.
+
+Both engines share the service FIFO, so a chat waits behind queued image work.
+`capabilities.operations` includes `text.chat` when an engine is ready, and
+`capabilities.textChatEngines` lists the ready engines; a request for another
+engine fails with `backend-not-ready`.
+
+```json
+{"type":"result","operation":"text.chat","jobId":"chat-1","text":"*smiles* Hello.","engine":"server","finishReason":"stop","usage":{"promptTokens":1834,"completionTokens":212},"durationMs":2140,"coldStart":false}
+```
+
+The reply is trimmed, `<think>` blocks are removed (an unclosed one is cut)
+and the text is cut at the first `stop` string. `durationMs` is the whole
+turn measured by the service, model loading included, and `coldStart` is true
+when the turn loaded the model (always for `completion`). `finishReason`
+(`stop` or `length`) and `usage` are reported by `server` only.
+
+Structured replies: with `jsonSchema`, llama.cpp constrains generation to the
+schema (`response_format` for `server`, `--json-schema-file` for
+`completion`). The service checks that the cleaned reply parses as one JSON
+value and adds it decoded as `json`; `text` keeps the raw JSON. A reply that
+does not parse, typically one cut by `maxTokens`, fails with
+`chat-invalid-json`. The schema is the client's: the service never interprets
+the fields.
+
+```json
+{"type":"result","operation":"text.chat","jobId":"chat-2","text":"{\"speech\":\"*smiles* Hello.\"}","json":{"speech":"*smiles* Hello."},"engine":"server","finishReason":"stop","usage":{"promptTokens":1834,"completionTokens":12},"durationMs":640,"coldStart":false}
+```
+
+Failures: `chat-context-exceeded` (`server`: the conversation does not fit
+`contextLength`; the message gives both token counts), `chat-failed` (with the
+backend's trailing output, for example a model that does not fit in memory),
+`chat-timeout` (ten minutes per turn, loading included), `chat-output-too-large`
+(1 MiB), `chat-empty-result` and `chat-invalid-json`. Disconnecting cancels queued and active chats;
+an active `server` chat kills llama-server. SDK clients use `canChat()`,
+`submitChat(TextChatRequest)` and `chatFinished(TextChatResult)`.
+
 ## Per-model prompt styles (additive v3 extension)
 
 Image-generation catalogue entries include an ordered `styles` array:

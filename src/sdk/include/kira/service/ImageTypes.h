@@ -5,6 +5,7 @@
 #include <QList>
 #include <QMetaType>
 #include <QString>
+#include <QStringList>
 #include <QUrl>
 
 #include <optional>
@@ -122,6 +123,37 @@ struct ServiceCapabilities
     bool imageEdit = false;
     bool promptEnhancement = false;
     bool modelRouting = false;
+    bool textChat = false;
+    QStringList textChatEngines; // Ready text.chat engines: "server", "completion".
+};
+
+struct TextChatMessage
+{
+    QString role; // "system" (first only), "user" or "assistant".
+    QString content;
+};
+
+struct TextChatRequest
+{
+    QString modelId;
+    QList<TextChatMessage> messages;
+    QJsonObject parameters; // Optional sampling, engine and memory-placement overrides.
+};
+
+struct TextChatResult
+{
+    QString jobId;
+    bool succeeded = false;
+    QString text;
+    QString engine;
+    QString finishReason; // Empty when the engine does not report it.
+    int promptTokens = -1; // -1 when the engine does not report usage.
+    int completionTokens = -1;
+    qint64 durationMs = -1; // Whole turn measured by the service, model loading included.
+    bool coldStart = false; // The turn loaded the model.
+    QString errorCode;
+    QString message;
+    QJsonValue json; // The parsed reply when the request set jsonSchema; Undefined otherwise.
 };
 
 struct PromptEnhancementRequest
@@ -166,6 +198,8 @@ Q_DECLARE_METATYPE(KiraService::ImageUpscaleRequest)
 Q_DECLARE_METATYPE(KiraService::ImageJobResult)
 Q_DECLARE_METATYPE(KiraService::PromptEnhancementRequest)
 Q_DECLARE_METATYPE(KiraService::PromptEnhancementResult)
+Q_DECLARE_METATYPE(KiraService::TextChatRequest)
+Q_DECLARE_METATYPE(KiraService::TextChatResult)
 Q_DECLARE_METATYPE(KiraService::ServiceCapabilities)
 Q_DECLARE_METATYPE(KiraService::ServiceConnectionState)
 Q_DECLARE_METATYPE(KiraService::JobState)

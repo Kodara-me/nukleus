@@ -47,6 +47,8 @@ public:
     QString submitUpscale(const ImageUpscaleRequest &request);
     bool canEnhancePrompt(const QString& modelId) const;
     QString enhancePrompt(const PromptEnhancementRequest& request);
+    bool canChat(const QString& modelId) const;
+    QString submitChat(const TextChatRequest& request);
 signals:
     void serviceStateChanged(KiraService::ServiceConnectionState state, const QString &code, const QString &detail);
     void capabilitiesChanged(const KiraService::ServiceCapabilities &capabilities);
@@ -65,6 +67,7 @@ signals:
     void generationProgressChanged(const QString &jobId, const KiraService::GenerationProgress &progress);
     void imageJobFinished(const KiraService::ImageJobResult &result);
     void promptEnhancementFinished(const KiraService::PromptEnhancementResult& result);
+    void chatFinished(const KiraService::TextChatResult& result);
 private:
     QString defaultLlmModelId(const QString &role) const;
     struct PendingJob
@@ -73,6 +76,7 @@ private:
         QList<QByteArray> inputImages;
         QString mimeType;
         bool promptEnhancement = false;
+        bool textChat = false;
         QString prompt;
         QString negativePrompt;
     };

@@ -12,6 +12,13 @@ and permits a per-job systemPrompt. Tests cover overrides, failures, timeouts an
 disconnect recovery with a subprocess fixture, without model weights or a GPU.
 No Python worker or optional Python dependency is required.
 
+text.chat runs through two engines: a managed `llama-server` (default; set
+KIRA_LLAMA_SERVER to override, KIRA_LLAMA_SERVER_IDLE_SECONDS for the idle
+unload) and the llama-completion path above. `LlamaServerRunner` owns the
+server process. Tests never start the real server: `kira-service-fake-llama-server`
+(tests/FakeLlamaServer.cpp) records launches and requests and simulates slow
+loads, load failures, context overflow, crashes and hangs through marker files.
+
 Kira Service is a C++20 Qt 6 project. Build dependencies are CMake, Ninja, a C++20 compiler, and Qt 6.2+ Network, WebSockets, and Widgets, SVG, and LinguistTools development packages, plus Kira UI Framework 0.2. `sd-cli` is required on a machine that performs image work.
 
 ```sh

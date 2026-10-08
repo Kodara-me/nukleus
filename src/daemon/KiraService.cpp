@@ -20,6 +20,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPointer>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QUuid>
 #include <QWebSocket>
@@ -67,6 +68,167 @@ bool validGenerationOptions(const QJsonObject &options)
         && validChoice("sampler", KiraService::Protocol::modelSamplers())
         && validChoice("scheduler", KiraService::Protocol::modelSchedulers())
         && (!options.contains("hasInput") || options.value("hasInput").isBool());
+}
+
+constexpr int MaximumChatMessages = 1024;
+constexpr int MaximumChatBytes = 1024 * 1024;
+constexpr int MaximumChatStops = 4;
+constexpr int MaximumChatStopBytes = 256;
+constexpr int MaximumChatSchemaBytes = 64 * 1024;
+
+// Validates text.chat messages: an optional leading system message, then user/assistant turns ending with the user.
+bool validChatMessages(const QJsonValue &value)
+{
+    if (!value.isArray()) return false;
+    const auto messages = value.toArray();
+    if (messages.isEmpty() || messages.size() > MaximumChatMessages
+        || QJsonDocument(messages).toJson(QJsonDocument::Compact).size() > MaximumChatBytes) return false;
+    for (int i = 0; i < messages.size(); ++i) {
+        const auto message = messages.at(i).toObject();
+        const auto role = message.value("role").toString();
+        if (!messages.at(i).isObject() || message.size() != 2 || !message.value("role").isString()
+            || !message.value("content").isString()) return false;
+        if (role != "user" && role != "assistant" && (role != "system" || i != 0)) return false;
+        if (role != "assistant" && message.value("content").toString().trimmed().isEmpty()) return false;
+    }
+    return messages.last().toObject().value("role").toString() == "user";
+}
+
+// Validates the text.chat-only overrides; sampling values are checked with the model options.
+bool validChatOverrides(const QJsonObject &overrides)
+{
+    const QStringList allowed{"temperature", "topP", "contextLength", "maxTokens", "penalizeRepeats", "stop",
+        "topK", "minP", "repeatPenalty", "seed", "engine", "gpuLayers", "kvCacheLocation", "kvCacheType",
+        "flashAttention", "jsonSchema", "reasoning", "dryMultiplier", "dryBase", "dryAllowedLength",
+        "dryPenaltyLastN", "xtcProbability", "xtcThreshold", "chatTemplate"};
+    for (const auto &key : overrides.keys())
+        if (!allowed.contains(key)) return false;
+    const auto choice = [&overrides](const QString &key, const QStringList &choices) {
+        return !overrides.contains(key) || choices.contains(overrides.value(key).toString());
+    };
+    if (overrides.contains("stop")) {
+        if (!overrides.value("stop").isArray() || overrides.value("stop").toArray().size() > MaximumChatStops) return false;
+        for (const auto &stop : overrides.value("stop").toArray())
+            if (!stop.isString() || stop.toString().isEmpty() || stop.toString().toUtf8().size() > MaximumChatStopBytes) return false;
+    }
+    // A constrained reply is one JSON document; cutting it at a stop string would break it.
+    if (overrides.contains("jsonSchema")
+        && (!overrides.value("jsonSchema").isObject() || overrides.contains("stop")
+            || QJsonDocument(overrides.value("jsonSchema").toObject()).toJson(QJsonDocument::Compact).size() > MaximumChatSchemaBytes))
+        return false;
+    const auto layers = overrides.value("gpuLayers");
+    return (!overrides.contains("penalizeRepeats") || overrides.value("penalizeRepeats").isBool())
+        && validNumber(overrides, "topK", 0, 1000, true, false)
+        && validNumber(overrides, "minP", 0, 1, false, false)
+        && validNumber(overrides, "repeatPenalty", 1, 2, false, false)
+        && validNumber(overrides, "seed", -1, std::numeric_limits<int>::max(), true, false)
+        && choice("flashAttention", {"auto", "on", "off"})
+        && choice("reasoning", {"off", "on"})
+        && validNumber(overrides, "dryMultiplier", 0, 10, false, false)
+        && validNumber(overrides, "dryBase", 1, 10, false, false)
+        && validNumber(overrides, "dryAllowedLength", 0, 100, true, false)
+        && validNumber(overrides, "dryPenaltyLastN", -1, 131072, true, false)
+        && validNumber(overrides, "xtcProbability", 0, 1, false, false)
+        && validNumber(overrides, "xtcThreshold", 0, 1, false, false)
+        // The name is checked against llama.cpp's built-in list once the engine is known.
+        && (!overrides.contains("chatTemplate") || overrides.value("chatTemplate").isString())
+        && choice("engine", {"server", "completion"})
+        && (!overrides.contains("gpuLayers") || layers.toString() == "all" || layers.toString() == "auto"
+            || validNumber(overrides, "gpuLayers", 0, 999, true))
+        && choice("kvCacheLocation", {"gpu", "ram"})
+        && choice("kvCacheType", {"f16", "q8_0", "q4_0"});
+}
+
+// llama.cpp load arguments shared by both chat engines: model layers, KV cache and attention kernel.
+QStringList chatLaunchArguments(const QJsonObject &options)
+{
+    const auto layers = options.value("gpuLayers");
+    QStringList arguments{"--n-gpu-layers", layers.isString() ? layers.toString() : QString::number(layers.toInt())};
+    // auto fills the GPU and runs the remaining layers on the CPU; otherwise a model that does not fit
+    // must fail to load instead of silently spilling onto the CPU.
+    arguments += {"--fit", layers.toString() == "auto" ? "on" : "off"};
+    if (options.value("kvCacheLocation").toString() == "ram") arguments += "--no-kv-offload";
+    const auto cacheType = options.value("kvCacheType").toString();
+    arguments += {"--cache-type-k", cacheType, "--cache-type-v", cacheType};
+    arguments += {"--flash-attn", options.value("flashAttention").toString()};
+    if (options.contains("chatTemplate")) arguments += {"--chat-template", options.value("chatTemplate").toString()};
+    return arguments;
+}
+
+// Sampler order of prompt.enhance; chat adds DRY, min-p and XTC in llama.cpp's default positions.
+QString samplerChain(const QJsonObject &options)
+{
+    return options.contains("minP") ? QStringLiteral("penalties;dry;top_k;top_p;min_p;xtc;temperature")
+                                    : QStringLiteral("penalties;top_k;top_p;temperature");
+}
+
+// Parses the built-in chat template names from llama.cpp's --help. llama.cpp accepts any other
+// string as a Jinja template source, so an unchecked typo would silently become the prompt format.
+QStringList parseBuiltInChatTemplates(const QString &help)
+{
+    const auto start = help.indexOf("list of built-in templates:");
+    if (start < 0) return {};
+    const auto end = help.indexOf("(env:", start);
+    const auto block = help.mid(start + 27, end < 0 ? -1 : end - start - 27);
+    QStringList names;
+    for (const auto &name : block.split(QRegularExpression("[,\\s]+"), Qt::SkipEmptyParts)) names.append(name);
+    return names;
+}
+
+// llama.cpp penalizes prompt tokens too, which pushes faithful rewrites toward synonyms or another
+// language; such jobs turn the penalty off entirely.
+double repeatPenalty(const QJsonObject &options, bool penalizeRepeats)
+{
+    return penalizeRepeats ? options.value("repeatPenalty").toDouble(1.1) : 1.0;
+}
+
+int repeatLastN(const QJsonObject &options, bool penalizeRepeats)
+{
+    return penalizeRepeats ? options.value("contextLength").toInt() : 0;
+}
+
+// Body of an OpenAI-compatible llama-server chat completion, mirroring the completion engine's sampling.
+QJsonObject chatCompletionBody(const QJsonObject &options)
+{
+    const bool penalize = options.value("penalizeRepeats").toBool(true);
+    QJsonObject body{{"messages", options.value("messages")},
+        {"temperature", options.value("temperature")}, {"top_p", options.value("topP")},
+        {"top_k", options.value("topK")}, {"min_p", options.value("minP")},
+        {"repeat_penalty", repeatPenalty(options, penalize)}, {"repeat_last_n", repeatLastN(options, penalize)},
+        {"seed", options.value("seed")}, {"max_tokens", options.value("maxTokens")},
+        {"dry_multiplier", options.value("dryMultiplier")}, {"dry_base", options.value("dryBase")},
+        {"dry_allowed_length", options.value("dryAllowedLength")}, {"dry_penalty_last_n", options.value("dryPenaltyLastN")},
+        {"xtc_probability", options.value("xtcProbability")}, {"xtc_threshold", options.value("xtcThreshold")},
+        {"samplers", QJsonArray::fromStringList(samplerChain(options).split(QLatin1Char(';')))},
+        {"cache_prompt", true}, {"stream", false}};
+    if (!options.value("stop").toArray().isEmpty()) body.insert("stop", options.value("stop"));
+    if (options.value("jsonSchema").isObject())
+        body.insert("response_format", QJsonObject{{"type", "json_schema"},
+            {"json_schema", QJsonObject{{"schema", options.value("jsonSchema")}}}});
+    return body;
+}
+
+// A schema-constrained reply must parse as JSON; a reply cut by maxTokens does not.
+std::optional<QJsonValue> structuredReply(const QString &text)
+{
+    QJsonParseError error;
+    // Wrapping lets QJsonDocument accept any JSON value, not only objects and arrays.
+    const auto document = QJsonDocument::fromJson("[" + text.toUtf8() + "]", &error);
+    if (error.error != QJsonParseError::NoError || document.array().size() != 1) return std::nullopt;
+    return document.array().first();
+}
+
+// Removes reasoning blocks and cuts the reply at the first stop string.
+QString cleanChatReply(QString text, const QJsonArray &stops)
+{
+    text.remove(QRegularExpression("<think>.*?</think>", QRegularExpression::DotMatchesEverythingOption));
+    const auto unclosed = text.indexOf("<think>");
+    if (unclosed >= 0) text.truncate(unclosed);
+    for (const auto &stop : stops) {
+        const auto index = text.indexOf(stop.toString());
+        if (index >= 0) text.truncate(index);
+    }
+    return text.trimmed();
 }
 
 }
@@ -132,11 +294,15 @@ KiraServiceDaemon::KiraServiceDaemon(KiraServiceConfiguration configuration, QOb
         } else m_promptOutput += bytes;
     });
     connect(&m_promptProcess, &QProcess::started, this, [this] { m_promptProcess.closeWriteChannel(); });
-    connect(&m_promptProcess, &QProcess::finished, this, &KiraServiceDaemon::handlePromptEnhancementFinished);
+    connect(&m_promptProcess, &QProcess::finished, this, &KiraServiceDaemon::handleLlmFinished);
+    m_llamaServer = std::make_unique<LlamaServerRunner>(m_configuration.llamaServer, m_configuration.llamaServerIdleMs);
+    // Queued, so a reply reported while a job is being started or canceled never re-enters the queue logic.
+    connect(m_llamaServer.get(), &LlamaServerRunner::finished, this, &KiraServiceDaemon::handleLlamaServerFinished,
+            Qt::QueuedConnection);
     connect(&m_promptProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) {
             m_promptError = m_promptProcess.errorString().toUtf8();
-            handlePromptEnhancementFinished(-1, QProcess::CrashExit);
+            handleLlmFinished(-1, QProcess::CrashExit);
         }
     });
     connect(m_models.get(), &ModelCatalog::installProgress, this, [this](const ModelInstallProgress &progress) {
@@ -310,14 +476,16 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     const bool edit = operationName == QStringLiteral("image.edit");
     const bool upscale = operationName == QStringLiteral("image.upscale");
     const bool promptEnhance = operationName == QStringLiteral("prompt.enhance");
+    const bool textChat = operationName == QStringLiteral("text.chat");
     QJsonObject options = message.value(QStringLiteral("options")).toObject();
     const QString jobId = message.value(QStringLiteral("jobId")).toString();
     bool duplicateId = jobForId(jobId) != nullptr;
     for (const auto &pending : m_pendingUploads) {
         duplicateId = duplicateId || pending->id == jobId;
     }
-    if ((!generate && !upscale && !edit && !promptEnhance) || jobId.isEmpty() || duplicateId) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid job request"), jobId); return; }
+    if ((!generate && !upscale && !edit && !promptEnhance && !textChat) || jobId.isEmpty() || duplicateId) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid job request"), jobId); return; }
     if (promptEnhance) { submitPromptEnhancement(socket, message); return; }
+    if (textChat) { submitTextChat(socket, message); return; }
     if (!isImageReady()) {
         sendError(socket, QStringLiteral("backend-not-ready"), tr("The requested service backend is unavailable"), jobId);
         return;
@@ -775,10 +943,22 @@ void KiraServiceDaemon::startNextJob()
     broadcastQueuePositions();
 }
 
+bool KiraServiceDaemon::isServerChat(const Job &job) const
+{
+    return job.operation == Operation::TextChat && job.options.value("engine").toString() == "server";
+}
+
 void KiraServiceDaemon::runActiveJob()
 {
+    m_activeJobClock.start();
+    // A loaded chat model would compete with any other GPU work for memory.
+    if (!isServerChat(*m_activeJob)) m_llamaServer->stop();
     if (m_activeJob->operation == Operation::PromptEnhance) {
         startPromptEnhancement();
+        return;
+    }
+    if (m_activeJob->operation == Operation::TextChat) {
+        startTextChat();
         return;
     }
     if (m_activeJob->operation == Operation::Generate || m_activeJob->operation == Operation::Edit) {
@@ -856,7 +1036,9 @@ void KiraServiceDaemon::cancelJobsFor(QWebSocket *socket)
     while (!m_queue.isEmpty()) { const auto job = m_queue.dequeue(); if (job->client != socket) kept.enqueue(job); }
     m_queue = std::move(kept);
     if (m_activeJob && m_activeJob->client == socket) {
-        if (m_activeJob->operation == Operation::PromptEnhance) m_promptProcess.kill();
+        if (isServerChat(*m_activeJob)) m_llamaServer->cancel();
+        else if (m_activeJob->operation == Operation::PromptEnhance || m_activeJob->operation == Operation::TextChat)
+            m_promptProcess.kill();
         else if (m_sdRunner) m_sdRunner->cancel();
     }
     broadcastQueuePositions();
@@ -878,7 +1060,10 @@ void KiraServiceDaemon::sendCapabilities(QWebSocket *socket) const
         operations.append(QStringLiteral("image.edit"));
     }
     if (isPromptEnhancementReady()) operations.append("prompt.enhance");
-    send(socket, {{QStringLiteral("type"), QStringLiteral("capabilities")}, {QStringLiteral("state"), state}, {QStringLiteral("operations"), operations}});
+    const auto chatEngines = readyTextChatEngines();
+    if (!chatEngines.isEmpty()) operations.append("text.chat");
+    send(socket, {{QStringLiteral("type"), QStringLiteral("capabilities")}, {QStringLiteral("state"), state}, {QStringLiteral("operations"), operations},
+        {QStringLiteral("textChatEngines"), QJsonArray::fromStringList(chatEngines)}});
 }
 
 void KiraServiceDaemon::modelRouting(QWebSocket *socket, const QJsonObject &message)
@@ -982,8 +1167,136 @@ void KiraServiceDaemon::startPromptEnhancement()
     }
 }
 
+QStringList KiraServiceDaemon::builtInChatTemplates(const QString &executable) const
+{
+    if (!m_chatTemplates.contains(executable)) {
+        QProcess help;
+        help.setProcessChannelMode(QProcess::MergedChannels);
+        help.start(executable, {"--help"});
+        const bool finished = help.waitForFinished(10000);
+        const auto names = finished ? parseBuiltInChatTemplates(QString::fromUtf8(help.readAll())) : QStringList();
+        if (!finished) help.kill();
+        // An unreadable list is not cached, so a later request can retry.
+        if (names.isEmpty()) return {};
+        m_chatTemplates.insert(executable, names);
+    }
+    return m_chatTemplates.value(executable);
+}
+
+QStringList KiraServiceDaemon::readyTextChatEngines() const
+{
+    QStringList engines;
+    if (m_llamaServer->isAvailable()) engines.append("server");
+    if (isPromptEnhancementReady()) engines.append("completion");
+    return engines;
+}
+
+void KiraServiceDaemon::submitTextChat(QWebSocket* socket, const QJsonObject& message)
+{
+    const auto id = message.value("jobId").toString();
+    const auto request = message.value("options").toObject();
+    const auto overrides = request.value("parameters").toObject();
+    bool knownKeys = true;
+    for (const auto& key : request.keys()) knownKeys = knownKeys && (key == "modelId" || key == "messages" || key == "parameters");
+    if (!message.value("options").isObject() || !knownKeys || !request.value("modelId").isString()
+        || !validChatMessages(request.value("messages"))
+        || (request.contains("parameters") && !request.value("parameters").isObject()) || !validChatOverrides(overrides)) {
+        sendError(socket, "invalid-request", tr("Invalid text chat request"), id);
+        return;
+    }
+    const auto model = m_models->model(ModelCategory::LlmChat, request.value("modelId").toString());
+    if (!model) { sendError(socket, "model-unavailable", tr("The requested LLM model is unavailable"), id); return; }
+    auto parameters = model->recommendedOptions.isEmpty()
+        ? KiraService::Protocol::defaultModelOptions("llm-chat") : model->recommendedOptions;
+    for (const auto& key : {"temperature", "topP", "contextLength", "maxTokens"})
+        if (overrides.contains(key)) parameters.insert(key, overrides.value(key));
+    if (!KiraService::Protocol::validateModelOptions("llm-chat", parameters)) {
+        sendError(socket, "invalid-request", tr("Invalid LLM parameters"), id); return;
+    }
+    if (QFileInfo(model->filePath).suffix().toLower() != "gguf") {
+        sendError(socket, "llm-format-unsupported", tr("llama.cpp requires a compatible GGUF model"), id); return;
+    }
+    const auto engine = overrides.value("engine").toString("server");
+    if (!readyTextChatEngines().contains(engine)) {
+        sendError(socket, "backend-not-ready", tr("The %1 text chat engine is unavailable").arg(engine), id); return;
+    }
+    if (overrides.contains("chatTemplate")
+        && !builtInChatTemplates(engine == "server" ? m_configuration.llamaServer : m_configuration.llamaCompletion)
+                .contains(overrides.value("chatTemplate").toString())) {
+        sendError(socket, "invalid-request", tr("Unknown llama.cpp built-in chat template"), id); return;
+    }
+    if (m_pendingUploads.contains(socket) || m_queue.size() >= MaximumQueuedJobs) {
+        sendError(socket, "queue-full", tr("An upload is pending or the service queue is full"), id); return;
+    }
+    auto job = std::make_shared<Job>();
+    job->id = id;
+    job->operation = Operation::TextChat;
+    job->client = socket;
+    job->modelPath = model->filePath;
+    job->options = parameters;
+    job->options.insert("messages", request.value("messages"));
+    job->options.insert("penalizeRepeats", overrides.value("penalizeRepeats").toBool(true));
+    job->options.insert("stop", overrides.value("stop").toArray());
+    job->options.insert("engine", engine);
+    job->options.insert("gpuLayers", overrides.contains("gpuLayers") ? overrides.value("gpuLayers") : QJsonValue("all"));
+    job->options.insert("kvCacheLocation", overrides.value("kvCacheLocation").toString("gpu"));
+    job->options.insert("kvCacheType", overrides.value("kvCacheType").toString("f16"));
+    job->options.insert("flashAttention", overrides.value("flashAttention").toString("auto"));
+    job->options.insert("topK", overrides.value("topK").toInt(20));
+    job->options.insert("minP", overrides.value("minP").toDouble(0));
+    job->options.insert("repeatPenalty", overrides.value("repeatPenalty").toDouble(1.1));
+    job->options.insert("seed", overrides.value("seed").toInt(-1));
+    if (overrides.contains("jsonSchema")) job->options.insert("jsonSchema", overrides.value("jsonSchema"));
+    if (overrides.contains("chatTemplate")) job->options.insert("chatTemplate", overrides.value("chatTemplate"));
+    job->options.insert("reasoning", overrides.value("reasoning").toString("off"));
+    // llama.cpp's defaults: DRY and XTC stay disabled until a multiplier or probability is set.
+    job->options.insert("dryMultiplier", overrides.value("dryMultiplier").toDouble(0));
+    job->options.insert("dryBase", overrides.value("dryBase").toDouble(1.75));
+    job->options.insert("dryAllowedLength", overrides.value("dryAllowedLength").toInt(2));
+    job->options.insert("dryPenaltyLastN", overrides.value("dryPenaltyLastN").toInt(64));
+    job->options.insert("xtcProbability", overrides.value("xtcProbability").toDouble(0));
+    job->options.insert("xtcThreshold", overrides.value("xtcThreshold").toDouble(0.1));
+    enqueue(job);
+}
+
+void KiraServiceDaemon::startTextChat()
+{
+    const auto job = m_activeJob;
+    if (isServerChat(*job)) {
+        // Reasoning is a launch setting of llama-server; llama-completion receives it in startLlm.
+        const auto arguments = chatLaunchArguments(job->options) + QStringList{"--reasoning", job->options.value("reasoning").toString()};
+        m_llamaServer->run({job->modelPath, job->options.value("contextLength").toInt(), arguments},
+                           chatCompletionBody(job->options), m_configuration.promptEnhancementTimeoutMs);
+        return;
+    }
+    // llama-completion runs a single user turn, so the conversation is flattened into it as a transcript.
+    QString system;
+    QString transcript = QStringLiteral("Conversation so far:\n");
+    for (const auto& value : job->options.value("messages").toArray()) {
+        const auto message = value.toObject();
+        const auto role = message.value("role").toString();
+        if (role == "system") system = message.value("content").toString();
+        else transcript += (role == "user" ? QStringLiteral("User: ") : QStringLiteral("Assistant: "))
+            + message.value("content").toString() + QLatin1Char('\n');
+    }
+    transcript += QStringLiteral("\nWrite only the assistant's next reply, without a speaker label.");
+    auto arguments = chatLaunchArguments(job->options);
+    bool prepared = true;
+    if (job->options.value("jsonSchema").isObject()) {
+        QFile schema(job->directory->filePath("schema.json"));
+        const auto bytes = QJsonDocument(job->options.value("jsonSchema").toObject()).toJson(QJsonDocument::Compact);
+        prepared = schema.open(QIODevice::WriteOnly) && schema.write(bytes) == bytes.size();
+        arguments += {"--json-schema-file", schema.fileName()};
+    }
+    if (!prepared || !startLlm(job->modelPath, job->options, system, transcript,
+                               job->options.value("penalizeRepeats").toBool(true), arguments)) {
+        sendError(job->client, "storage-error", tr("Could not prepare text chat"), job->id);
+        m_activeJob.reset(); startNextJob();
+    }
+}
+
 bool KiraServiceDaemon::startLlm(const QString &modelPath, const QJsonObject &parameters, const QString &system,
-                                 const QString &input, bool penalizeRepeats)
+                                 const QString &input, bool penalizeRepeats, const QStringList &extraArguments)
 {
     const auto job = m_activeJob;
     const QString promptPath = job->directory->filePath("prompt.txt");
@@ -996,17 +1309,28 @@ bool KiraServiceDaemon::startLlm(const QString &modelPath, const QJsonObject &pa
     if (!job->directory->isValid() || !prompt.open(QIODevice::WriteOnly) || prompt.write(bytes) != bytes.size())
         return false;
     prompt.close();
+    // Keep a decimal point so a whole penalty still reads as a factor (1.0, not 1).
+    QString penalty = QString::number(repeatPenalty(parameters, penalizeRepeats), 'g', 15);
+    if (!penalty.contains(QLatin1Char('.'))) penalty += QStringLiteral(".0");
     QStringList arguments{"--model", modelPath, "--file", promptPath, "--single-turn", "--conversation", "--jinja", "--no-display-prompt", "--simple-io", "--color", "off",
-        "--reasoning", "off", "--no-context-shift", "--ctx-size", QString::number(parameters.value("contextLength").toInt()),
+        "--reasoning", parameters.value("reasoning").toString("off"), "--no-context-shift",
+        "--ctx-size", QString::number(parameters.value("contextLength").toInt()),
         "--n-predict", QString::number(parameters.value("maxTokens").toInt()),
-        // llama.cpp also penalizes prompt tokens, which pushes faithful rewrites toward
-        // synonyms or another language; such jobs turn the penalty off.
-        "--repeat-penalty", penalizeRepeats ? QStringLiteral("1.1") : QStringLiteral("1.0"),
-        "--repeat-last-n", penalizeRepeats ? QString::number(parameters.value("contextLength").toInt()) : QStringLiteral("0"),
-        "--samplers", "penalties;top_k;top_p;temperature", "--temp",
+        "--repeat-penalty", penalty,
+        "--repeat-last-n", QString::number(repeatLastN(parameters, penalizeRepeats)),
+        "--samplers", samplerChain(parameters), "--temp",
         QString::number(parameters.value("temperature").toDouble(), 'g', 17),
         "--top-p", QString::number(parameters.value("topP").toDouble(), 'g', 17),
-        "--top-k", QStringLiteral("20")};
+        "--top-k", QString::number(parameters.value("topK").toInt(20))};
+    if (parameters.contains("minP")) arguments += {"--min-p", QString::number(parameters.value("minP").toDouble(), 'g', 15)};
+    if (parameters.contains("seed")) arguments += {"--seed", QString::number(parameters.value("seed").toInt())};
+    if (parameters.contains("dryMultiplier")) {
+        const auto number = [&parameters](const char *key) { return QString::number(parameters.value(key).toDouble(), 'g', 15); };
+        arguments += {"--dry-multiplier", number("dryMultiplier"), "--dry-base", number("dryBase"),
+            "--dry-allowed-length", number("dryAllowedLength"), "--dry-penalty-last-n", number("dryPenaltyLastN"),
+            "--xtc-probability", number("xtcProbability"), "--xtc-threshold", number("xtcThreshold")};
+    }
+    arguments += extraArguments;
     m_promptOutput.clear(); m_promptError.clear();
     m_promptTimedOut = false; m_promptOutputExceeded = false;
     m_promptTimeout.start();
@@ -1014,29 +1338,66 @@ bool KiraServiceDaemon::startLlm(const QString &modelPath, const QJsonObject &pa
     return true;
 }
 
-void KiraServiceDaemon::handlePromptEnhancementFinished(int exitCode, QProcess::ExitStatus status)
+void KiraServiceDaemon::handleLlmFinished(int exitCode, QProcess::ExitStatus status)
 {
-    if (!m_activeJob || m_activeJob->operation != Operation::PromptEnhance) return;
+    if (!m_activeJob || (m_activeJob->operation != Operation::PromptEnhance && m_activeJob->operation != Operation::TextChat)) return;
     m_promptTimeout.stop();
     const auto job = m_activeJob;
+    const bool chat = job->operation == Operation::TextChat;
     m_promptError = (m_promptError + m_promptProcess.readAllStandardError()).right(4096);
     const auto remaining = m_promptProcess.readAllStandardOutput();
     if (m_promptOutput.size() + remaining.size() > 1024 * 1024) m_promptOutputExceeded = true;
     else m_promptOutput += remaining;
-    QString prompt = QString::fromUtf8(m_promptOutput).trimmed();
+    QString text = QString::fromUtf8(m_promptOutput).trimmed();
     const QString endMarker = QStringLiteral("[end of text]");
-    if (prompt.endsWith(endMarker)) prompt.chop(endMarker.size());
-    prompt = prompt.trimmed();
-    if (status != QProcess::NormalExit || exitCode != 0 || m_promptTimedOut || m_promptOutputExceeded || prompt.isEmpty()) {
-        const QString code = m_promptTimedOut ? "prompt-enhancement-timeout" : m_promptOutputExceeded
-            ? "prompt-enhancement-output-too-large" : prompt.isEmpty() && exitCode == 0
-                ? "prompt-enhancement-empty-result" : "prompt-enhancement-failed";
-        QString detail = tr("Prompt enhancement failed (exit code %1)").arg(exitCode);
+    if (text.endsWith(endMarker)) text.chop(endMarker.size());
+    text = chat ? cleanChatReply(text, job->options.value("stop").toArray()) : text.trimmed();
+    if (status != QProcess::NormalExit || exitCode != 0 || m_promptTimedOut || m_promptOutputExceeded || text.isEmpty()) {
+        const QString prefix = chat ? QStringLiteral("chat-") : QStringLiteral("prompt-enhancement-");
+        const QString code = prefix + (m_promptTimedOut ? "timeout" : m_promptOutputExceeded
+            ? "output-too-large" : text.isEmpty() && exitCode == 0 ? "empty-result" : "failed");
+        QString detail = (chat ? tr("Text chat failed (exit code %1)") : tr("Prompt enhancement failed (exit code %1)")).arg(exitCode);
         if (!m_promptError.trimmed().isEmpty()) detail += QLatin1Char('\n') + QString::fromUtf8(m_promptError).trimmed();
         sendError(job->client, code, detail, job->id);
-    } else send(job->client, {{"type", "result"}, {"jobId", job->id}, {"operation", "prompt.enhance"}, {"prompt", prompt}});
+    } else if (chat) {
+        // llama-completion loads the model for every turn.
+        sendChatResult(*job, text, {{"engine", "completion"}, {"coldStart", true}});
+    } else send(job->client, {{"type", "result"}, {"jobId", job->id}, {"operation", "prompt.enhance"}, {"prompt", text}});
     m_promptOutput.clear(); m_promptError.clear();
     m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
+}
+
+void KiraServiceDaemon::handleLlamaServerFinished(const LlamaServerReply &reply)
+{
+    if (!m_activeJob || !isServerChat(*m_activeJob)) return;
+    const auto job = m_activeJob;
+    const QString text = cleanChatReply(reply.content, job->options.value("stop").toArray());
+    if (!reply.succeeded) sendError(job->client, reply.errorCode, reply.message, job->id);
+    else if (text.isEmpty()) sendError(job->client, "chat-empty-result", tr("The model returned an empty reply"), job->id);
+    else sendChatResult(*job, text, {{"engine", "server"}, {"finishReason", reply.finishReason},
+        {"usage", QJsonObject{{"promptTokens", reply.promptTokens}, {"completionTokens", reply.completionTokens}}},
+        {"coldStart", reply.coldStart}});
+    m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
+}
+
+void KiraServiceDaemon::sendChatResult(const Job &job, const QString &text, QJsonObject result)
+{
+    if (job.options.value("jsonSchema").isObject()) {
+        const auto structured = structuredReply(text);
+        if (!structured) {
+            const QString detail = result.value("finishReason").toString() == "length"
+                ? tr("The reply reached maxTokens before its JSON was complete") : tr("The reply is not valid JSON");
+            sendError(job.client, "chat-invalid-json", detail, job.id);
+            return;
+        }
+        result.insert("json", *structured);
+    }
+    result.insert("type", "result");
+    result.insert("jobId", job.id);
+    result.insert("operation", "text.chat");
+    result.insert("text", text);
+    result.insert("durationMs", m_activeJobClock.elapsed());
+    send(job.client, result);
 }
 
 void KiraServiceDaemon::send(QWebSocket *socket, QJsonObject object) const

@@ -3,6 +3,9 @@
 #include <kira/service/ModelRouting.h>
 #include <kira/service/ServiceProtocol.h>
 
+#include "LlamaServerRunner.h"
+
+#include <QElapsedTimer>
 #include <QHostAddress>
 #include <QObject>
 #include <QPointer>
@@ -21,6 +24,14 @@ class SdCliRunner;
 struct SdCliGenerationResult;
 struct SdCliUpscaleResult;
 
+// KIRA_LLAMA_SERVER_IDLE_SECONDS overrides the ten-minute idle period before llama-server unloads.
+inline int defaultLlamaServerIdleMs()
+{
+    bool ok = false;
+    const int seconds = qEnvironmentVariableIntValue("KIRA_LLAMA_SERVER_IDLE_SECONDS", &ok);
+    return ok && seconds > 0 ? seconds * 1000 : 10 * 60 * 1000;
+}
+
 struct KiraServiceConfiguration
 {
     QHostAddress listenAddress = QHostAddress::LocalHost;
@@ -29,7 +40,9 @@ struct KiraServiceConfiguration
     qint64 maximumImageBytes = 64LL * 1024 * 1024;
     QString modelRootPath;
     QString llamaCompletion = qEnvironmentVariable("KIRA_LLAMA_COMPLETION", "llama-completion");
-    int promptEnhancementTimeoutMs = 10 * 60 * 1000;
+    int promptEnhancementTimeoutMs = 10 * 60 * 1000; // Also bounds each text.chat turn, model loading included.
+    QString llamaServer = qEnvironmentVariable("KIRA_LLAMA_SERVER", "llama-server");
+    int llamaServerIdleMs = defaultLlamaServerIdleMs();
 };
 
 class KiraServiceDaemon final : public QObject
@@ -43,7 +56,7 @@ public:
     quint16 serverPort() const;
 
 private:
-    enum class Operation { Generate, Upscale, Edit, PromptEnhance };
+    enum class Operation { Generate, Upscale, Edit, PromptEnhance, TextChat };
     // A routed generation's submitted prompts, returned without preset prefixes.
     struct RoutedPrompts
     {
@@ -71,7 +84,7 @@ private:
     void startNextJob();
     void runActiveJob();
     bool startLlm(const QString &modelPath, const QJsonObject &parameters, const QString &system, const QString &input,
-                  bool penalizeRepeats = true);
+                  bool penalizeRepeats = true, const QStringList &extraArguments = {});
     void cancelJobsFor(QWebSocket *socket);
     void broadcastQueuePositions();
     void handleGenerationFinished(const SdCliGenerationResult &result);
@@ -79,7 +92,14 @@ private:
     bool isPromptEnhancementReady() const;
     void submitPromptEnhancement(QWebSocket* socket, const QJsonObject& message);
     void startPromptEnhancement();
-    void handlePromptEnhancementFinished(int exitCode, QProcess::ExitStatus status);
+    QStringList readyTextChatEngines() const;
+    QStringList builtInChatTemplates(const QString &executable) const;
+    void submitTextChat(QWebSocket* socket, const QJsonObject& message);
+    void startTextChat();
+    void handleLlmFinished(int exitCode, QProcess::ExitStatus status);
+    void handleLlamaServerFinished(const LlamaServerReply &reply);
+    void sendChatResult(const Job &job, const QString &text, QJsonObject result);
+    bool isServerChat(const Job &job) const;
     void sendCapabilities(QWebSocket *socket) const;
     void send(QWebSocket *socket, QJsonObject object) const;
     void sendError(QWebSocket *socket, const QString &code, const QString &message, const QString &jobId = {}) const;
@@ -102,4 +122,7 @@ private:
     QByteArray m_promptError;
     bool m_promptTimedOut = false;
     bool m_promptOutputExceeded = false;
+    std::unique_ptr<LlamaServerRunner> m_llamaServer;
+    QElapsedTimer m_activeJobClock;
+    mutable QHash<QString, QStringList> m_chatTemplates; // Built-in chat template names per llama.cpp executable.
 };

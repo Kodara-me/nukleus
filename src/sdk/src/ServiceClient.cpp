@@ -284,6 +284,28 @@ QString ServiceClient::enhancePrompt(const PromptEnhancementRequest& request)
     return jobId;
 }
 
+bool ServiceClient::canChat(const QString& modelId) const
+{
+    return m_authenticated && m_capabilities.textChat && containsModel(modelId, ModelCategory::LlmChat);
+}
+
+QString ServiceClient::submitChat(const TextChatRequest& request)
+{
+    if (!canChat(request.modelId) || request.messages.isEmpty()) return {};
+    const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    PendingJob job;
+    job.textChat = true;
+    m_pendingJobs.insert(jobId, job);
+    QJsonArray messages;
+    for (const auto& message : request.messages)
+        messages.append(QJsonObject{{"role", message.role}, {"content", message.content}});
+    QJsonObject options{{"modelId", request.modelId}, {"messages", messages}};
+    if (!request.parameters.isEmpty()) options.insert("parameters", request.parameters);
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"type", "submit"}, {"jobId", jobId}, {"operation", "text.chat"}, {"options", options}}).toJson(QJsonDocument::Compact)));
+    return jobId;
+}
+
 QString ServiceClient::submit(ImageOperation operation, const QJsonObject &options, const QList<QByteArray> &inputImages)
 {
     QString modelId = options.value("modelId").toString();
@@ -329,8 +351,12 @@ void ServiceClient::handleTextMessage(const QString &message)
     }
     if (type == QStringLiteral("capabilities")) {
         const QJsonArray operations = object.value(QStringLiteral("operations")).toArray();
+        QStringList chatEngines;
+        for (const auto& engine : object.value("textChatEngines").toArray())
+            if (engine.isString()) chatEngines.append(engine.toString());
         updateCapabilities({operations.contains("image.generate"), operations.contains("image.upscale"),
-            operations.contains("image.edit"), operations.contains("prompt.enhance"), operations.contains("model-routing")});
+            operations.contains("image.edit"), operations.contains("prompt.enhance"), operations.contains("model-routing"),
+            operations.contains("text.chat"), chatEngines});
         if (m_capabilities.modelRouting) requestModelRouting();
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
@@ -475,6 +501,21 @@ void ServiceClient::handleTextMessage(const QString &message)
             emit promptEnhancementFinished({jobId, true, object.value("prompt").toString(), {}, {}});
             return;
         }
+        if (m_pendingJobs.value(jobId).textChat) {
+            if (object.value("operation") != "text.chat" || !object.value("text").isString()
+                || object.value("text").toString().trimmed().isEmpty()) {
+                failJob(jobId, "invalid-result", tr("The service returned an invalid chat reply"));
+                return;
+            }
+            const auto usage = object.value("usage").toObject();
+            m_pendingJobs.remove(jobId);
+            emit jobStateChanged(jobId, JobState::Completed, -1);
+            emit chatFinished({jobId, true, object.value("text").toString(), object.value("engine").toString(),
+                object.value("finishReason").toString(), usage.value("promptTokens").toInt(-1),
+                usage.value("completionTokens").toInt(-1), object.value("durationMs").toInteger(-1),
+                object.value("coldStart").toBool(), {}, {}, object.value("json")});
+            return;
+        }
         auto &job = m_pendingJobs[jobId];
         job.mimeType = object.value(QStringLiteral("mimeType")).toString();
         job.prompt = object.value(QStringLiteral("prompt")).toString();
@@ -496,7 +537,9 @@ void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
 {
     if (m_capabilities.imageGeneration == capabilities.imageGeneration && m_capabilities.imageUpscale == capabilities.imageUpscale && m_capabilities.imageEdit == capabilities.imageEdit
         && m_capabilities.promptEnhancement == capabilities.promptEnhancement
-        && m_capabilities.modelRouting == capabilities.modelRouting) return;
+        && m_capabilities.modelRouting == capabilities.modelRouting
+        && m_capabilities.textChat == capabilities.textChat
+        && m_capabilities.textChatEngines == capabilities.textChatEngines) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
 }
@@ -552,6 +595,7 @@ void ServiceClient::failJob(const QString &jobId, const QString &errorCode, cons
     m_resultJobs.removeAll(jobId);
     emit jobStateChanged(jobId, JobState::Failed, -1);
     if (job.promptEnhancement) emit promptEnhancementFinished({jobId, false, {}, errorCode, message});
+    else if (job.textChat) emit chatFinished({jobId, false, {}, {}, {}, -1, -1, -1, false, errorCode, message, {}});
     else emit imageJobFinished({jobId, job.operation, false, {}, job.mimeType, errorCode, message});
 }
 

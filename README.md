@@ -19,6 +19,18 @@ Install llama.cpp's `llama-completion` executable on the service host to enable
 this capability. It must be on the daemon's PATH; alternatively set
 `KIRA_LLAMA_COMPLETION` to its absolute path in the service environment.
 
+text.chat sends a client-built conversation (system, user and assistant
+messages) to an installed LLM and returns one complete reply. It is generic:
+the service knows nothing about the client's domain. Its default `server`
+engine runs llama.cpp's `llama-server` on loopback and keeps the model loaded
+between turns; the `completion` engine reuses `llama-completion` and reloads
+the model on every turn. Clients choose the engine, sampling, GPU layer count
+and KV-cache placement per request. The service unloads `llama-server` before
+any other job and after ten minutes without a chat. Set `KIRA_LLAMA_SERVER` to
+override the executable and `KIRA_LLAMA_SERVER_IDLE_SECONDS` to change the
+idle period, for example in `/etc/kira-service/kira-service.conf`. See
+[`docs/protocol-v3.md`](docs/protocol-v3.md).
+
 Model installation preserves existing files: filename collisions receive a
 numeric suffix before the extension. Manager's add and configuration forms
 require a nonblank display name. Model labels use that name; opaque IDs remain unchanged when renaming a label.

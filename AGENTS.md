@@ -52,6 +52,22 @@ never overwrite weights and keep companions scoped to the final primary name.
   and similar) abort on it.
   Preserve timeout/output limits, error recovery and disconnect cancellation.
 
+- text.chat is a generic multi-turn chat: clients send system/user/assistant
+  messages and receive one complete reply (never streamed). Keep it free of any
+  client-domain logic. Chat-only overrides (stop, topK, minP, repeatPenalty,
+  seed, engine, gpuLayers, kvCacheLocation, kvCacheType, flashAttention,
+  jsonSchema, reasoning, DRY/XTC values, chatTemplate) never change model
+  metadata, prompt.enhance or image jobs. A jsonSchema is client-owned: pass it
+  to llama.cpp, verify the reply parses and return it decoded, but never
+  interpret its fields. Accept only chatTemplate names listed by the engine's
+  `--help`; llama.cpp treats any other string as a literal Jinja template. The default `server`
+  engine is a loopback llama-server owned by `LlamaServerRunner` (random port,
+  private API-key file, PDEATHSIG); a changed model or load setting restarts it.
+  Unload it before every other job and after the idle period, so it never
+  competes with sd-cli or llama-completion for GPU memory. `gpuLayers` other
+  than `auto` passes `--fit off`: a model that does not fit must fail, not spill
+  onto the CPU. Tests use the fake server and must never start a real one.
+
 - Link only the manager/UI tests to KiraUi::Widgets 0.2. Default to the sibling
   checkout, allow KIRA_UI_SOURCE_DIR, and fall back to an installed package.
   Keep daemon and SDK independent of the visual framework.

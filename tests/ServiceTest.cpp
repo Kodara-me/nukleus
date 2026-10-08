@@ -86,6 +86,8 @@ private slots:
     void keepsSingleDefaultPromptLlms();
     void persistsPromptStyles();
     void enhancesPromptThroughSdk();
+    void chatsThroughCompletionEngine();
+    void chatsThroughServerEngine();
     void routesPresetGenerationWithoutLlm();
     void configuresStylesOverProtocol();
     void generatesWithValidatedOptionsAndVae();
@@ -1743,6 +1745,347 @@ void ServiceTest::enhancesPromptThroughSdk()
     QVERIFY(!client.enhancePrompt({"llm-chat:llm.gguf", "after reconnect", {}}).isEmpty());
     QTRY_COMPARE(finished.count(), 1);
     QVERIFY(qvariant_cast<KiraService::PromptEnhancementResult>(finished.takeFirst().at(0)).succeeded);
+}
+
+void ServiceTest::chatsThroughCompletionEngine()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake llama-completion fixture requires a POSIX shell.");
+#endif
+    using namespace KiraService::Protocol;
+    QTemporaryDir directory;
+    QVERIFY(QDir(directory.path()).mkpath("llm"));
+    QFile model(directory.filePath("llm/llm.gguf"));
+    QVERIFY(model.open(QIODevice::WriteOnly)); model.write("fixture"); model.close();
+    ModelCatalog catalog(directory.path(), false);
+    QVERIFY(configureNamed(catalog, "llm-chat:llm.gguf", defaultModelOptions("llm-chat")));
+    const auto executablePath = directory.filePath("completion");
+    QFile executable(executablePath);
+    QVERIFY(executable.open(QIODevice::WriteOnly));
+    executable.write(
+        "#!/bin/sh\nroot=$(dirname \"$0\")\n"
+        "if [ \"$1\" = --help ]; then printf '  list of built-in templates:\\n  chatml, mistral-v7,\\n  zephyr\\n  (env: LLAMA_ARG_CHAT_TEMPLATE)\\n'; exit 0; fi\n"
+        "printf '%s\\n' \"$@\" > \"$root/args\"\n"
+        "previous=\nfor argument in \"$@\"; do\n"
+        "if [ \"$previous\" = --file ]; then cat \"$argument\" > \"$root/input\"; fi\n"
+        "if [ \"$previous\" = --json-schema-file ]; then cat \"$argument\" > \"$root/schema\"; fi\n"
+        "previous=\"$argument\"\ndone\n"
+        "if [ -f \"$root/wait\" ]; then exec sleep 30; fi\n"
+        "if [ -f \"$root/fail\" ]; then printf 'backend failure' >&2; exit 9; fi\n"
+        "if [ -f \"$root/thinking\" ]; then printf '<think>never closed'; exit 0; fi\n"
+        "if [ -f \"$root/json\" ]; then printf ' {\"speech\":\"*smiles* Hi\"}\\n'; exit 0; fi\n"
+        "if [ -f \"$root/badjson\" ]; then printf '{\"speech\":\"*smi'; exit 0; fi\n"
+        "printf '<think>plan</think>\\n *smiles* Hello, Alex.\\nUser: I am fine.\\n [end of text]\\n'\n");
+    executable.close();
+    QVERIFY(executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    KiraServiceConfiguration configuration;
+    configuration.port = 0; configuration.modelRootPath = directory.path();
+    configuration.llamaCompletion = executablePath;
+    configuration.llamaServer = directory.filePath("missing-llama-server");
+    configuration.promptEnhancementTimeoutMs = 400;
+    KiraServiceDaemon daemon(configuration); QString error;
+    QVERIFY2(daemon.start(&error), qPrintable(error));
+    KiraService::ServiceClient client;
+    client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
+    QSignalSpy finished(&client, &KiraService::ServiceClient::chatFinished);
+    client.connectToService();
+    QTRY_VERIFY(client.canChat("llm-chat:llm.gguf"));
+    QCOMPARE(client.capabilities().textChatEngines, QStringList{"completion"});
+    const QList<KiraService::TextChatMessage> conversation{
+        {"system", "You are Mia."}, {"user", "Hi."}, {"assistant", "Hey."}, {"user", "*sits down* How are you?"}};
+    const QJsonObject completion{{"engine", "completion"}};
+    const auto read = [&](const QString& name) {
+        QFile file(directory.filePath(name)); if (!file.open(QIODevice::ReadOnly)) return QByteArray(); return file.readAll();
+    };
+    const auto expectFailure = [&](const KiraService::TextChatRequest& request, const QString& code) {
+        QVERIFY(!client.submitChat(request).isEmpty());
+        QTRY_COMPARE(finished.count(), 1);
+        const auto failure = qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0));
+        QVERIFY(!failure.succeeded); QCOMPARE(failure.errorCode, code); QVERIFY(failure.text.isEmpty());
+    };
+
+    // The default engine is the managed llama-server, which is not available here.
+    expectFailure({"llm-chat:llm.gguf", conversation, {}}, "backend-not-ready");
+    // Malformed conversations and options fail before queueing.
+    expectFailure({"llm-chat:llm.gguf", {{"user", "Hi."}, {"system", "Late system."}, {"user", "Hello?"}}, completion}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", {{"user", "Hi."}, {"assistant", "Hey."}}, completion}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", {{"narrator", "Hi."}}, completion}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", {{"user", "  "}}, completion}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", conversation, {{"engine", "completion"}, {"unknown", true}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", conversation, {{"engine", "completion"}, {"gpuLayers", "most"}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", conversation, {{"engine", "completion"}, {"gpuLayers", 1000}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", conversation, {{"engine", "completion"}, {"kvCacheLocation", "disk"}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", conversation, {{"engine", "completion"}, {"kvCacheType", "q2"}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", conversation, {{"engine", "completion"}, {"stop", QJsonArray{""}}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", conversation, {{"engine", "completion"}, {"temperature", "hot"}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", conversation, {{"engine", "completion"}, {"topK", 1.5}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", conversation, {{"engine", "completion"}, {"minP", 2}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", conversation, {{"engine", "completion"}, {"repeatPenalty", 0.5}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", conversation, {{"engine", "completion"}, {"seed", -2}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", conversation, {{"engine", "completion"}, {"flashAttention", "yes"}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", conversation, {{"engine", "completion"}, {"jsonSchema", "object"}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", conversation, {{"engine", "completion"}, {"jsonSchema", QJsonObject{{"type", "object"}}},
+        {"stop", QJsonArray{"\nUser:"}}}}, "invalid-request");
+    // The SDK refuses unlisted models and empty conversations without contacting the service.
+    QVERIFY(client.submitChat({"llm-chat:missing.gguf", conversation, completion}).isEmpty());
+    QVERIFY(client.submitChat({"llm-chat:llm.gguf", {}, completion}).isEmpty());
+
+    // The conversation is flattened into one user turn; reasoning and text after a stop string are removed.
+    auto id = client.submitChat({"llm-chat:llm.gguf", conversation, {{"engine", "completion"}, {"maxTokens", 200},
+        {"stop", QJsonArray{"\nUser:"}}, {"gpuLayers", "auto"}, {"kvCacheLocation", "ram"}, {"kvCacheType", "q8_0"},
+        {"topK", 40}, {"minP", 0.05}, {"repeatPenalty", 1.15}, {"seed", 7}, {"flashAttention", "on"}}});
+    QVERIFY(!id.isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    auto result = qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0));
+    QVERIFY2(result.succeeded, qPrintable(result.message));
+    QCOMPARE(result.jobId, id); QCOMPARE(result.text, QString("*smiles* Hello, Alex."));
+    QCOMPARE(result.engine, QString("completion"));
+    QVERIFY(result.finishReason.isEmpty()); QCOMPARE(result.promptTokens, -1);
+    QVERIFY(result.durationMs >= 0); QVERIFY(result.coldStart);
+    QCOMPARE(QString::fromUtf8(read("input")), QString("You are Mia.\n\nConversation so far:\nUser: Hi.\nAssistant: Hey.\n"
+        "User: *sits down* How are you?\n\nWrite only the assistant's next reply, without a speaker label."));
+    auto arguments = read("args");
+    QVERIFY(arguments.contains("--n-predict\n200\n"));
+    QVERIFY(arguments.contains("--n-gpu-layers\nauto\n--fit\non\n--no-kv-offload\n--cache-type-k\nq8_0\n--cache-type-v\nq8_0\n"
+                               "--flash-attn\non\n"));
+    QVERIFY(arguments.contains("--repeat-penalty\n1.15\n"));
+    QVERIFY(arguments.contains("--samplers\npenalties;dry;top_k;top_p;min_p;xtc;temperature\n"));
+    QVERIFY(arguments.contains("--reasoning\noff\n"));
+    QVERIFY(arguments.contains("--dry-multiplier\n0\n--dry-base\n1.75\n--dry-allowed-length\n2\n--dry-penalty-last-n\n64\n"
+                               "--xtc-probability\n0\n--xtc-threshold\n0.1\n"));
+    QVERIFY(!arguments.contains("--chat-template"));
+    QVERIFY(arguments.contains("--top-k\n40\n--min-p\n0.05\n--seed\n7\n"));
+
+    // Defaults keep every layer and the KV cache on the GPU, and never let llama.cpp spill layers silently.
+    QVERIFY(!client.submitChat({"llm-chat:llm.gguf", {{"user", "Hi."}}, completion}).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0)).succeeded);
+    arguments = read("args");
+    QVERIFY(arguments.contains("--n-gpu-layers\nall\n--fit\noff\n--cache-type-k\nf16\n--cache-type-v\nf16\n--flash-attn\nauto\n"));
+    QVERIFY(arguments.contains("--repeat-penalty\n1.1\n--repeat-last-n\n4096\n"));
+    QVERIFY(arguments.contains("--top-k\n20\n--min-p\n0\n--seed\n-1\n"));
+    QVERIFY(!arguments.contains("--no-kv-offload"));
+    QVERIFY(!client.submitChat({"llm-chat:llm.gguf", {{"user", "Hi."}}, {{"engine", "completion"}, {"gpuLayers", 40}}}).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0)).succeeded);
+    QVERIFY(read("args").contains("--n-gpu-layers\n40\n--fit\noff\n"));
+    QVERIFY(!read("args").contains("--json-schema-file"));
+    // Reasoning, DRY, XTC and a built-in chat template are passed through; unknown template names are refused.
+    QVERIFY(!client.submitChat({"llm-chat:llm.gguf", {{"user", "Hi."}}, {{"engine", "completion"}, {"reasoning", "on"},
+        {"dryMultiplier", 0.8}, {"dryBase", 1.5}, {"dryAllowedLength", 3}, {"dryPenaltyLastN", -1},
+        {"xtcProbability", 0.5}, {"xtcThreshold", 0.2}, {"chatTemplate", "chatml"}}}).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0)).succeeded);
+    arguments = read("args");
+    QVERIFY(arguments.contains("--reasoning\non\n"));
+    QVERIFY(arguments.contains("--dry-multiplier\n0.8\n--dry-base\n1.5\n--dry-allowed-length\n3\n--dry-penalty-last-n\n-1\n"
+                               "--xtc-probability\n0.5\n--xtc-threshold\n0.2\n"));
+    QVERIFY(arguments.contains("--chat-template\nchatml\n"));
+    expectFailure({"llm-chat:llm.gguf", {{"user", "Hi."}}, {{"engine", "completion"}, {"chatTemplate", "notatemplate"}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", {{"user", "Hi."}}, {{"engine", "completion"}, {"reasoning", "maybe"}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", {{"user", "Hi."}}, {{"engine", "completion"}, {"dryMultiplier", -1}}}, "invalid-request");
+    expectFailure({"llm-chat:llm.gguf", {{"user", "Hi."}}, {{"engine", "completion"}, {"xtcProbability", 2}}}, "invalid-request");
+
+    const auto marker = [&](const QString& name) { QFile file(directory.filePath(name)); return file.open(QIODevice::WriteOnly); };
+    // A JSON schema constrains the reply, which must parse and is also returned decoded.
+    const QJsonObject schema{{"type", "object"}, {"properties", QJsonObject{{"speech", QJsonObject{{"type", "string"}}}}},
+        {"required", QJsonArray{"speech"}}};
+    const QJsonObject structured{{"engine", "completion"}, {"jsonSchema", schema}};
+    QVERIFY(marker("json"));
+    QVERIFY(!client.submitChat({"llm-chat:llm.gguf", conversation, structured}).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    result = qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0));
+    QVERIFY2(result.succeeded, qPrintable(result.message));
+    QCOMPARE(result.text, QString("{\"speech\":\"*smiles* Hi\"}"));
+    QCOMPARE(result.json.toObject().value("speech").toString(), QString("*smiles* Hi"));
+    QVERIFY(read("args").contains("--json-schema-file\n"));
+    QCOMPARE(QJsonDocument::fromJson(read("schema")).object(), schema);
+    QVERIFY(QFile::remove(directory.filePath("json")));
+    QVERIFY(marker("badjson"));
+    expectFailure({"llm-chat:llm.gguf", conversation, structured}, "chat-invalid-json");
+    QVERIFY(QFile::remove(directory.filePath("badjson")));
+    // Without a schema the reply stays plain text.
+    QVERIFY(!client.submitChat({"llm-chat:llm.gguf", conversation, completion}).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0)).json.isUndefined());
+    QVERIFY(marker("thinking"));
+    expectFailure({"llm-chat:llm.gguf", conversation, completion}, "chat-empty-result");
+    QVERIFY(QFile::remove(directory.filePath("thinking")));
+    QVERIFY(marker("fail"));
+    expectFailure({"llm-chat:llm.gguf", conversation, completion}, "chat-failed");
+    QVERIFY(QFile::remove(directory.filePath("fail")));
+    QVERIFY(marker("wait"));
+    expectFailure({"llm-chat:llm.gguf", conversation, completion}, "chat-timeout");
+    QVERIFY(QFile::remove(directory.filePath("wait")));
+    QVERIFY(!client.submitChat({"llm-chat:llm.gguf", conversation, completion}).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0)).succeeded);
+}
+
+void ServiceTest::chatsThroughServerEngine()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake llama-completion fixture requires a POSIX shell.");
+#endif
+    using namespace KiraService::Protocol;
+    QTemporaryDir directory;
+    QVERIFY(QDir(directory.path()).mkpath("llm"));
+    QFile model(directory.filePath("llm/llm.gguf"));
+    QVERIFY(model.open(QIODevice::WriteOnly)); model.write("fixture"); model.close();
+    ModelCatalog catalog(directory.path(), false);
+    QVERIFY(configureNamed(catalog, "llm-chat:llm.gguf", defaultModelOptions("llm-chat")));
+    QFile completion(directory.filePath("completion"));
+    QVERIFY(completion.open(QIODevice::WriteOnly));
+    completion.write("#!/bin/sh\nprintf 'enhanced'\n");
+    completion.close();
+    QVERIFY(completion.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    qputenv("KIRA_FAKE_LLAMA_DIR", directory.path().toUtf8());
+    const auto unsetFakeDirectory = qScopeGuard([] { qunsetenv("KIRA_FAKE_LLAMA_DIR"); });
+    KiraServiceConfiguration configuration;
+    configuration.port = 0; configuration.modelRootPath = directory.path();
+    configuration.llamaCompletion = completion.fileName();
+    configuration.llamaServer = QStringLiteral(KIRA_FAKE_LLAMA_SERVER);
+    configuration.promptEnhancementTimeoutMs = 1500;
+    configuration.llamaServerIdleMs = 1500;
+    KiraServiceDaemon daemon(configuration); QString error;
+    QVERIFY2(daemon.start(&error), qPrintable(error));
+    KiraService::ServiceClient client;
+    client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
+    QSignalSpy finished(&client, &KiraService::ServiceClient::chatFinished);
+    QSignalSpy enhanced(&client, &KiraService::ServiceClient::promptEnhancementFinished);
+    client.connectToService();
+    QTRY_VERIFY(client.canChat("llm-chat:llm.gguf"));
+    QCOMPARE(client.capabilities().textChatEngines, QStringList({"server", "completion"}));
+
+    const auto read = [&](const QString& name) {
+        QFile file(directory.filePath(name)); if (!file.open(QIODevice::ReadOnly)) return QByteArray(); return file.readAll();
+    };
+    const auto launches = [&] { return read("launches").count('\n'); };
+    const auto serverAlive = [&] {
+        const auto pid = read("pid");
+        return !pid.isEmpty() && QFileInfo::exists("/proc/" + QString::fromUtf8(pid));
+    };
+    const auto marker = [&](const QString& name) { QFile file(directory.filePath(name)); return file.open(QIODevice::WriteOnly); };
+    const QList<KiraService::TextChatMessage> conversation{
+        {"system", "You are Mia."}, {"user", "Hi."}, {"assistant", "Hey."}, {"user", "*sits down* How are you?"}};
+    const auto chat = [&](const QJsonObject& parameters) {
+        KiraService::TextChatResult result;
+        if (client.submitChat({"llm-chat:llm.gguf", conversation, parameters}).isEmpty()) return result;
+        if (!QTest::qWaitFor([&] { return finished.count() == 1; }, 5000)) return result;
+        return qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0));
+    };
+    const QJsonObject turn{{"maxTokens", 100}, {"stop", QJsonArray{"\nUser:"}}, {"kvCacheLocation", "ram"}, {"seed", 3}};
+
+    // server is the default engine; the reply is cleaned and reports usage and timing.
+    auto result = chat(turn);
+    QVERIFY2(result.succeeded, qPrintable(result.message));
+    QCOMPARE(result.text, QString("*smiles* Hello")); QCOMPARE(result.engine, QString("server"));
+    QCOMPARE(result.finishReason, QString("stop"));
+    QCOMPARE(result.promptTokens, 42); QCOMPARE(result.completionTokens, 7);
+    QVERIFY(result.coldStart); QVERIFY(result.durationMs >= 0);
+    QCOMPARE(launches(), 1);
+    const auto launch = read("launches");
+    QVERIFY(launch.contains("--ctx-size 4096 --n-gpu-layers all --fit off --no-kv-offload --cache-type-k f16 --cache-type-v f16 "
+                            "--flash-attn auto --reasoning off --host 127.0.0.1 --port "));
+    QVERIFY(launch.contains(" --api-key-file ")); QVERIFY(!launch.contains("--api-key "));
+    QVERIFY(launch.contains("--no-webui --parallel 1 --jinja"));
+    const auto body = QJsonDocument::fromJson(read("request.json")).object();
+    QCOMPARE(body.value("messages").toArray().size(), 4);
+    QCOMPARE(body.value("messages").toArray().first().toObject().value("role").toString(), QString("system"));
+    QCOMPARE(body.value("max_tokens").toInt(), 100); QCOMPARE(body.value("seed").toInt(), 3);
+    QCOMPARE(body.value("top_k").toInt(), 20); QCOMPARE(body.value("min_p").toDouble(), 0.0);
+    QCOMPARE(body.value("repeat_penalty").toDouble(), 1.1); QCOMPARE(body.value("repeat_last_n").toInt(), 4096);
+    QCOMPARE(body.value("stop").toArray(), QJsonArray{"\nUser:"});
+    QCOMPARE(body.value("samplers").toArray(), QJsonArray({"penalties", "dry", "top_k", "top_p", "min_p", "xtc", "temperature"}));
+    QCOMPARE(body.value("dry_multiplier").toDouble(), 0.0); QCOMPARE(body.value("dry_base").toDouble(), 1.75);
+    QCOMPARE(body.value("dry_allowed_length").toInt(), 2); QCOMPARE(body.value("dry_penalty_last_n").toInt(), 64);
+    QCOMPARE(body.value("xtc_probability").toDouble(), 0.0); QCOMPARE(body.value("xtc_threshold").toDouble(), 0.1);
+    QVERIFY(body.value("cache_prompt").toBool()); QVERIFY(!body.value("stream").toBool(true));
+
+    // The loaded model is reused while the launch settings are unchanged, and restarted otherwise.
+    result = chat(turn);
+    QVERIFY(result.succeeded); QVERIFY(!result.coldStart); QCOMPARE(launches(), 1);
+    auto changed = turn; changed.insert("kvCacheType", "q8_0");
+    result = chat(changed);
+    QVERIFY(result.succeeded); QVERIFY(result.coldStart); QCOMPARE(launches(), 2);
+
+    // A JSON schema becomes llama-server's response_format; the reply is checked and returned decoded.
+    const QJsonObject schema{{"type", "object"}, {"properties", QJsonObject{{"speech", QJsonObject{{"type", "string"}}}}},
+        {"required", QJsonArray{"speech"}}};
+    auto structured = changed; structured.remove("stop"); structured.insert("jsonSchema", schema);
+    result = chat(structured);
+    QVERIFY2(result.succeeded, qPrintable(result.message)); QVERIFY(!result.coldStart);
+    QCOMPARE(result.json.toObject().value("speech").toString(), QString("*smiles* Hello"));
+    const auto structuredBody = QJsonDocument::fromJson(read("request.json")).object();
+    QCOMPARE(structuredBody.value("response_format").toObject(),
+             QJsonObject({{"type", "json_schema"}, {"json_schema", QJsonObject{{"schema", schema}}}}));
+    QVERIFY(!structuredBody.contains("stop"));
+    QVERIFY(marker("truncated"));
+    result = chat(structured);
+    QCOMPARE(result.errorCode, QString("chat-invalid-json")); QVERIFY(result.message.contains("maxTokens"));
+    QVERIFY(QFile::remove(directory.filePath("truncated")));
+
+    // Reasoning and the chat template are launch settings: changing them restarts the server.
+    auto templated = turn; templated.insert("kvCacheType", "q8_0");
+    templated.insert("chatTemplate", "mistral-v7"); templated.insert("reasoning", "on"); templated.insert("dryMultiplier", 0.8);
+    result = chat(templated);
+    QVERIFY2(result.succeeded, qPrintable(result.message)); QVERIFY(result.coldStart); QCOMPARE(launches(), 3);
+    QVERIFY(read("launches").contains("--flash-attn auto --chat-template mistral-v7 --reasoning on --host"));
+    QCOMPARE(QJsonDocument::fromJson(read("request.json")).object().value("dry_multiplier").toDouble(), 0.8);
+    templated.insert("chatTemplate", "notatemplate");
+    result = chat(templated);
+    QCOMPARE(result.errorCode, QString("invalid-request")); QCOMPARE(launches(), 3);
+
+    // Any other GPU work unloads the chat model first.
+    QVERIFY(serverAlive());
+    QVERIFY(!client.enhancePrompt({"llm-chat:llm.gguf", "person", {}}).isEmpty());
+    QTRY_COMPARE(enhanced.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::PromptEnhancementResult>(enhanced.takeFirst().at(0)).succeeded);
+    QTRY_VERIFY(!serverAlive());
+    result = chat(turn);
+    QVERIFY(result.succeeded); QVERIFY(result.coldStart); QCOMPARE(launches(), 4);
+
+    // Errors map to explicit codes, and the next turn recovers.
+    QVERIFY(marker("context"));
+    result = chat(turn);
+    QCOMPARE(result.errorCode, QString("chat-context-exceeded")); QVERIFY(result.message.contains("5000"));
+    QVERIFY(QFile::remove(directory.filePath("context")));
+    QVERIFY(marker("crash"));
+    result = chat(turn);
+    QCOMPARE(result.errorCode, QString("chat-failed"));
+    QVERIFY(QFile::remove(directory.filePath("crash")));
+    result = chat(turn);
+    QVERIFY(result.succeeded); QVERIFY(result.coldStart);
+    QVERIFY(marker("hang"));
+    result = chat(turn);
+    QCOMPARE(result.errorCode, QString("chat-timeout"));
+    QVERIFY(QFile::remove(directory.filePath("hang")));
+    QVERIFY(marker("load-fail"));
+    result = chat(turn);
+    QCOMPARE(result.errorCode, QString("chat-failed")); QVERIFY(result.message.contains("out of memory"));
+    QVERIFY(QFile::remove(directory.filePath("load-fail")));
+
+    // A slow load is awaited through /health; an exact layer count is passed through.
+    QVERIFY(marker("slow-load"));
+    auto layers = turn; layers.insert("gpuLayers", 10);
+    result = chat(layers);
+    QVERIFY2(result.succeeded, qPrintable(result.message)); QVERIFY(result.coldStart);
+    QVERIFY(read("launches").contains("--n-gpu-layers 10 --fit off"));
+    QVERIFY(QFile::remove(directory.filePath("slow-load")));
+
+    // The model unloads after the idle period.
+    QVERIFY(serverAlive());
+    QTRY_VERIFY_WITH_TIMEOUT(!serverAlive(), 5000);
+
+    // Disconnecting cancels the active chat and kills the server.
+    QVERIFY(marker("hang"));
+    QFile::remove(directory.filePath("request.json"));
+    QVERIFY(!client.submitChat({"llm-chat:llm.gguf", conversation, turn}).isEmpty());
+    QTRY_VERIFY(QFileInfo::exists(directory.filePath("request.json")));
+    client.disconnectFromService();
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(!qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0)).succeeded);
+    QTRY_VERIFY(!serverAlive());
 }
 
 void ServiceTest::attachesModularCompanionsWithoutReplacingModel()
