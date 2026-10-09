@@ -31,7 +31,9 @@ so faithful rewrites (translation, in-language improvement) can
 reuse the input's words. Unknown keys fail.
 Overrides never change model recommendations. Empty input requests a new
 description using the system instructions. Temperature zero selects greedy output.
-The subprocess uses repetition penalty 1.1 (unless penalizeRepeats is false) and top-k 20.
+The subprocess uses repetition penalty 1.1 (unless penalizeRepeats is false). It passes no
+top-k, min-p or sampler order, so these follow the GGUF's `general.sampling.*`
+recommendations, or llama.cpp's defaults (top-k 40, min-p 0.05) when the file has none.
 KIRA_LLAMA_COMPLETION selects the executable. Preserve the ten-minute timeout,
 1 MiB output limit, single-job queue, disconnect cancellation and explicit errors.
 
@@ -218,7 +220,7 @@ when provided, the object must contain exactly the category's complete fields:
 
 | Category | Fields and validation |
 | --- | --- |
-| image-generation | `width` and `height`: identical integers 256–2048, multiples of 256; `steps`: integer 1–200; `cfgScale`: number 0–100; `sampler` and `scheduler`: allowed strings; `clipSkip`: -1 or integer 1–12 |
+| image-generation | `width` and `height`: identical integers 256–2048, multiples of 256; `steps`: integer 1–200; `cfgScale`: number 0–100; `sampler` and `scheduler`: allowed strings; `clipSkip`: -1 or integer 1–12; optional `promptFormat`: `natural`, `phrases` or `tags` (default `phrases`) |
 | llm-chat | `temperature`: number 0–2; `topP`: number >0 and ≤1; `contextLength`: integer 256–131072; `maxTokens`: integer 1–contextLength; optional booleans `canBeTextEncoder`, `defaultPromptEnhancer` and `defaultPromptTranslator` (default false) |
 | upscaler | No options: empty object only. No explicit-content classification. |
 | companion | `subtype`: exactly `vae` or `mmproj`; MMPROJ requires GGUF. |
@@ -227,6 +229,10 @@ Samplers: empty (Automatic), `euler`, `euler_a`, `heun`, `dpm2`, `dpm++2m`, `lcm
 Schedulers: empty (Automatic), `discrete`, `karras`, `exponential`, `ays`,
 `sgm_uniform`, `simple`. Clip Skip -1 means Automatic. The GUI proposes defaults
 from the shared Protocol API; the service does not infer model architecture.
+`promptFormat` tells clients how the model reads prompts: natural sentences
+(Flux), short comma-separated phrases (SDXL) or Danbooru-style tags
+(Illustrious). It is set manually and never changes execution; SDK
+`ModelInfo::promptFormat()` returns `phrases` when it is absent.
 Unknown fields, missing fields, wrong types and out-of-range values are rejected.
 
 To replace recommendations on an installed model:

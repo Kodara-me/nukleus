@@ -1171,6 +1171,16 @@ void ServiceTest::validatesRecommendedOptions()
     image.insert("steps", 200); image.insert("width", 2048); image.insert("height", 2048); QVERIFY(validateModelOptions("image-generation", image));
     image.insert("clipSkip", 0); QVERIFY(!validateModelOptions("image-generation", image));
     image.insert("clipSkip", 12); image.insert("sampler", "unknown"); QVERIFY(!validateModelOptions("image-generation", image));
+    // The prompt format defaults to phrases, is optional for existing models and accepts only known formats.
+    auto format = defaultModelOptions("image-generation");
+    QCOMPARE(format.value("promptFormat").toString(), QString("phrases"));
+    for (const auto &value : {"natural", "phrases", "tags"}) {
+        format.insert("promptFormat", value); QVERIFY(validateModelOptions("image-generation", format));
+    }
+    format.insert("promptFormat", "prose"); QVERIFY(!validateModelOptions("image-generation", format));
+    format.insert("promptFormat", 1); QVERIFY(!validateModelOptions("image-generation", format));
+    format.remove("promptFormat"); QVERIFY(validateModelOptions("image-generation", format));
+    QCOMPARE(KiraService::ModelInfo{}.promptFormat(), QString("phrases"));
     auto llm = defaultModelOptions("llm-chat");
     llm.insert("canBeTextEncoder", "yes"); QVERIFY(!validateModelOptions("llm-chat", llm));
     llm.insert("canBeTextEncoder", true); QVERIFY(validateModelOptions("llm-chat", llm));
@@ -1691,7 +1701,8 @@ void ServiceTest::enhancesPromptThroughSdk()
     QVERIFY(arguments.contains("--repeat-last-n\n4096\n"));
     QVERIFY(arguments.contains("--n-predict\n80\n"));
     QVERIFY(arguments.contains("--temp\n0\n"));
-    QVERIFY(arguments.contains("--top-k\n20\n"));
+    // Top-k, min-p and the sampler order follow the model's GGUF recommendations or llama.cpp's defaults.
+    QVERIFY(!arguments.contains("--top-k") && !arguments.contains("--min-p") && !arguments.contains("--samplers"));
     QVERIFY(arguments.contains("--single-turn\n"));
     QVERIFY(arguments.contains("--no-display-prompt\n"));
     // The instructions open the single user message, followed by the prompt.

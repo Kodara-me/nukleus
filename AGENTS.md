@@ -44,7 +44,8 @@ never overwrite weights and keep companions scoped to the final primary name.
   maxTokens recommendations or shared LLM defaults. Per-job overrides accept these
   fields, a string systemPrompt up to 64 KiB and a boolean penalizeRepeats (default
   true; false disables the prompt-wide repetition penalty for faithful rewrites),
-  without changing model metadata.
+  without changing model metadata. Pass no top-k, min-p or sampler order, so the
+  GGUF's general.sampling recommendations or llama.cpp's defaults apply.
   Unknown/invalid fields fail before queueing. Empty text requests a new description.
   Send the systemPrompt instructions at the start of the
   single user message, never through `--system-prompt-file`: llama-completion
@@ -92,7 +93,10 @@ never overwrite weights and keep companions scoped to the final primary name.
   Options are recommendations only; do not silently change execution arguments.
 - ModelOptions in the Protocol target owns category defaults and validation.
   Image generation use square resolution, steps, CFG, sampler, scheduler,
-  capability flags and shared VAE/text encoder IDs; LLM uses temperature/top-p/context/max tokens
+  capability flags, shared VAE/text encoder IDs and an optional promptFormat
+  (natural, phrases or tags; default and fallback phrases, set manually in Manager,
+  never inferred and never applied to execution; SDK ModelInfo::promptFormat());
+  LLM uses temperature/top-p/context/max tokens
   and canBeTextEncoder (default false). LLM "Default prompt enhancer" and "Default prompt
   translator" checkboxes save exclusive defaultPromptEnhancer/defaultPromptTranslator
   booleans (default false): at most one LLM per role, the same LLM may hold both, and

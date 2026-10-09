@@ -39,6 +39,8 @@ struct ModelInfo
     QString displayName;
     QString mmprojModelId;
     QString displayLabel() const { return displayName.trimmed().isEmpty() ? fileName : displayName.trimmed(); }
+    // An image-generation model's prompt format (natural, phrases or tags); phrases when unset.
+    QString promptFormat() const { return recommendedOptions.value("promptFormat").toString(QStringLiteral("phrases")); }
 };
 
 enum class ModelInstallState

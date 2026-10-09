@@ -8,12 +8,13 @@ QStringList modelSchedulers()
 {
     return {QString(), "discrete", "karras", "exponential", "ays", "sgm_uniform", "simple"};
 }
+QStringList modelPromptFormats() { return {"natural", "phrases", "tags"}; }
 QJsonObject defaultModelOptions(const QString &category)
 {
     if (category == "image-generation")
         return {{"width", 1024}, {"height", 1024},  {"steps", 28},   {"cfgScale", 7.0},
                 {"sampler", ""}, {"scheduler", ""}, {"canEdit", true}, {"canGenerate", true},
-                {"vaeModelId", ""}, {"textEncoderModelId", ""}};
+                {"vaeModelId", ""}, {"textEncoderModelId", ""}, {"promptFormat", "phrases"}};
     if (category == "llm-chat")
         return {{"temperature", 0.8}, {"topP", 0.95}, {"contextLength", 4096}, {"maxTokens", 1024}, {"canBeTextEncoder", false},
                 {"defaultPromptEnhancer", false}, {"defaultPromptTranslator", false}};
@@ -37,7 +38,7 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
     if (defaults.isEmpty()) return fail();
     auto required = defaults;
     if (category == "image-generation")
-        for (const auto &key : {"canEdit", "canGenerate", "vaeModelId", "textEncoderModelId"}) required.remove(key);
+        for (const auto &key : {"canEdit", "canGenerate", "vaeModelId", "textEncoderModelId", "promptFormat"}) required.remove(key);
     if (category == "llm-chat")
         for (const auto &key : QStringList{"canBeTextEncoder"} + exclusiveLlmRoles()) required.remove(key);
     for (auto it = required.begin(); it != required.end(); ++it)
@@ -59,6 +60,8 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
         if (!options.value("canEdit").toBool(true) && !options.value("canGenerate").toBool(true)) return fail();
         for (const auto &key : {"vaeModelId", "textEncoderModelId"})
             if (options.contains(key) && !options.value(key).isString()) return fail();
+        if (options.contains("promptFormat") && !modelPromptFormats().contains(options.value("promptFormat").toString()))
+            return fail();
         if (!number("width", 256, 2048, true) || width % 256 || !number("height", width, width, true) ||
             !number("steps", 1, 200, true) || !number("cfgScale", 0, 100) ||
             (options.contains("clipSkip") && (!number("clipSkip", -1, 12, true) || options.value("clipSkip").toInt() == 0)) || !options.value("sampler").isString() ||

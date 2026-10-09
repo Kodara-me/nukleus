@@ -1358,10 +1358,12 @@ bool KiraServiceDaemon::startLlm(const QString &modelPath, const QJsonObject &pa
         "--n-predict", QString::number(parameters.value("maxTokens").toInt()),
         "--repeat-penalty", penalty,
         "--repeat-last-n", QString::number(repeatLastN(parameters, penalizeRepeats)),
-        "--samplers", samplerChain(parameters), "--temp",
-        QString::number(parameters.value("temperature").toDouble(), 'g', 17),
-        "--top-p", QString::number(parameters.value("topP").toDouble(), 'g', 17),
-        "--top-k", QString::number(parameters.value("topK").toInt(20))};
+        "--temp", QString::number(parameters.value("temperature").toDouble(), 'g', 17),
+        "--top-p", QString::number(parameters.value("topP").toDouble(), 'g', 17)};
+    // Only text.chat chooses top-k and the sampler order. prompt.enhance leaves them, and min-p, to
+    // the GGUF's general.sampling recommendations or llama.cpp's defaults (top-k 40, min-p 0.05).
+    if (parameters.contains("topK"))
+        arguments += {"--samplers", samplerChain(parameters), "--top-k", QString::number(parameters.value("topK").toInt())};
     if (parameters.contains("minP")) arguments += {"--min-p", QString::number(parameters.value("minP").toDouble(), 'g', 15)};
     if (parameters.contains("seed")) arguments += {"--seed", QString::number(parameters.value("seed").toInt())};
     if (parameters.contains("dryMultiplier")) {

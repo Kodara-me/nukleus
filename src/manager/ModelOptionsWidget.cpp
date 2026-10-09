@@ -93,6 +93,14 @@ void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &
         decimal("cfgScale", tr("CFG scale:"), 0, 100, 1);
         choices("sampler", tr("Sampler:"), KiraService::Protocol::modelSamplers());
         choices("scheduler", tr("Scheduler:"), KiraService::Protocol::modelSchedulers());
+        auto *format = new QComboBox(this);
+        format->addItem(tr("Natural sentences (Flux)"), "natural");
+        format->addItem(tr("Short phrases (SDXL)"), "phrases");
+        format->addItem(tr("Tags (Illustrious)"), "tags");
+        format->setCurrentIndex(format->findData(values.value("promptFormat").toString("phrases")));
+        format->setToolTip(tr("How this model reads prompts; clients write prompts in this format."));
+        connect(format, &QComboBox::currentIndexChanged, this, &ModelOptionsWidget::optionsChanged);
+        add("promptFormat", tr("Prompt format:"), format);
     }
     else if (category == "llm-chat")
     {

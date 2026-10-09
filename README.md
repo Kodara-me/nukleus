@@ -142,7 +142,8 @@ The manager connects to `127.0.0.1:9384` and retries while the service is offlin
 
 Recommended options are metadata returned to clients, not enforced execution
 settings. Image generation expose square resolution (256–2048 in steps
-of 256), steps, CFG scale, sampler, scheduler, and generation/edit capabilities. LLM exposes
+of 256), steps, CFG scale, sampler, scheduler, generation/edit capabilities and the prompt
+format clients write for it (natural sentences, short phrases by default, or tags). LLM exposes
 temperature, top-p, context length, and maximum tokens; Upscaler has no options or explicit-content control (execution remains fixed at 2×); Existing
 models without recommendations remain usable; proposed defaults are saved only
 on an explicit Save. Canvas uses the selected model’s recommendations for unedited generation controls.
