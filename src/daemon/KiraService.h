@@ -100,7 +100,7 @@ private:
     void handleLlmFinished(int exitCode, QProcess::ExitStatus status);
     void handleLlamaServerFinished(const LlamaServerReply &reply);
     void sendChatResult(const Job &job, const QString &text, QJsonObject result);
-    bool isServerChat(const Job &job) const;
+    bool usesLlamaServer(const Job &job) const;
     void sendCapabilities(QWebSocket *socket) const;
     void send(QWebSocket *socket, QJsonObject object) const;
     void sendError(QWebSocket *socket, const QString &code, const QString &message, const QString &jobId = {}) const;

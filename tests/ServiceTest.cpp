@@ -1669,6 +1669,8 @@ void ServiceTest::enhancesPromptThroughSdk()
     KiraServiceConfiguration configuration;
     configuration.port = 0; configuration.modelRootPath = directory.path();
     configuration.llamaCompletion = executablePath;
+    // Without llama-server, prompt.enhance falls back to llama-completion.
+    configuration.llamaServer = directory.filePath("missing-llama-server");
     configuration.promptEnhancementTimeoutMs = 400;
     KiraServiceDaemon daemon(configuration); QString error;
     QVERIFY2(daemon.start(&error), qPrintable(error));
@@ -2047,14 +2049,42 @@ void ServiceTest::chatsThroughServerEngine()
     result = chat(templated);
     QCOMPARE(result.errorCode, QString("invalid-request")); QCOMPARE(launches(), 3);
 
-    // Any other GPU work unloads the chat model first.
+    // prompt.enhance runs on llama-server with text.chat's default load settings: a model loaded with
+    // other settings restarts, then consecutive jobs and such chats share the loaded model.
+    const auto enhance = [&](const QJsonObject& parameters) {
+        KiraService::PromptEnhancementResult result;
+        if (client.enhancePrompt({"llm-chat:llm.gguf", "person", parameters}).isEmpty()) return result;
+        if (!QTest::qWaitFor([&] { return enhanced.count() == 1; }, 5000)) return result;
+        return qvariant_cast<KiraService::PromptEnhancementResult>(enhanced.takeFirst().at(0));
+    };
     QVERIFY(serverAlive());
-    QVERIFY(!client.enhancePrompt({"llm-chat:llm.gguf", "person", {}}).isEmpty());
-    QTRY_COMPARE(enhanced.count(), 1);
-    QVERIFY(qvariant_cast<KiraService::PromptEnhancementResult>(enhanced.takeFirst().at(0)).succeeded);
-    QTRY_VERIFY(!serverAlive());
+    auto enhancement = enhance({});
+    QVERIFY2(enhancement.succeeded, qPrintable(enhancement.message));
+    QCOMPARE(enhancement.prompt, QString("*smiles* Hello\nUser: hi"));
+    QCOMPARE(launches(), 4);
+    QVERIFY(read("launches").split('\n').at(3).contains(
+        "--ctx-size 4096 --n-gpu-layers all --fit off --cache-type-k f16 --cache-type-v f16 --flash-attn auto --reasoning off --host"));
+    auto enhanceBody = QJsonDocument::fromJson(read("request.json")).object();
+    const auto messages = enhanceBody.value("messages").toArray();
+    QCOMPARE(messages.size(), 1);
+    QCOMPARE(messages.first().toObject().value("role").toString(), QString("user"));
+    QVERIFY(messages.first().toObject().value("content").toString().endsWith("reasoning.\n\nperson"));
+    QCOMPARE(enhanceBody.value("temperature").toDouble(), 0.8); QCOMPARE(enhanceBody.value("max_tokens").toInt(), 1024);
+    QCOMPARE(enhanceBody.value("repeat_penalty").toDouble(), 1.1); QCOMPARE(enhanceBody.value("repeat_last_n").toInt(), 4096);
+    QVERIFY(!enhanceBody.contains("top_k")); QVERIFY(!enhanceBody.contains("samplers")); QVERIFY(!enhanceBody.contains("seed"));
+    enhancement = enhance({{"penalizeRepeats", false}});
+    QVERIFY(enhancement.succeeded); QCOMPARE(launches(), 4);
+    enhanceBody = QJsonDocument::fromJson(read("request.json")).object();
+    QCOMPARE(enhanceBody.value("repeat_penalty").toDouble(), 1.0); QCOMPARE(enhanceBody.value("repeat_last_n").toInt(), 0);
+    result = chat({{"maxTokens", 100}});
+    QVERIFY(result.succeeded); QVERIFY(!result.coldStart); QCOMPARE(launches(), 4);
+
+    // Any other GPU work unloads the chat model first.
+    result = chat({{"engine", "completion"}});
+    QVERIFY2(result.succeeded, qPrintable(result.message));
+    QVERIFY(!serverAlive());
     result = chat(turn);
-    QVERIFY(result.succeeded); QVERIFY(result.coldStart); QCOMPARE(launches(), 4);
+    QVERIFY(result.succeeded); QVERIFY(result.coldStart); QCOMPARE(launches(), 5);
 
     // Errors map to explicit codes, and the next turn recovers.
     QVERIFY(marker("context"));

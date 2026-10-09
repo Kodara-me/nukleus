@@ -208,6 +208,24 @@ QJsonObject chatCompletionBody(const QJsonObject &options)
     return body;
 }
 
+// Body of a prompt.enhance turn on llama-server, mirroring startLlm's llama-completion arguments:
+// top-k, min-p and the sampler order stay the GGUF's or llama.cpp's unless the options set them.
+QJsonObject enhancementBody(const QJsonObject &options, const QString &message)
+{
+    const bool penalize = options.value("penalizeRepeats").toBool(true);
+    QJsonObject body{{"messages", QJsonArray{QJsonObject{{"role", "user"}, {"content", message}}}},
+        {"temperature", options.value("temperature")}, {"top_p", options.value("topP")},
+        {"repeat_penalty", repeatPenalty(options, penalize)}, {"repeat_last_n", repeatLastN(options, penalize)},
+        {"max_tokens", options.value("maxTokens")}, {"cache_prompt", true}, {"stream", false}};
+    if (options.contains("topK")) {
+        body.insert("top_k", options.value("topK"));
+        body.insert("samplers", QJsonArray::fromStringList(samplerChain(options).split(QLatin1Char(';'))));
+    }
+    if (options.contains("minP")) body.insert("min_p", options.value("minP"));
+    if (options.contains("seed")) body.insert("seed", options.value("seed"));
+    return body;
+}
+
 // A schema-constrained reply must parse as JSON; a reply cut by maxTokens does not.
 std::optional<QJsonValue> structuredReply(const QString &text)
 {
@@ -947,10 +965,11 @@ void KiraServiceDaemon::startNextJob()
     broadcastQueuePositions();
 }
 
-bool KiraServiceDaemon::isServerChat(const Job &job) const
+bool KiraServiceDaemon::usesLlamaServer(const Job &job) const
 {
     return job.operation == Operation::TextChatLoad
-        || (job.operation == Operation::TextChat && job.options.value("engine").toString() == "server");
+        || ((job.operation == Operation::TextChat || job.operation == Operation::PromptEnhance)
+            && job.options.value("engine").toString() == "server");
 }
 
 void KiraServiceDaemon::runActiveJob()
@@ -958,7 +977,7 @@ void KiraServiceDaemon::runActiveJob()
     m_activeJobClock.start();
     const bool chatModelLoaded = m_llamaServer->isRunning();
     // A loaded chat model would compete with any other GPU work for memory.
-    if (!isServerChat(*m_activeJob)) m_llamaServer->stop();
+    if (!usesLlamaServer(*m_activeJob)) m_llamaServer->stop();
     if (m_activeJob->operation == Operation::TextChatUnload) {
         send(m_activeJob->client, {{"type", "result"}, {"jobId", m_activeJob->id}, {"operation", "text.chat.unload"},
             {"unloaded", chatModelLoaded}, {"durationMs", m_activeJobClock.elapsed()}});
@@ -1048,7 +1067,7 @@ void KiraServiceDaemon::cancelJobsFor(QWebSocket *socket)
     while (!m_queue.isEmpty()) { const auto job = m_queue.dequeue(); if (job->client != socket) kept.enqueue(job); }
     m_queue = std::move(kept);
     if (m_activeJob && m_activeJob->client == socket) {
-        if (isServerChat(*m_activeJob)) m_llamaServer->cancel();
+        if (usesLlamaServer(*m_activeJob)) m_llamaServer->cancel();
         else if (m_activeJob->operation == Operation::PromptEnhance || m_activeJob->operation == Operation::TextChat)
             m_promptProcess.kill();
         else if (m_sdRunner) m_sdRunner->cancel();
@@ -1104,8 +1123,7 @@ void KiraServiceDaemon::modelRouting(QWebSocket *socket, const QJsonObject &mess
 
 bool KiraServiceDaemon::isPromptEnhancementReady() const
 {
-    return !m_configuration.llamaCompletion.isEmpty()
-        && !QStandardPaths::findExecutable(m_configuration.llamaCompletion).isEmpty();
+    return !readyTextChatEngines().isEmpty();
 }
 
 void KiraServiceDaemon::submitPromptEnhancement(QWebSocket* socket, const QJsonObject& message)
@@ -1146,10 +1164,10 @@ void KiraServiceDaemon::submitPromptEnhancement(QWebSocket* socket, const QJsonO
         sendError(socket, "invalid-request", tr("Invalid LLM parameters"), id); return;
     }
     if (QFileInfo(model->filePath).suffix().toLower() != "gguf") {
-        sendError(socket, "llm-format-unsupported", tr("llama-completion requires a compatible GGUF model"), id); return;
+        sendError(socket, "llm-format-unsupported", tr("llama.cpp requires a compatible GGUF model"), id); return;
     }
     if (!isPromptEnhancementReady()) {
-        sendError(socket, "backend-not-ready", tr("llama-completion is unavailable"), id); return;
+        sendError(socket, "backend-not-ready", tr("llama.cpp is unavailable"), id); return;
     }
     if (m_pendingUploads.contains(socket) || m_queue.size() >= MaximumQueuedJobs) {
         sendError(socket, "queue-full", tr("An upload is pending or the service queue is full"), id); return;
@@ -1164,6 +1182,8 @@ void KiraServiceDaemon::submitPromptEnhancement(QWebSocket* socket, const QJsonO
     // Rewrites that must reuse the input's words (translation, faithful improvement) turn it off.
     job->options.insert("penalizeRepeats", overrides.value("penalizeRepeats").toBool(true));
     job->options.insert("prompt", request.value("prompt"));
+    // llama-server keeps the model loaded between jobs; llama-completion reloads it every time.
+    job->options.insert("engine", m_llamaServer->isAvailable() ? "server" : "completion");
     enqueue(job);
 }
 
@@ -1174,10 +1194,22 @@ void KiraServiceDaemon::startPromptEnhancement()
     QString system = parameters.value("systemPrompt").toString();
     if (system.trimmed().isEmpty())
         system = QStringLiteral("Enhance the image-generation prompt that follows these instructions. Return only the enhanced prompt, without explanations, headings, quotation marks or reasoning.");
-    const auto input = parameters.value("prompt").toString();
-    if (!startLlm(job->modelPath, parameters, system, input.trimmed().isEmpty()
-        ? QStringLiteral("Generate a new description according to the instructions above.") : input,
-        parameters.value("penalizeRepeats").toBool(true))) {
+    QString input = parameters.value("prompt").toString();
+    if (input.trimmed().isEmpty()) input = QStringLiteral("Generate a new description according to the instructions above.");
+    if (usesLlamaServer(*job)) {
+        // text.chat's default load settings, so a chat client using them shares the loaded model;
+        // other settings or another model restart the server.
+        QJsonObject launch = parameters;
+        launch.insert("gpuLayers", "all"); launch.insert("kvCacheLocation", "gpu");
+        launch.insert("kvCacheType", "f16"); launch.insert("flashAttention", "auto");
+        // As in startLlm, the instructions open the single user message.
+        m_llamaServer->run({job->modelPath, parameters.value("contextLength").toInt(),
+                            chatLaunchArguments(launch) + QStringList{"--reasoning", parameters.value("reasoning").toString("off")}},
+                           enhancementBody(parameters, system.trimmed() + QStringLiteral("\n\n") + input),
+                           m_configuration.promptEnhancementTimeoutMs);
+        return;
+    }
+    if (!startLlm(job->modelPath, parameters, system, input, parameters.value("penalizeRepeats").toBool(true))) {
         sendError(job->client, "storage-error", tr("Could not prepare prompt enhancement"), job->id);
         m_activeJob.reset(); startNextJob();
     }
@@ -1203,7 +1235,8 @@ QStringList KiraServiceDaemon::readyTextChatEngines() const
 {
     QStringList engines;
     if (m_llamaServer->isAvailable()) engines.append("server");
-    if (isPromptEnhancementReady()) engines.append("completion");
+    if (!m_configuration.llamaCompletion.isEmpty() && !QStandardPaths::findExecutable(m_configuration.llamaCompletion).isEmpty())
+        engines.append("completion");
     return engines;
 }
 
@@ -1300,7 +1333,7 @@ void KiraServiceDaemon::submitTextChatUnload(QWebSocket* socket, const QJsonObje
 void KiraServiceDaemon::startTextChat()
 {
     const auto job = m_activeJob;
-    if (isServerChat(*job)) {
+    if (usesLlamaServer(*job)) {
         // Reasoning is a launch setting of llama-server; llama-completion receives it in startLlm.
         const auto arguments = chatLaunchArguments(job->options) + QStringList{"--reasoning", job->options.value("reasoning").toString()};
         // An empty body only loads the model.
@@ -1411,8 +1444,19 @@ void KiraServiceDaemon::handleLlmFinished(int exitCode, QProcess::ExitStatus sta
 
 void KiraServiceDaemon::handleLlamaServerFinished(const LlamaServerReply &reply)
 {
-    if (!m_activeJob || !isServerChat(*m_activeJob)) return;
+    if (!m_activeJob || !usesLlamaServer(*m_activeJob)) return;
     const auto job = m_activeJob;
+    if (job->operation == Operation::PromptEnhance) {
+        const QString text = cleanChatReply(reply.content, {});
+        // The runner reports chat-* codes; prompt.enhance keeps its own, whatever the engine.
+        QString code = reply.errorCode;
+        if (code.startsWith("chat-")) code.replace(0, 5, QStringLiteral("prompt-enhancement-"));
+        if (!reply.succeeded) sendError(job->client, code, reply.message, job->id);
+        else if (text.isEmpty()) sendError(job->client, "prompt-enhancement-empty-result", tr("The model returned an empty reply"), job->id);
+        else send(job->client, {{"type", "result"}, {"jobId", job->id}, {"operation", "prompt.enhance"}, {"prompt", text}});
+        m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
+        return;
+    }
     if (job->operation == Operation::TextChatLoad) {
         if (!reply.succeeded) sendError(job->client, reply.errorCode, reply.message, job->id);
         else send(job->client, {{"type", "result"}, {"jobId", job->id}, {"operation", "text.chat.load"},

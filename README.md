@@ -11,13 +11,18 @@ operations for existing models. Existing legacy model directories remain on disk
 
 Prompt enhancement uses the **LLM** catalogue (llm-chat, stored under models/llm/).
 The identity dialog in Canvas selects its default LLM model in Service Preferences.
-prompt.enhance runs a fresh llama-completion process with the model's temperature,
-top-p, context length and maximum tokens. The identity-specific system prompt is
-a per-job override. Model settings are unchanged by individual requests.
+prompt.enhance runs on the same loopback `llama-server` as text.chat, with the
+model's temperature, top-p, context length and maximum tokens. The model stays
+loaded between enhancements and is shared with chats that use text.chat's
+default load settings; another model or setting unloads it and loads the new
+one, and image jobs unload it first. Without `llama-server`, a fresh
+`llama-completion` process runs each request. The identity-specific system
+prompt is a per-job override. Model settings are unchanged by individual requests.
 
-Install llama.cpp's `llama-completion` executable on the service host to enable
-this capability. It must be on the daemon's PATH; alternatively set
-`KIRA_LLAMA_COMPLETION` to its absolute path in the service environment.
+Install llama.cpp's `llama-server` (or `llama-completion`) executable on the
+service host to enable this capability. It must be on the daemon's PATH;
+alternatively set `KIRA_LLAMA_SERVER` or `KIRA_LLAMA_COMPLETION` to its
+absolute path in the service environment.
 
 text.chat sends a client-built conversation (system, user and assistant
 messages) to an installed LLM and returns one complete reply. It is generic:

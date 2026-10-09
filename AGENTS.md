@@ -40,7 +40,10 @@ Primary filename collisions receive a numeric suffix before the extension;
 never overwrite weights and keep companions scoped to the final primary name.
 
 - Prompt enhancement executes installed LLM (llm-chat) models through the shared
-  FIFO and llama-completion subprocess, using saved temperature/topP/contextLength/
+  FIFO on the loopback llama-server (text.chat's `LlamaServerRunner`, with
+  text.chat's default load settings so a chat client using them shares the
+  loaded model; another model or setting restarts it), falling back to a
+  llama-completion subprocess without llama-server, using saved temperature/topP/contextLength/
   maxTokens recommendations or shared LLM defaults. Per-job overrides accept these
   fields, a string systemPrompt up to 64 KiB and a boolean penalizeRepeats (default
   true; false disables the prompt-wide repetition penalty for faithful rewrites),
@@ -64,13 +67,13 @@ never overwrite weights and keep companions scoped to the final primary name.
   `--help`; llama.cpp treats any other string as a literal Jinja template. The default `server`
   engine is a loopback llama-server owned by `LlamaServerRunner` (random port,
   private API-key file, PDEATHSIG); a changed model or load setting restarts it.
-  Unload it before every other job and after the idle period, so it never
-  competes with sd-cli or llama-completion for GPU memory. `gpuLayers` other
+  Unload it before every other job (prompt.enhance on it excepted) and after the
+  idle period, so it never competes with sd-cli or llama-completion for GPU memory. `gpuLayers` other
   than `auto` passes `--fit off`: a model that does not fit must fail, not spill
   onto the CPU. text.chat.load and text.chat.unload are FIFO jobs: load takes
   text.chat's model and parameters without messages and keeps the first-chat
-  lazy load; unload relies on the rule that every non-server-chat job stops
-  llama-server. Tests use the fake server and must never start a real one.
+  lazy load; unload relies on the rule that every job not using llama-server
+  stops it. Tests use the fake server and must never start a real one.
 
 - Link only the manager/UI tests to KiraUi::Widgets 0.2. Default to the sibling
   checkout, allow KIRA_UI_SOURCE_DIR, and fall back to an installed package.

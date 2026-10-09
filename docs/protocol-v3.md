@@ -16,8 +16,13 @@ companion also includes the category-relative `companionFileName` and
 ## Prompt enhancement
 
 prompt.enhance accepts an installed LLM (llm-chat) model ID, a prompt string
-(up to 64 KiB, empty allowed), and optional parameters. Execution uses a
-llama-completion subprocess in the shared FIFO. Recommendations default to the
+(up to 64 KiB, empty allowed), and optional parameters. Execution runs in the
+shared FIFO on text.chat's `server` engine with its default load settings
+(`gpuLayers` all, `kvCacheLocation` gpu, `kvCacheType` f16, `flashAttention`
+auto, the model's `contextLength`), so the model stays loaded between
+enhancements and is shared with chats using those settings; a different model
+or setting restarts it. Without llama-server, a llama-completion subprocess
+runs instead. Errors keep the `prompt-enhancement-` codes on both. Recommendations default to the
 standard LLM values: temperature 0.8, topP 0.95, contextLength 4096, maxTokens 1024.
 
 ```json
@@ -99,8 +104,8 @@ Engines:
   whose model, `contextLength`, `gpuLayers`, `kvCacheLocation`, `kvCacheType`,
   `flashAttention`, `chatTemplate` or `reasoning` differs from the loaded one
   restarts it. The service
-  unloads it before any other job (image work, prompt.enhance, a `completion`
-  chat) and after an idle period: ten minutes, or
+  unloads it before any other job (image work, a `completion` chat; not
+  prompt.enhance, which runs on it) and after an idle period: ten minutes, or
   `KIRA_LLAMA_SERVER_IDLE_SECONDS`. `KIRA_LLAMA_SERVER` selects the
   executable.
 - `completion` runs llama-completion through the shared FIFO like
