@@ -592,6 +592,11 @@ void KiraServiceDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         sendError(socket, "model-unavailable", tr("The model does not support this image operation"), jobId);
         return;
     }
+    // Reference images reach sd-cli like edit inputs: only models that can edit understand them.
+    if (generate && options.contains("inputCount") && !model->recommendedOptions.value("canEdit").toBool(true)) {
+        sendError(socket, "invalid-request", tr("The model cannot use reference images"), jobId);
+        return;
+    }
     if (upscale && options.contains(QStringLiteral("scale"))) {
         sendError(socket, QStringLiteral("invalid-request"), tr("Upscale is fixed at 2×"), jobId);
         return;

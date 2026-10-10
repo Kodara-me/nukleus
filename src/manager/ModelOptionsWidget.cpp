@@ -79,7 +79,7 @@ void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &
     };
     if (category == "image-generation")
     {
-        check("canEdit", tr("Can Edit"), true);
+        check("canEdit", tr("Can Edit (uses reference images)"), true);
         check("canGenerate", tr("Can Generate"), true);
         modelChoice("vaeModelId", tr("VAE:"));
         modelChoice("textEncoderModelId", tr("Text encoder:"));

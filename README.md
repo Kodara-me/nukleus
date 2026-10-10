@@ -5,7 +5,9 @@ Kira Service is the standalone backend for Kira applications. It owns installed 
 Editing reuses **Image generation** models directly. image.edit accepts their
 original opaque IDs and resolves the same primary weights, model type and companions.
 There is no separate editing category. **Can Edit** and **Can Generate** control
-which operations each model supports; at least one must be checked. Select an
+which operations each model supports; at least one must be checked. Only models that
+can edit use reference images, also when generating: the service rejects references
+sent to any other model. Select an
 eligible model as Canvas's default edit model. Missing flags preserve both
 operations for existing models. Existing legacy model directories remain on disk.
 

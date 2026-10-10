@@ -819,6 +819,14 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(args.value(args.indexOf("--llm") + 1), QDir(root).filePath("llm/shared-encoder.gguf"));
     QVERIFY(!args.contains("--llm_vision"));
     QCOMPARE(args.value(args.indexOf("--vae") + 1), QDir(root).filePath("companion/shared-vae.gguf"));
+    // A model that cannot edit cannot use reference images either.
+    QJsonObject ignoredReferences = valid;
+    ignoredReferences.insert("inputCount", 1);
+    messages.clear();
+    send("ignored-references", ignoredReferences);
+    QTRY_VERIFY(terminal("ignored-references"));
+    QCOMPARE(messages.last().value("code").toString(), QString("invalid-request"));
+    QCOMPARE(images.count(), 2);
     KiraService::ServiceClient capabilityClient;
     capabilityClient.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(service.serverPort())), {});
     capabilityClient.connectToService();

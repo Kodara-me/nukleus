@@ -334,8 +334,10 @@ an input upload. Invalid types or ranges return `invalid-request` correlated to
 
 With `inputCount`, the service sends one `upload-required` per reference image
 (`inputIndex` 0…n-1, role `reference`); the client answers each with one binary
-frame in order, and sd-cli receives them as repeated `-r` arguments. SDK clients
-fill `ImageGenerationRequest::referenceImages`.
+frame in order, and sd-cli receives them as repeated `-r` arguments. Only models
+with `canEdit` (missing means true) understand them; for any other model the service
+rejects `inputCount` with `invalid-request`. SDK clients fill
+`ImageGenerationRequest::referenceImages`.
 
 Automatic sampler/scheduler flags are omitted from the backend command. Positive
 Clip Skip values are forwarded; -1 omits the flag. CFG and image strength retain

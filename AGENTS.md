@@ -27,7 +27,9 @@
 
 Generation models serve image.generate and/or image.edit according to saved
 recommendedOptions.canGenerate/canEdit (missing flags default true). At least one
-must be true. Both operations resolve original generation
+must be true. canEdit also means the model uses reference images (sd-cli `-r`): the
+Manager labels it "Can Edit (uses reference images)" and image.generate rejects
+`inputCount` for a model without it. Both operations resolve original generation
 IDs, model types and companions from the generation directory. Existing legacy
 directories and metadata remain on disk, without migration or deletion.
 
