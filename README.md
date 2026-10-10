@@ -211,9 +211,11 @@ Standalone diffusion files require their missing encoder/VAE weights separately.
 
 Image models save `canEdit`, `canGenerate`, `vaeModelId` and `textEncoderModelId`
 inside recommendedOptions; LLM saves `canBeTextEncoder` (default false) there.
-LLM forms also offer **Default prompt enhancer** and **Default prompt translator**
-(`defaultPromptEnhancer`/`defaultPromptTranslator`): at most one LLM holds each
-role, possibly the same one, and saving a checked role moves it to that model.
+LLM forms also offer **Default prompt enhancer**, **Default prompt translator** and
+**Default image describer** (`defaultPromptEnhancer`/`defaultPromptTranslator`/
+`defaultImageDescriber`): at most one LLM holds each role, possibly the same one,
+and saving a checked role moves it to that model. An LLM with an **MMPROJ
+companion** can see images: text chats may attach up to eight PNG or JPEG images.
 The service validates references and capabilities before accepting jobs. Legacy
 attachment APIs/CLI remain compatible and existing files remain on disk; legacy
 VAE/LLM files are fallback weights when no shared assignment is selected. Legacy

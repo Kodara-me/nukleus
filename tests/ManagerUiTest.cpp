@@ -97,7 +97,7 @@ class ManagerUiTest final : public QObject
         auto *eligible = form.findChild<QCheckBox*>("canBeTextEncoder");
         QVERIFY(!eligible->isChecked()); eligible->setChecked(true);
         QVERIFY(form.options().value("canBeTextEncoder").toBool());
-        for (const auto &role : {"defaultPromptEnhancer", "defaultPromptTranslator"}) {
+        for (const auto &role : {"defaultPromptEnhancer", "defaultPromptTranslator", "defaultImageDescriber"}) {
             auto *roleCheck = form.findChild<QCheckBox*>(role);
             QVERIFY(roleCheck && !roleCheck->isChecked()); roleCheck->setChecked(true);
             QVERIFY(form.options().value(role).toBool());

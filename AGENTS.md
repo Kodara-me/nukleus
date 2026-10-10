@@ -100,12 +100,17 @@ never overwrite weights and keep companions scoped to the final primary name.
   (natural, phrases or tags; default and fallback phrases, set manually in Manager,
   never inferred and never applied to execution; SDK ModelInfo::promptFormat());
   LLM uses temperature/top-p/context/max tokens
-  and canBeTextEncoder (default false). LLM "Default prompt enhancer" and "Default prompt
-  translator" checkboxes save exclusive defaultPromptEnhancer/defaultPromptTranslator
-  booleans (default false): at most one LLM per role, the same LLM may hold both, and
-  saving a role clears it on other LLMs atomically. Configure broadcasts `models.changed`
-  to other clients; the SDK exposes defaultPromptEnhancerModelId()/defaultPromptTranslatorModelId().
-  No job consumes the roles yet. Clip Skip has no configuration control. Upscalers have no
+  and canBeTextEncoder (default false). LLM "Default prompt enhancer", "Default prompt
+  translator" and "Default image describer" checkboxes save exclusive
+  defaultPromptEnhancer/defaultPromptTranslator/defaultImageDescriber booleans (default
+  false): at most one LLM per role, the same LLM may hold several, and saving a role
+  clears it on other LLMs atomically. Configure broadcasts `models.changed` to other
+  clients; the SDK exposes defaultPromptEnhancerModelId()/defaultPromptTranslatorModelId()/
+  defaultImageDescriberModelId(). No job consumes the roles: clients choose the model.
+  An LLM with an assigned MMPROJ companion loads with it (`--mmproj`) on llama-server
+  for every text.chat and prompt.enhance, and text.chat accepts 1–8 PNG/JPEG images
+  (imageCount, uploaded like edit inputs) shown before the last user message's text;
+  the SDK sends TextChatRequest::images when canChatWithImages(). Clip Skip has no configuration control. Upscalers have no
   recommended options or explicit-content control. Companion models expose only
   their VAE/mmproj subtype; hide unrelated fields and recommendations hints.
 - Preserve legacy metadata.json companion strings and untouched entries when
@@ -235,7 +240,8 @@ it for generation. Manager edits it as "Identity portraits" on the preset page
 Preset prompt flows are removed: presets hold no LLM steps, reads ignore a
 `promptFlow` stored by earlier documents (versions 3–6) and Save no longer writes
 it. LLM roles live only in the exclusive defaultPromptEnhancer/
-defaultPromptTranslator LLM options; clients run them through prompt.enhance.
+defaultPromptTranslator/defaultImageDescriber LLM options; clients run them through
+prompt.enhance or text.chat.
 Transmit name (English) and nameFr for every preset and quality. SDK displayLabel
 uses French for French locales, English otherwise. Validate 1–16 presets
 with unique nonblank IDs (at most 64 characters) and nonblank English/French

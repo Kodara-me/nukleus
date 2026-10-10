@@ -135,6 +135,8 @@ QString ServiceClient::defaultPromptEnhancerModelId() const { return defaultLlmM
 
 QString ServiceClient::defaultPromptTranslatorModelId() const { return defaultLlmModelId("defaultPromptTranslator"); }
 
+QString ServiceClient::defaultImageDescriberModelId() const { return defaultLlmModelId("defaultImageDescriber"); }
+
 QString ServiceClient::defaultLlmModelId(const QString &role) const
 {
     for (const ModelInfo &model : m_models)
@@ -289,17 +291,30 @@ bool ServiceClient::canChat(const QString& modelId) const
     return m_authenticated && m_capabilities.textChat && containsModel(modelId, ModelCategory::LlmChat);
 }
 
+bool ServiceClient::canChatWithImages(const QString& modelId) const
+{
+    if (!canChat(modelId) || !m_capabilities.textChatImages) return false;
+    for (const ModelInfo& model : m_models)
+        if (model.id == modelId) return !model.mmprojModelId.isEmpty();
+    return false;
+}
+
 QString ServiceClient::submitChat(const TextChatRequest& request)
 {
     if (!canChat(request.modelId) || request.messages.isEmpty()) return {};
+    if (!request.images.isEmpty() && (!canChatWithImages(request.modelId) || request.images.size() > MaximumChatImages))
+        return {};
     const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     PendingJob job;
     job.textChat = true;
+    job.inputImages = request.images;
     m_pendingJobs.insert(jobId, job);
     QJsonArray messages;
     for (const auto& message : request.messages)
         messages.append(QJsonObject{{"role", message.role}, {"content", message.content}});
     QJsonObject options{{"modelId", request.modelId}, {"messages", messages}};
+    // The service asks for each image through upload-required, then shows them with the last user message.
+    if (!request.images.isEmpty()) options.insert("imageCount", int(request.images.size()));
     if (!request.parameters.isEmpty()) options.insert("parameters", request.parameters);
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
         {"type", "submit"}, {"jobId", jobId}, {"operation", "text.chat"}, {"options", options}}).toJson(QJsonDocument::Compact)));
@@ -383,7 +398,8 @@ void ServiceClient::handleTextMessage(const QString &message)
         updateCapabilities({operations.contains("image.generate"), operations.contains("image.upscale"),
             operations.contains("image.edit"), operations.contains("prompt.enhance"), operations.contains("model-routing"),
             operations.contains("text.chat"), chatEngines,
-            operations.contains("text.chat.load") && operations.contains("text.chat.unload")});
+            operations.contains("text.chat.load") && operations.contains("text.chat.unload"),
+            operations.contains("text.chat.images")});
         if (m_capabilities.modelRouting) requestModelRouting();
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
@@ -584,7 +600,8 @@ void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
         && m_capabilities.modelRouting == capabilities.modelRouting
         && m_capabilities.textChat == capabilities.textChat
         && m_capabilities.textChatEngines == capabilities.textChatEngines
-        && m_capabilities.chatModelControl == capabilities.chatModelControl) return;
+        && m_capabilities.chatModelControl == capabilities.chatModelControl
+        && m_capabilities.textChatImages == capabilities.textChatImages) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
 }

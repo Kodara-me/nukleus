@@ -90,6 +90,8 @@ private:
     void handleGenerationFinished(const SdCliGenerationResult &result);
     void handleUpscaleFinished(const SdCliUpscaleResult &result);
     bool isPromptEnhancementReady() const;
+    // The MMPROJ companion's file for an LLM's assignment, or empty without a usable one.
+    QString visionProjectorPath(const QString &mmprojModelId) const;
     void submitPromptEnhancement(QWebSocket* socket, const QJsonObject& message);
     void startPromptEnhancement();
     QStringList readyTextChatEngines() const;

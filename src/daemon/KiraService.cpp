@@ -75,6 +75,15 @@ constexpr int MaximumChatBytes = 1024 * 1024;
 constexpr int MaximumChatStops = 4;
 constexpr int MaximumChatStopBytes = 256;
 constexpr int MaximumChatSchemaBytes = 64 * 1024;
+constexpr int MaximumChatImages = 8;
+
+// llama-server decodes chat images itself; the service accepts the formats every build reads.
+QString chatImageMimeType(const QByteArray &bytes)
+{
+    if (bytes.startsWith("\x89PNG\r\n\x1a\n")) return QStringLiteral("image/png");
+    if (bytes.startsWith("\xff\xd8\xff")) return QStringLiteral("image/jpeg");
+    return {};
+}
 
 // Validates text.chat messages: an optional leading system message, then user/assistant turns ending with the user.
 bool validChatMessages(const QJsonValue &value)
@@ -155,6 +164,12 @@ QStringList chatLaunchArguments(const QJsonObject &options)
     return arguments;
 }
 
+// llama-server's vision projector, loaded with an LLM that has an MMPROJ companion.
+QStringList visionArguments(const QString &projectorPath)
+{
+    return projectorPath.isEmpty() ? QStringList() : QStringList{"--mmproj", projectorPath};
+}
+
 // Sampler order of prompt.enhance; chat adds DRY, min-p and XTC in llama.cpp's default positions.
 QString samplerChain(const QJsonObject &options)
 {
@@ -188,10 +203,22 @@ int repeatLastN(const QJsonObject &options, bool penalizeRepeats)
 }
 
 // Body of an OpenAI-compatible llama-server chat completion, mirroring the completion engine's sampling.
-QJsonObject chatCompletionBody(const QJsonObject &options)
+// Images go, in order, before the text of the last user message.
+QJsonObject chatCompletionBody(const QJsonObject &options, const QList<QByteArray> &images = {})
 {
     const bool penalize = options.value("penalizeRepeats").toBool(true);
-    QJsonObject body{{"messages", options.value("messages")},
+    auto messages = options.value("messages").toArray();
+    if (!images.isEmpty() && !messages.isEmpty()) {
+        auto last = messages.last().toObject();
+        QJsonArray content;
+        for (const auto &image : images)
+            content.append(QJsonObject{{"type", "image_url"}, {"image_url", QJsonObject{
+                {"url", QStringLiteral("data:%1;base64,%2").arg(chatImageMimeType(image), QString::fromLatin1(image.toBase64()))}}}});
+        content.append(QJsonObject{{"type", "text"}, {"text", last.value("content")}});
+        last.insert("content", content);
+        messages.replace(messages.size() - 1, last);
+    }
+    QJsonObject body{{"messages", messages},
         {"temperature", options.value("temperature")}, {"top_p", options.value("topP")},
         {"top_k", options.value("topK")}, {"min_p", options.value("minP")},
         {"repeat_penalty", repeatPenalty(options, penalize)}, {"repeat_last_n", repeatLastN(options, penalize)},
@@ -909,10 +936,16 @@ void KiraServiceDaemon::processBinaryMessage(QWebSocket* socket, const QByteArra
         sendError(socket, "invalid-image", tr("The image upload is empty or too large"), submission->id);
         return;
     }
+    const bool chat = submission->operation == Operation::TextChat;
+    if (chat && chatImageMimeType(data).isEmpty()) {
+        m_pendingUploads.remove(socket);
+        sendError(socket, "invalid-image", tr("Chat images must be PNG or JPEG"), submission->id);
+        return;
+    }
     submission->inputs.append(data);
     if (submission->inputs.size() < submission->expectedInputs) {
         send(socket, {{QStringLiteral("type"), QStringLiteral("upload-required")}, {QStringLiteral("jobId"), submission->id},
-            {"inputRole", "reference"}, {"inputIndex", int(submission->inputs.size())}});
+            {"inputRole", chat ? "image" : "reference"}, {"inputIndex", int(submission->inputs.size())}});
         return;
     }
     m_pendingUploads.remove(socket);
@@ -1096,6 +1129,7 @@ void KiraServiceDaemon::sendCapabilities(QWebSocket *socket) const
     if (chatEngines.contains("server")) {
         operations.append("text.chat.load");
         operations.append("text.chat.unload");
+        operations.append("text.chat.images");
     }
     send(socket, {{QStringLiteral("type"), QStringLiteral("capabilities")}, {QStringLiteral("state"), state}, {QStringLiteral("operations"), operations},
         {QStringLiteral("textChatEngines"), QJsonArray::fromStringList(chatEngines)}});
@@ -1119,6 +1153,13 @@ void KiraServiceDaemon::modelRouting(QWebSocket *socket, const QJsonObject &mess
     if (operation == "model-routing.configure")
         for (auto it = m_authenticatedClients.cbegin(); it != m_authenticatedClients.cend(); ++it)
             send(it.key(), {{"type", "model-routing.changed"}});
+}
+
+QString KiraServiceDaemon::visionProjectorPath(const QString &mmprojModelId) const
+{
+    if (mmprojModelId.isEmpty() || !mmprojModelId.startsWith("companion:")) return {};
+    const auto projector = m_models->modelById(mmprojModelId);
+    return projector && projector->recommendedOptions.value("subtype") == "mmproj" ? projector->filePath : QString();
 }
 
 bool KiraServiceDaemon::isPromptEnhancementReady() const
@@ -1184,6 +1225,8 @@ void KiraServiceDaemon::submitPromptEnhancement(QWebSocket* socket, const QJsonO
     job->options.insert("prompt", request.value("prompt"));
     // llama-server keeps the model loaded between jobs; llama-completion reloads it every time.
     job->options.insert("engine", m_llamaServer->isAvailable() ? "server" : "completion");
+    // Loaded like text.chat's, so a vision LLM is shared between enhancements and chats.
+    if (m_llamaServer->isAvailable()) job->llmVisionPath = visionProjectorPath(model->mmprojModelId);
     enqueue(job);
 }
 
@@ -1204,7 +1247,8 @@ void KiraServiceDaemon::startPromptEnhancement()
         launch.insert("kvCacheType", "f16"); launch.insert("flashAttention", "auto");
         // As in startLlm, the instructions open the single user message.
         m_llamaServer->run({job->modelPath, parameters.value("contextLength").toInt(),
-                            chatLaunchArguments(launch) + QStringList{"--reasoning", parameters.value("reasoning").toString("off")}},
+                            chatLaunchArguments(launch) + visionArguments(job->llmVisionPath)
+                                + QStringList{"--reasoning", parameters.value("reasoning").toString("off")}},
                            enhancementBody(parameters, system.trimmed() + QStringLiteral("\n\n") + input),
                            m_configuration.promptEnhancementTimeoutMs);
         return;
@@ -1250,9 +1294,10 @@ void KiraServiceDaemon::submitTextChat(QWebSocket* socket, const QJsonObject& me
     const bool load = operation == Operation::TextChatLoad;
     bool knownKeys = true;
     for (const auto& key : request.keys())
-        knownKeys = knownKeys && (key == "modelId" || key == "parameters" || (!load && key == "messages"));
+        knownKeys = knownKeys && (key == "modelId" || key == "parameters" || (!load && (key == "messages" || key == "imageCount")));
     if (!message.value("options").isObject() || !knownKeys || !request.value("modelId").isString()
         || (!load && !validChatMessages(request.value("messages")))
+        || !validNumber(request, "imageCount", 1, MaximumChatImages, true, false)
         || (load && overrides.value("engine").toString("server") != "server")
         || (request.contains("parameters") && !request.value("parameters").isObject()) || !validChatOverrides(overrides)) {
         sendError(socket, "invalid-request", load ? tr("Invalid text chat load request") : tr("Invalid text chat request"), id);
@@ -1279,6 +1324,16 @@ void KiraServiceDaemon::submitTextChat(QWebSocket* socket, const QJsonObject& me
                 .contains(overrides.value("chatTemplate").toString())) {
         sendError(socket, "invalid-request", tr("Unknown llama.cpp built-in chat template"), id); return;
     }
+    // llama-server loads a vision LLM with its projector for every request, so chats with and
+    // without images share the loaded model; llama-completion runs text only.
+    const auto vision = engine == "server" ? visionProjectorPath(model->mmprojModelId) : QString();
+    const int imageCount = request.value("imageCount").toInt(0);
+    if (imageCount > 0 && engine != "server") {
+        sendError(socket, "invalid-request", tr("Chat images require the server text chat engine"), id); return;
+    }
+    if (imageCount > 0 && vision.isEmpty()) {
+        sendError(socket, "vision-unavailable", tr("This LLM has no MMPROJ vision projector"), id); return;
+    }
     if (m_pendingUploads.contains(socket) || m_queue.size() >= MaximumQueuedJobs) {
         sendError(socket, "queue-full", tr("An upload is pending or the service queue is full"), id); return;
     }
@@ -1287,6 +1342,7 @@ void KiraServiceDaemon::submitTextChat(QWebSocket* socket, const QJsonObject& me
     job->operation = operation;
     job->client = socket;
     job->modelPath = model->filePath;
+    job->llmVisionPath = vision;
     job->options = parameters;
     if (!load) job->options.insert("messages", request.value("messages"));
     job->options.insert("penalizeRepeats", overrides.value("penalizeRepeats").toBool(true));
@@ -1310,7 +1366,18 @@ void KiraServiceDaemon::submitTextChat(QWebSocket* socket, const QJsonObject& me
     job->options.insert("dryPenaltyLastN", overrides.value("dryPenaltyLastN").toInt(64));
     job->options.insert("xtcProbability", overrides.value("xtcProbability").toDouble(0));
     job->options.insert("xtcThreshold", overrides.value("xtcThreshold").toDouble(0.1));
-    enqueue(job);
+    if (imageCount == 0) { enqueue(job); return; }
+    // The images arrive as binary uploads, like an edit's, before the chat is queued.
+    auto submission = std::make_shared<Submission>();
+    submission->id = id;
+    submission->operation = operation;
+    submission->options = job->options;
+    submission->modelPath = job->modelPath;
+    submission->llmVisionPath = vision;
+    submission->client = socket;
+    submission->expectedInputs = imageCount;
+    m_pendingUploads.insert(socket, submission);
+    send(socket, {{"type", "upload-required"}, {"jobId", id}, {"inputRole", "image"}, {"inputIndex", 0}});
 }
 
 void KiraServiceDaemon::submitTextChatUnload(QWebSocket* socket, const QJsonObject& message)
@@ -1335,10 +1402,21 @@ void KiraServiceDaemon::startTextChat()
     const auto job = m_activeJob;
     if (usesLlamaServer(*job)) {
         // Reasoning is a launch setting of llama-server; llama-completion receives it in startLlm.
-        const auto arguments = chatLaunchArguments(job->options) + QStringList{"--reasoning", job->options.value("reasoning").toString()};
+        const auto arguments = chatLaunchArguments(job->options) + visionArguments(job->llmVisionPath)
+            + QStringList{"--reasoning", job->options.value("reasoning").toString()};
+        QList<QByteArray> images;
+        for (const auto &path : job->inputPaths) {
+            QFile image(path);
+            if (!image.open(QIODevice::ReadOnly)) {
+                sendError(job->client, "storage-error", tr("Could not read a chat image"), job->id);
+                m_activeJob.reset(); startNextJob();
+                return;
+            }
+            images.append(image.readAll());
+        }
         // An empty body only loads the model.
         m_llamaServer->run({job->modelPath, job->options.value("contextLength").toInt(), arguments},
-                           job->operation == Operation::TextChatLoad ? QJsonObject() : chatCompletionBody(job->options),
+                           job->operation == Operation::TextChatLoad ? QJsonObject() : chatCompletionBody(job->options, images),
                            m_configuration.promptEnhancementTimeoutMs);
         return;
     }

@@ -148,6 +148,30 @@ backend's trailing output, for example a model that does not fit in memory),
 an active `server` chat kills llama-server. SDK clients use `canChat()`,
 `submitChat(TextChatRequest)` and `chatFinished(TextChatResult)`.
 
+### Images
+
+An LLM whose `mmprojModelId` names an installed MMPROJ companion can see
+images. On the `server` engine the service always loads it with that projector
+(`--mmproj`), for chats with or without images and for prompt.enhance, so they
+share the loaded model. Optional `imageCount` (integer 1–8, in `options` next to
+`messages`) attaches images to the last user message:
+
+```json
+{"type":"submit","operation":"text.chat","jobId":"chat-3","options":{"modelId":"llm-chat:vision.gguf","imageCount":2,"messages":[{"role":"user","content":"What changed between these images?"}]}}
+{"type":"upload-required","jobId":"chat-3","inputRole":"image","inputIndex":0}
+```
+
+The service sends one `upload-required` per image (`inputRole` `image`,
+`inputIndex` 0…n-1) and the client answers each with one binary frame holding a
+PNG or JPEG file; the chat is queued once all have arrived. llama-server
+receives them in order, as `image_url` data URLs before the message's text.
+Errors: `invalid-request` for images on the `completion` engine or an
+`imageCount` out of range, `vision-unavailable` for an LLM without a usable
+projector, `invalid-image` for an empty, oversized, or non-PNG/JPEG upload.
+`capabilities.operations` includes `text.chat.images` when the `server` engine
+is ready. SDK clients set `TextChatRequest::images` and check
+`canChatWithImages(modelId)`; the SDK answers each upload itself.
+
 ### Loading and unloading the chat model
 
 The `server` engine loads its model on the first chat that needs it. Clients
@@ -226,7 +250,7 @@ when provided, the object must contain exactly the category's complete fields:
 | Category | Fields and validation |
 | --- | --- |
 | image-generation | `width` and `height`: identical integers 256–2048, multiples of 256; `steps`: integer 1–200; `cfgScale`: number 0–100; `sampler` and `scheduler`: allowed strings; `clipSkip`: -1 or integer 1–12; optional `promptFormat`: `natural`, `phrases` or `tags` (default `phrases`) |
-| llm-chat | `temperature`: number 0–2; `topP`: number >0 and ≤1; `contextLength`: integer 256–131072; `maxTokens`: integer 1–contextLength; optional booleans `canBeTextEncoder`, `defaultPromptEnhancer` and `defaultPromptTranslator` (default false) |
+| llm-chat | `temperature`: number 0–2; `topP`: number >0 and ≤1; `contextLength`: integer 256–131072; `maxTokens`: integer 1–contextLength; optional booleans `canBeTextEncoder`, `defaultPromptEnhancer`, `defaultPromptTranslator` and `defaultImageDescriber` (default false) |
 | upscaler | No options: empty object only. No explicit-content classification. |
 | companion | `subtype`: exactly `vae` or `mmproj`; MMPROJ requires GGUF. |
 
@@ -254,12 +278,15 @@ removed with the model; existing companion relationships remain intact.
 After a successful configure the service broadcasts `models.changed` with `id`
 to the other authenticated clients; SDK/Manager refresh the catalogue on it.
 
-At most one LLM carries `defaultPromptEnhancer: true` and at most one carries
-`defaultPromptTranslator: true`; the same model may hold both. Installing or
-configuring an LLM with a role set clears that role on every other LLM in the
-same atomic metadata write. Unchecking leaves the role unassigned. The SDK
-exposes `defaultPromptEnhancerModelId()` and `defaultPromptTranslatorModelId()`
-(empty when unassigned). No job uses these roles yet.
+At most one LLM carries each of `defaultPromptEnhancer: true`,
+`defaultPromptTranslator: true` and `defaultImageDescriber: true`; the same model
+may hold several. Installing or configuring an LLM with a role set clears that
+role on every other LLM in the same atomic metadata write. Unchecking leaves the
+role unassigned. The SDK exposes `defaultPromptEnhancerModelId()`,
+`defaultPromptTranslatorModelId()` and `defaultImageDescriberModelId()` (empty
+when unassigned). The service runs no job by role: clients choose the model.
+The image describer is meant for an LLM with an MMPROJ companion, which the
+service does not require when saving the role.
 
 Only one model installation is active globally, including its sequential
 companion download. Further requests fail with `model-install-busy` and the

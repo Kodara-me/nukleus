@@ -182,9 +182,11 @@ metadata preservation using disposable test models.
 Image forms select installed VAE companions and eligible LLM text encoders by
 opaque IDs in recommendedOptions.vaeModelId/textEncoderModelId. Save canEdit and
 canGenerate there with at least one true; missing flags default true. LLM saves
-canBeTextEncoder (default false) and the exclusive defaultPromptEnhancer and
-defaultPromptTranslator roles (default false; saving a role clears it on every
-other LLM in one metadata write). The service validates references on installation,
+canBeTextEncoder (default false) and the exclusive defaultPromptEnhancer,
+defaultPromptTranslator and defaultImageDescriber roles (default false; saving a
+role clears it on every other LLM in one metadata write). An LLM's MMPROJ
+companion is also loaded with it on llama-server (`--mmproj`), so text.chat can
+receive images. The service validates references on installation,
 configuration and submission, protects referenced models during pending installs,
 and prevents deletion/reclassification until detached. Execution uses --vae/--llm
 and the selected LLM's assigned MMPROJ as --llm_vision. CLIP and image-level mmproj

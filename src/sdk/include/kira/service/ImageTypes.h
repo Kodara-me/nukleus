@@ -128,6 +128,7 @@ struct ServiceCapabilities
     bool textChat = false;
     QStringList textChatEngines; // Ready text.chat engines: "server", "completion".
     bool chatModelControl = false; // text.chat.load and text.chat.unload.
+    bool textChatImages = false; // text.chat accepts images for LLMs with an MMPROJ.
 };
 
 // Result of text.chat.load (load true) or text.chat.unload (load false).
@@ -154,6 +155,9 @@ struct TextChatRequest
     QString modelId;
     QList<TextChatMessage> messages;
     QJsonObject parameters; // Optional sampling, engine and memory-placement overrides.
+    // Up to eight PNG or JPEG images shown to the model, in order, before the last user message's
+    // text. Requires the server engine and an LLM with an MMPROJ (ServiceClient::canChatWithImages).
+    QList<QByteArray> images;
 };
 
 struct TextChatResult

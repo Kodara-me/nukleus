@@ -17,14 +17,14 @@ QJsonObject defaultModelOptions(const QString &category)
                 {"vaeModelId", ""}, {"textEncoderModelId", ""}, {"promptFormat", "phrases"}};
     if (category == "llm-chat")
         return {{"temperature", 0.8}, {"topP", 0.95}, {"contextLength", 4096}, {"maxTokens", 1024}, {"canBeTextEncoder", false},
-                {"defaultPromptEnhancer", false}, {"defaultPromptTranslator", false}};
+                {"defaultPromptEnhancer", false}, {"defaultPromptTranslator", false}, {"defaultImageDescriber", false}};
     if (category == "upscaler")
         return {};
     if (category == "companion")
         return {{"subtype", "vae"}};
     return {};
 }
-QStringList exclusiveLlmRoles() { return {"defaultPromptEnhancer", "defaultPromptTranslator"}; }
+QStringList exclusiveLlmRoles() { return {"defaultPromptEnhancer", "defaultPromptTranslator", "defaultImageDescriber"}; }
 bool validateModelOptions(const QString &category, const QJsonObject &options, QString *error)
 {
     const auto fail = [error]

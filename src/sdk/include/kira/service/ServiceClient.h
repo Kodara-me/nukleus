@@ -30,6 +30,7 @@ public:
     // Opaque ID of the listed LLM marked as the service-wide default for this role, or empty.
     QString defaultPromptEnhancerModelId() const;
     QString defaultPromptTranslatorModelId() const;
+    QString defaultImageDescriberModelId() const;
     QList<ModelInstall> installs() const;
     void requestModels();
     void requestModelRouting();
@@ -48,6 +49,9 @@ public:
     bool canEnhancePrompt(const QString& modelId) const;
     QString enhancePrompt(const PromptEnhancementRequest& request);
     bool canChat(const QString& modelId) const;
+    // The model can chat and has an MMPROJ vision projector, so TextChatRequest::images can be sent.
+    bool canChatWithImages(const QString& modelId) const;
+    static constexpr int MaximumChatImages = 8;
     QString submitChat(const TextChatRequest& request);
     // Preloads the server engine with the same model and parameters as later chat requests.
     QString loadChatModel(const QString& modelId, const QJsonObject& parameters = {});

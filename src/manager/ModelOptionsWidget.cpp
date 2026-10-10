@@ -109,6 +109,9 @@ void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &
         m_fields.value("defaultPromptEnhancer")->setToolTip(tr("Only one LLM is the default prompt enhancer; saving replaces the current one."));
         check("defaultPromptTranslator", tr("Default prompt translator"), false);
         m_fields.value("defaultPromptTranslator")->setToolTip(tr("Only one LLM is the default prompt translator; saving replaces the current one."));
+        check("defaultImageDescriber", tr("Default image describer"), false);
+        m_fields.value("defaultImageDescriber")->setToolTip(
+            tr("Only one LLM is the default image describer; saving replaces the current one. It sees images only with an MMPROJ companion."));
         decimal("temperature", tr("Temperature:"), 0, 2, 2);
         decimal("topP", tr("Top-p:"), 0.01, 1, 2);
         integer("contextLength", tr("Context length:"), 256, 131072);

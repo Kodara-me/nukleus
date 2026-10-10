@@ -88,6 +88,7 @@ private slots:
     void enhancesPromptThroughSdk();
     void chatsThroughCompletionEngine();
     void chatsThroughServerEngine();
+    void chatsWithImagesThroughVisionProjector();
     void routesPresetGenerationWithoutLlm();
     void configuresStylesOverProtocol();
     void generatesWithValidatedOptionsAndVae();
@@ -2160,6 +2161,116 @@ void ServiceTest::chatsThroughServerEngine()
     QTRY_COMPARE(finished.count(), 1);
     QVERIFY(!qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0)).succeeded);
     QTRY_VERIFY(!serverAlive());
+}
+
+void ServiceTest::chatsWithImagesThroughVisionProjector()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake llama-completion fixture requires a POSIX shell.");
+#endif
+    using namespace KiraService::Protocol;
+    QTemporaryDir directory;
+    QVERIFY(QDir(directory.path()).mkpath("llm")); QVERIFY(QDir(directory.path()).mkpath("companion"));
+    for (const auto& name : {"llm/vision.gguf", "llm/plain.gguf", "companion/projector.gguf"}) {
+        QFile file(directory.filePath(name));
+        QVERIFY(file.open(QIODevice::WriteOnly)); file.write("fixture");
+    }
+    ModelCatalog catalog(directory.path(), false);
+    QString error;
+    QVERIFY2(configureNamed(catalog, "companion:projector.gguf", {{"subtype", "mmproj"}}, &error), qPrintable(error));
+    auto describer = defaultModelOptions("llm-chat");
+    describer.insert("defaultImageDescriber", true);
+    QVERIFY2(catalog.configure("llm-chat:vision.gguf", describer, &error, {}, QString("Vision"), QString("companion:projector.gguf")),
+             qPrintable(error));
+    QVERIFY(configureNamed(catalog, "llm-chat:plain.gguf", defaultModelOptions("llm-chat")));
+    QFile completion(directory.filePath("completion"));
+    QVERIFY(completion.open(QIODevice::WriteOnly));
+    completion.write("#!/bin/sh\nprintf 'enhanced'\n");
+    completion.close();
+    QVERIFY(completion.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    qputenv("KIRA_FAKE_LLAMA_DIR", directory.path().toUtf8());
+    const auto unsetFakeDirectory = qScopeGuard([] { qunsetenv("KIRA_FAKE_LLAMA_DIR"); });
+    KiraServiceConfiguration configuration;
+    configuration.port = 0; configuration.modelRootPath = directory.path();
+    configuration.llamaCompletion = completion.fileName();
+    configuration.llamaServer = QStringLiteral(KIRA_FAKE_LLAMA_SERVER);
+    configuration.promptEnhancementTimeoutMs = 1500;
+    configuration.llamaServerIdleMs = 1500;
+    KiraServiceDaemon daemon(configuration);
+    QVERIFY2(daemon.start(&error), qPrintable(error));
+    KiraService::ServiceClient client;
+    client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
+    QSignalSpy finished(&client, &KiraService::ServiceClient::chatFinished);
+    QSignalSpy enhanced(&client, &KiraService::ServiceClient::promptEnhancementFinished);
+    client.connectToService();
+    QTRY_VERIFY(client.canChat("llm-chat:vision.gguf"));
+    QVERIFY(client.capabilities().textChatImages);
+    QCOMPARE(client.defaultImageDescriberModelId(), QString("llm-chat:vision.gguf"));
+    QVERIFY(client.canChatWithImages("llm-chat:vision.gguf"));
+    QVERIFY(!client.canChatWithImages("llm-chat:plain.gguf"));
+
+    const auto read = [&](const QString& name) {
+        QFile file(directory.filePath(name)); if (!file.open(QIODevice::ReadOnly)) return QByteArray(); return file.readAll();
+    };
+    const auto launches = [&] { return read("launches").count('\n'); };
+    const auto chat = [&](const QString& modelId, const QList<QByteArray>& images, const QJsonObject& parameters = {}) {
+        KiraService::TextChatResult result;
+        KiraService::TextChatRequest request{modelId, {{"system", "Describe."}, {"user", "What is shown?"}}, parameters};
+        request.images = images;
+        if (client.submitChat(request).isEmpty()) return result;
+        if (!QTest::qWaitFor([&] { return finished.count() == 1; }, 5000)) return result;
+        return qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0));
+    };
+    const QByteArray png("\x89PNG\r\n\x1a\nfirst");
+    const QByteArray jpeg("\xff\xd8\xff\xe0second");
+
+    // The images are uploaded, then shown in order before the last user message's text; the
+    // vision LLM loads with its projector.
+    auto result = chat("llm-chat:vision.gguf", {png, jpeg});
+    QVERIFY2(result.succeeded, qPrintable(result.message)); QVERIFY(result.coldStart);
+    QVERIFY(read("launches").contains("--mmproj " + directory.filePath("companion/projector.gguf").toUtf8() + " --reasoning off"));
+    const auto messages = QJsonDocument::fromJson(read("request.json")).object().value("messages").toArray();
+    QCOMPARE(messages.size(), 2);
+    QCOMPARE(messages.first().toObject().value("content").toString(), QString("Describe."));
+    const auto content = messages.last().toObject().value("content").toArray();
+    QCOMPARE(content.size(), 3);
+    QCOMPARE(content.at(0).toObject().value("type").toString(), QString("image_url"));
+    QCOMPARE(content.at(0).toObject().value("image_url").toObject().value("url").toString(),
+             "data:image/png;base64," + QString::fromLatin1(png.toBase64()));
+    QCOMPARE(content.at(1).toObject().value("image_url").toObject().value("url").toString(),
+             "data:image/jpeg;base64," + QString::fromLatin1(jpeg.toBase64()));
+    QCOMPARE(content.at(2).toObject(), QJsonObject({{"type", "text"}, {"text", "What is shown?"}}));
+
+    // Chats without images and prompt enhancements share the vision LLM's launch.
+    result = chat("llm-chat:vision.gguf", {});
+    QVERIFY(result.succeeded); QVERIFY(!result.coldStart); QCOMPARE(launches(), 1);
+    QVERIFY(QJsonDocument::fromJson(read("request.json")).object().value("messages").toArray().last()
+                .toObject().value("content").isString());
+    QVERIFY(!client.enhancePrompt({"llm-chat:vision.gguf", "person", {}}).isEmpty());
+    QTRY_COMPARE(enhanced.count(), 1);
+    QVERIFY(qvariant_cast<KiraService::PromptEnhancementResult>(enhanced.takeFirst().at(0)).succeeded);
+    QCOMPARE(launches(), 1);
+
+    // Only PNG and JPEG images are accepted; the engine and the count are checked.
+    result = chat("llm-chat:vision.gguf", {png, "not an image"});
+    QCOMPARE(result.errorCode, QString("invalid-image"));
+    result = chat("llm-chat:vision.gguf", {png}, {{"engine", "completion"}});
+    QCOMPARE(result.errorCode, QString("invalid-request"));
+    QList<QByteArray> tooMany;
+    for (int i = 0; i <= KiraService::ServiceClient::MaximumChatImages; ++i) tooMany.append(png);
+    QVERIFY(client.submitChat({"llm-chat:vision.gguf", {{"user", "Hi."}}, {}, tooMany}).isEmpty());
+    QVERIFY(client.submitChat({"llm-chat:plain.gguf", {{"user", "Hi."}}, {}, {png}}).isEmpty());
+
+    // An LLM without a projector loads without --mmproj.
+    result = chat("llm-chat:plain.gguf", {});
+    QVERIFY(result.succeeded); QVERIFY(result.coldStart);
+    QVERIFY(!read("launches").split('\n').at(1).contains("--mmproj"));
+
+    // The role is exclusive like the prompt roles.
+    auto other = defaultModelOptions("llm-chat");
+    other.insert("defaultImageDescriber", true);
+    QVERIFY(client.configureModel("llm-chat:plain.gguf", other, {}, QString("Plain")));
+    QTRY_COMPARE(client.defaultImageDescriberModelId(), QString("llm-chat:plain.gguf"));
 }
 
 void ServiceTest::attachesModularCompanionsWithoutReplacingModel()
