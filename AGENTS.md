@@ -196,7 +196,8 @@ Reference-image editing also supplies `--flow-shift 3 --offload-to-cpu --diffusi
 
 Image generation and reference-image editing both pass `--offload-to-cpu` to sd-cli.
 Temporary testing override: the shared image generation runner passes
-`--diffusion-fa` exactly once for generation and editing.
+`--diffusion-fa` exactly once for generation and editing, together with
+`--vae-conv-direct` to keep VAE decoding within the Vulkan pinned-memory limit.
 Per-model configuration is deferred; do not add Manager controls in this slice.
 
 Linux remote updates use `scripts/update-kira-service.sh` as the checkout owner:

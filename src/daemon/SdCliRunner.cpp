@@ -108,7 +108,8 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
         QStringLiteral("--seed"), QString::number(request.seed),
         QStringLiteral("--output"), request.outputPath,
         QStringLiteral("--offload-to-cpu"),
-        QStringLiteral("--diffusion-fa")};
+        QStringLiteral("--diffusion-fa"),
+        QStringLiteral("--vae-conv-direct")};
     if (!request.sampler.isEmpty()) arguments.append({QStringLiteral("--sampling-method"), request.sampler});
     if (!request.scheduler.isEmpty()) arguments.append({QStringLiteral("--scheduler"), request.scheduler});
     if (!request.vaePath.isEmpty()) arguments.append({QStringLiteral("--vae"), request.vaePath});

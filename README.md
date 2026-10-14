@@ -269,11 +269,13 @@ See [upstream editing documentation](https://github.com/leejet/stable-diffusion.
 Canvas selects source dimensions and saved generation recommendations, retaining
 source history and normalizing returned output to source resolution if needed.
 
-Reference-image editing also supplies `--flow-shift 3 --offload-to-cpu --diffusion-fa --model-args qwen_image_zero_cond_t=true`. Fatal/error-level Vulkan `ErrorOutOfDeviceMemory`/`ErrorOutOfHostMemory` output aborts the active generation process; the daemon waits for process termination and returns the command and memory diagnostic as a job error, releasing the queue. Warnings, including pinned-memory allocation failures that fall back to CPU buffers, are not treated as failures.
+Reference-image editing also supplies `--flow-shift 3 --offload-to-cpu --diffusion-fa --vae-conv-direct --model-args qwen_image_zero_cond_t=true`. Fatal/error-level Vulkan `ErrorOutOfDeviceMemory`/`ErrorOutOfHostMemory` output aborts the active generation process; the daemon waits for process termination and returns the command and memory diagnostic as a job error, releasing the queue. Warnings, including pinned-memory allocation failures that fall back to CPU buffers, are not treated as failures.
 
 Image generation and reference-image editing both pass `--offload-to-cpu` to sd-cli.
 For temporary testing, all image generation and editing calls also
-pass `--diffusion-fa` exactly once. Per-model configuration is deferred.
+pass `--diffusion-fa` exactly once. They also pass `--vae-conv-direct`, which
+decodes with direct convolutions instead of oversized im2col buffers that exceed
+the Vulkan pinned-memory limit. Per-model configuration is deferred.
 
 ## Remote Linux updates
 

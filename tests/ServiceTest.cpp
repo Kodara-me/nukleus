@@ -726,6 +726,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QVERIFY(!editArgs.contains("--ref-image"));
     QCOMPARE(editArgs.count("--offload-to-cpu"), 1);
     QCOMPARE(editArgs.count("--diffusion-fa"), 1);
+    QCOMPARE(editArgs.count("--vae-conv-direct"), 1);
     QCOMPARE(editArgs.value(editArgs.indexOf("--model-args") + 1), QString("qwen_image_zero_cond_t=true"));
     QCOMPARE(editArgs.value(editArgs.indexOf("--flow-shift") + 1), QString("3"));
     QVERIFY(!editArgs.contains("--init-img"));
@@ -778,6 +779,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     auto args = arguments();
     QCOMPARE(args.count("--offload-to-cpu"), 1);
     QCOMPARE(args.count("--diffusion-fa"), 1);
+    QCOMPARE(args.count("--vae-conv-direct"), 1);
     QVERIFY(!args.contains("--clip_vision"));
     QVERIFY(!args.contains("--sampling-method"));
     QVERIFY(!args.contains("--scheduler"));
@@ -1100,6 +1102,8 @@ void ServiceTest::reportsTheRunningSamplingStep()
     using Stage = KiraService::GenerationProgressStage;
     SdCliProgressParser parser;
     parser.begin(4);
+    // Printed while loading the VAE; it is not the decoding stage.
+    QVERIFY(!parser.processLine("[I] using VAE for encoding / decoding --- model_builders.cpp:649"));
     QVERIFY(parser.processLine("generating image: 1/1 - seed 42").has_value());
     // The first step starts right after "sampling using": 1 / 4 is running.
     auto progress = parser.processLine("sampling using Euler method");

@@ -51,7 +51,11 @@ std::optional<KiraService::GenerationProgress> SdCliProgressParser::processLine(
                       m_samplingSteps,
                       m_samplingSteps);
     }
-    if (line.contains(QStringLiteral("decoding "), Qt::CaseInsensitive)
+    // Match "decoding 1 latents" only: sd-cli also prints "using VAE for encoding / decoding"
+    // while loading, which must not jump to the decoding stage before sampling.
+    static const QRegularExpression decodingLatents(QStringLiteral("\\bdecoding \\d+ latents?\\b"),
+                                                    QRegularExpression::CaseInsensitiveOption);
+    if (decodingLatents.match(line).hasMatch()
         || line.contains(QStringLiteral("decode_first_stage"), Qt::CaseInsensitive)) {
         return update(KiraService::GenerationProgressStage::Decoding, 94, QObject::tr("Decoding image…"));
     }
