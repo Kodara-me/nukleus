@@ -19,7 +19,7 @@ server process. Tests never start the real server: `kira-service-fake-llama-serv
 (tests/FakeLlamaServer.cpp) records launches and requests and simulates slow
 loads, load failures, context overflow, crashes and hangs through marker files.
 
-Kira Service is a C++20 Qt 6 project. Build dependencies are CMake, Ninja, a C++20 compiler, and Qt 6.2+ Network, WebSockets, and Widgets, SVG, and LinguistTools development packages, plus Kira UI Framework 0.2. `sd-cli` is required on a machine that performs image work.
+Kira Service is a C++20 Qt 6 project. Build dependencies are CMake, Ninja, a C++20 compiler, and Qt 6.2+ Network, WebSockets, and Widgets, SVG, and LinguistTools development packages, plus Kira UI Framework 0.2. `sd-cli` is required on a machine that performs image work; README's "Runtime tools on Arch Linux" lists the Vulkan AUR packages for `sd-cli` and llama.cpp. Tests never need them.
 
 ```sh
 cmake -S . -B build -G Ninja

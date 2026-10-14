@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Kira Service Manager
+Name[fr]=Gestionnaire Kira Service
+Comment=Manage the models installed by Kira Service
+Comment[fr]=Gérer les modèles installés par Kira Service
+Exec="@KIRA_SERVICE_MANAGER@" --gui
+TryExec=@KIRA_SERVICE_MANAGER@
+Icon=@KIRA_SERVICE_MANAGER_ICON@
+Terminal=false
+Categories=Graphics;Utility;
+StartupWMClass=kira-service-manager

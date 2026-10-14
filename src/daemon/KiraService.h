@@ -39,6 +39,8 @@ struct KiraServiceConfiguration
     QString token;
     qint64 maximumImageBytes = 64LL * 1024 * 1024;
     QString modelRootPath;
+    // With modelRootPath, selects the split layout: catalogue JSON files here, weights under modelRootPath/<category>/.
+    QString catalogRootPath;
     QString llamaCompletion = qEnvironmentVariable("KIRA_LLAMA_COMPLETION", "llama-completion");
     int promptEnhancementTimeoutMs = 10 * 60 * 1000; // Also bounds each text.chat turn, model loading included.
     QString llamaServer = qEnvironmentVariable("KIRA_LLAMA_SERVER", "llama-server");

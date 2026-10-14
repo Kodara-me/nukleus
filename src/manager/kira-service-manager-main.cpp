@@ -264,6 +264,8 @@ int main(int argc, char *argv[])
         QIcon icon;
         for (const int size : {16, 32, 48, 64, 128, 256, 512, 1024}) icon.addFile(QStringLiteral(":/manager/icons/manager-%1.png").arg(size));
         QApplication::setWindowIcon(icon);
+        // Matches the installed kira-service-manager.desktop so Wayland shells show its icon.
+        QGuiApplication::setDesktopFileName(QStringLiteral("kira-service-manager"));
         auto *window = new ManageModelsWindow;
         window->show();
         return application->exec();

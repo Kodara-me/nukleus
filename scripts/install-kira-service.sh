@@ -18,6 +18,10 @@ user_bin_path=""
 manager_user=""
 dry_run=false
 enable_service=true
+models_dir=""
+storage_config_dir=""
+desktop_dir=""
+desktop_shortcut=false
 
 usage() {
     cat <<'EOF'
@@ -34,6 +38,11 @@ Options:
   --user-bin PATH     User-local bin directory for kira-service-manager
   --listen ADDRESS    LAN bind address, or 127.0.0.1 for local-only service
   --token TOKEN       Shared LAN passphrase; avoid this option in a shared shell history
+  --models-dir DIR    Shared model weight directory for the split storage layout;
+                      requires --config-dir and is preserved by later updates
+  --config-dir DIR    Configuration directory; the catalogue lives in DIR/catalog
+  --desktop-shortcut  Also put a manager shortcut on the user's XDG desktop
+  --desktop-dir PATH  Put the manager shortcut in PATH (implies --desktop-shortcut)
   --root PATH         Stage files under PATH instead of the live filesystem
   --dry-run           Print actions without modifying the filesystem
   --no-enable         Install without enabling or starting the systemd service
@@ -60,6 +69,18 @@ valid_address() { [[ "$1" =~ ^[0-9A-Fa-f:.]+$ ]]; }
 is_any_address() { [[ "$1" == "0.0.0.0" || "$1" == "::" ]]; }
 is_loopback_address() { [[ "$1" == "127.0.0.1" || "$1" == "::1" ]]; }
 token_has_content() { [[ -n "$(tr -d '[:space:]' <<<"$1")" ]]; }
+# Storage paths are rendered into the systemd unit and a sed replacement.
+valid_storage_path() { [[ "$1" =~ ^/[A-Za-z0-9._/+-]*$ ]]; }
+
+# A storage tree whose group is not root is shared: the service joins that
+# group. Otherwise the service owns its storage directories privately.
+storage_group_for() {
+    local path="$1"
+    while [[ ! -e "$path" ]]; do path="$(dirname -- "$path")"; done
+    local group
+    group="$(stat -c '%G' -- "$path")"
+    [[ "$group" == root ]] && printf '%s' "$SERVICE_GROUP" || printf '%s' "$group"
+}
 
 config_value() {
     local name="$1"
@@ -110,6 +131,10 @@ while (( $# > 0 )); do
     --user-bin) user_bin_path="${2:-}"; shift 2 ;;
     --listen) listen_address="${2:-}"; shift 2 ;;
     --token) token="${2:-}"; shift 2 ;;
+    --models-dir) models_dir="${2:-}"; shift 2 ;;
+    --config-dir) storage_config_dir="${2:-}"; shift 2 ;;
+    --desktop-dir) desktop_dir="${2:-}"; desktop_shortcut=true; shift 2 ;;
+    --desktop-shortcut) desktop_shortcut=true; shift ;;
     --root) install_root="${2:-}"; shift 2 ;;
     --dry-run) dry_run=true; shift ;;
     --no-enable) enable_service=false; shift ;;
@@ -122,6 +147,15 @@ done
 [[ -x "$binary_path" ]] || fail "Kira Service executable is not executable: $binary_path"
 [[ -x "$manager_binary_path" ]] || fail "Kira Service Manager executable is not executable: $manager_binary_path"
 [[ -f "$project_root/packaging/systemd/kira-service.service.in" ]] || fail "Systemd unit template is missing."
+[[ -f "$project_root/packaging/desktop/kira-service-manager.desktop.in" ]] || fail "Desktop entry template is missing."
+[[ -z "$desktop_dir" || "$desktop_dir" == /* ]] || fail "--desktop-dir must be an absolute path."
+if [[ -n "$models_dir" || -n "$storage_config_dir" ]]; then
+    [[ -n "$models_dir" && -n "$storage_config_dir" ]] || fail "--models-dir and --config-dir must be given together."
+    valid_storage_path "$models_dir" || fail "--models-dir must be an absolute path of letters, digits and ._/+-."
+    valid_storage_path "$storage_config_dir" || fail "--config-dir must be an absolute path of letters, digits and ._/+-."
+    models_dir="$(realpath -m -- "$models_dir")"
+    storage_config_dir="$(realpath -m -- "$storage_config_dir")"
+fi
 
 if [[ -z "$user_bin_path" ]]; then
     if [[ "$EUID" -eq 0 ]]; then
@@ -169,11 +203,15 @@ service_models_parent="$(dirname "$service_models_path")"
 existing_listen=""
 existing_port=""
 existing_token_file=""
+existing_models_dir=""
+existing_storage_config_dir=""
 has_valid_config=false
 if [[ -f "$config_path" ]]; then
     existing_listen="$(config_value KIRA_SERVICE_LISTEN "$config_path")"
     existing_port="$(config_value KIRA_SERVICE_PORT "$config_path")"
     existing_token_file="$(config_value KIRA_SERVICE_TOKEN_FILE "$config_path")"
+    existing_models_dir="$(config_value KIRA_SERVICE_MODELS_DIR "$config_path")"
+    existing_storage_config_dir="$(config_value KIRA_SERVICE_CONFIG_DIR "$config_path")"
     if valid_address "$existing_listen" && valid_port "$existing_port" \
         && [[ "$existing_token_file" == "/etc/$SERVICE_NAME/token" ]]; then
         if is_loopback_address "$existing_listen" || { [[ -f "$token_path" ]] && token_has_content "$(<"$token_path")"; }; then
@@ -219,6 +257,18 @@ else
     fi
 fi
 
+# Updates keep the configured storage unless new directories are given.
+if [[ -z "$models_dir" && -n "$existing_models_dir" ]]; then
+    valid_storage_path "$existing_models_dir" && valid_storage_path "$existing_storage_config_dir" \
+        || fail "The configured storage directories in $config_path are invalid."
+    models_dir="$existing_models_dir"
+    storage_config_dir="$existing_storage_config_dir"
+fi
+storage_changed=false
+if [[ "$models_dir" != "$existing_models_dir" || "$storage_config_dir" != "$existing_storage_config_dir" ]]; then
+    storage_changed=true
+fi
+
 if [[ -z "$install_root" ]]; then
     if ! getent group "$SERVICE_GROUP" >/dev/null; then
         run groupadd --system "$SERVICE_GROUP"
@@ -254,6 +304,50 @@ else
     run install -m 0755 "$manager_binary_path" "$manager_path"
 fi
 
+# The application-menu entry, icons and optional desktop shortcut belong to
+# the manager user. Directories are created as that user so that no missing
+# parent under the home directory becomes root-owned.
+as_manager() {
+    if [[ -z "$install_root" ]]; then run runuser -u "$manager_user" -- "$@"; else run "$@"; fi
+}
+install_user_file() {
+    if [[ -z "$install_root" ]]; then
+        run install -o "$manager_uid" -g "$manager_gid" -m "$1" "$2" "$3"
+    else
+        run install -m "$1" "$2" "$3"
+    fi
+}
+user_data_path="$(dirname -- "$user_bin_path")/share"
+applications_dir="$(destination "$user_data_path/applications")"
+icon_root="$(destination "$user_data_path/icons/hicolor")"
+if [[ -z "$desktop_dir" && -z "$install_root" ]] && "$desktop_shortcut"; then
+    desktop_dir="$(runuser -u "$manager_user" -- xdg-user-dir DESKTOP 2>/dev/null || true)"
+    [[ -n "$desktop_dir" && "$desktop_dir" != "$(getent passwd "$manager_user" | cut -d: -f6)" ]] || desktop_dir=""
+fi
+desktop_entry="$(mktemp)"
+trap 'rm -f "$desktop_entry"' EXIT
+# An absolute icon path avoids depending on icon-theme caches and inheritance.
+sed -e "s|@KIRA_SERVICE_MANAGER@|$user_bin_path/kira-service-manager|g" \
+    -e "s|@KIRA_SERVICE_MANAGER_ICON@|$user_data_path/icons/hicolor/256x256/apps/kira-service-manager.png|g" \
+    "$project_root/packaging/desktop/kira-service-manager.desktop.in" > "$desktop_entry"
+as_manager install -d -m 0755 "$applications_dir"
+install_user_file 0644 "$desktop_entry" "$applications_dir/kira-service-manager.desktop"
+for size in 16 32 48 64 128 256 512; do
+    as_manager install -d -m 0755 "$icon_root/${size}x${size}/apps"
+    install_user_file 0644 "$project_root/assets/icons/kira-service-manager-$size.png" \
+        "$icon_root/${size}x${size}/apps/kira-service-manager.png"
+done
+desktop_shortcut_path=""
+if "$desktop_shortcut" && [[ -n "$desktop_dir" && -d "$(destination "$desktop_dir")" ]]; then
+    # Desktop shells only launch shortcuts the user trusts through the executable bit.
+    desktop_shortcut_path="$(destination "$desktop_dir")/kira-service-manager.desktop"
+    install_user_file 0755 "$desktop_entry" "$desktop_shortcut_path"
+fi
+if [[ -z "$install_root" ]]; then
+    command -v update-desktop-database >/dev/null 2>&1 && as_manager update-desktop-database "$applications_dir" || true
+    command -v gtk-update-icon-cache >/dev/null 2>&1 && as_manager gtk-update-icon-cache -q -t "$icon_root" || true
+fi
+
 if [[ -z "$install_root" ]]; then
     run chown "$SERVICE_USER:$SERVICE_GROUP" "$state_dir"
     if [[ -d "$service_models_parent" ]]; then
@@ -264,21 +358,56 @@ if [[ -z "$install_root" ]]; then
     fi
 fi
 
-if "$write_configuration"; then
+# Shared storage keeps its group, gains setgid group write and is never
+# chowned recursively; private storage belongs to the service account.
+storage_groups=()
+prepare_storage() {
+    local group
+    if [[ -n "$install_root" ]]; then
+        run install -d -m 0750 "${@/#/$install_root}"
+        return
+    fi
+    group="$(storage_group_for "$1")"
+    if [[ "$group" == "$SERVICE_GROUP" ]]; then
+        run install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$@"
+    else
+        run install -d -g "$group" -m 2775 "$@"
+        [[ " ${storage_groups[*]} " == *" $group "* ]] || storage_groups+=("$group")
+    fi
+}
+if [[ -n "$models_dir" ]]; then
+    prepare_storage "$models_dir" "$models_dir"/{generation,upscale,llm,companion}
+    prepare_storage "$storage_config_dir/catalog"
+    for storage_group in "${storage_groups[@]}"; do
+        run usermod --append --groups "$storage_group" "$SERVICE_USER"
+    done
+fi
+
+if "$write_configuration" || "$storage_changed"; then
     if "$dry_run"; then
         printf '+ write %q\n' "$config_path"
     else
         umask 0077
-        printf 'KIRA_SERVICE_LISTEN=%s\nKIRA_SERVICE_PORT=%s\nKIRA_SERVICE_TOKEN_FILE=/etc/%s/token\n' \
-            "$listen_address" "$port" "$SERVICE_NAME" > "$config_path"
-        printf '%s\n' "$token" > "$token_path"
+        {
+            printf 'KIRA_SERVICE_LISTEN=%s\nKIRA_SERVICE_PORT=%s\nKIRA_SERVICE_TOKEN_FILE=/etc/%s/token\n' \
+                "$listen_address" "$port" "$SERVICE_NAME"
+            if [[ -n "$models_dir" ]]; then
+                printf 'KIRA_SERVICE_MODELS_DIR=%s\nKIRA_SERVICE_CONFIG_DIR=%s\n' "$models_dir" "$storage_config_dir"
+            fi
+        } > "$config_path"
         chmod 0600 "$config_path"
+    fi
+    [[ -n "$install_root" ]] || run chown root:root "$config_path"
+fi
+if "$write_configuration"; then
+    if "$dry_run"; then
+        printf '+ write %q\n' "$token_path"
+    else
+        umask 0077
+        printf '%s\n' "$token" > "$token_path"
         chmod 0640 "$token_path"
     fi
-    if [[ -z "$install_root" ]]; then
-        run chown root:root "$config_path"
-        run chown "root:$SERVICE_GROUP" "$token_path"
-    fi
+    [[ -n "$install_root" ]] || run chown "root:$SERVICE_GROUP" "$token_path"
 fi
 
 gpu_groups=""
@@ -289,14 +418,28 @@ if [[ -z "$install_root" ]]; then
         fi
     done
 fi
+for storage_group in "${storage_groups[@]}"; do
+    gpu_groups+=" $storage_group"
+done
 gpu_line=""
 if [[ -n "$gpu_groups" ]]; then
     gpu_line="SupplementaryGroups=${gpu_groups# }"
 fi
+storage_mounts=""
+storage_args=""
+storage_paths=""
+if [[ -n "$models_dir" ]]; then
+    storage_mounts="RequiresMountsFor=$models_dir $storage_config_dir"
+    storage_args=' --models-dir ${KIRA_SERVICE_MODELS_DIR} --config-dir ${KIRA_SERVICE_CONFIG_DIR}'
+    storage_paths=" $models_dir $storage_config_dir/catalog"
+fi
 if "$dry_run"; then
     printf '+ render %q\n' "$unit_path"
 else
-    sed "s|@KIRA_SERVICE_GPU_GROUPS@|$gpu_line|" \
+    sed -e "s|@KIRA_SERVICE_GPU_GROUPS@|$gpu_line|" \
+        -e "s|@KIRA_SERVICE_STORAGE_MOUNTS@|$storage_mounts|" \
+        -e "s|@KIRA_SERVICE_STORAGE_ARGS@|$storage_args|" \
+        -e "s|@KIRA_SERVICE_STORAGE_PATHS@|$storage_paths|" \
         "$project_root/packaging/systemd/$SERVICE_NAME.service.in" > "$unit_path"
     chmod 0644 "$unit_path"
 fi
@@ -334,3 +477,7 @@ else
     printf '.\n'
 fi
 printf 'Model manager installed at %s. Start the GUI with: %s --gui\n' "$manager_path" "$manager_path"
+printf 'Application-menu entry: %s\n' "$applications_dir/kira-service-manager.desktop"
+if [[ -n "$desktop_shortcut_path" ]]; then
+    printf 'Desktop shortcut: %s\n' "$desktop_shortcut_path"
+fi

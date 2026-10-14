@@ -2,6 +2,7 @@
 Description=Kira Service image generation daemon
 Wants=network-online.target
 After=network-online.target
+@KIRA_SERVICE_STORAGE_MOUNTS@
 
 [Service]
 Type=simple
@@ -12,7 +13,7 @@ Environment=XDG_DATA_HOME=/var/lib/kira-service/data
 Environment=TMPDIR=/run/kira-service
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=-/etc/kira-service/kira-service.conf
-ExecStart=/usr/local/libexec/kira-service/kira-service --listen ${KIRA_SERVICE_LISTEN} --port ${KIRA_SERVICE_PORT} --token-file ${KIRA_SERVICE_TOKEN_FILE}
+ExecStart=/usr/local/libexec/kira-service/kira-service --listen ${KIRA_SERVICE_LISTEN} --port ${KIRA_SERVICE_PORT} --token-file ${KIRA_SERVICE_TOKEN_FILE}@KIRA_SERVICE_STORAGE_ARGS@
 StateDirectory=kira-service
 StateDirectoryMode=0750
 RuntimeDirectory=kira-service
@@ -24,7 +25,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/kira-service /run/kira-service
+ReadWritePaths=/var/lib/kira-service /run/kira-service@KIRA_SERVICE_STORAGE_PATHS@
 
 [Install]
 WantedBy=multi-user.target

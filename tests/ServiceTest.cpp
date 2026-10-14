@@ -121,6 +121,7 @@ private slots:
     void rejectsInvalidModelInstall();
     void migratesLegacyModelRoot();
     void rejectsConflictingModelRoots();
+    void separatesWeightsFromCatalogue();
 };
 
 void ServiceTest::persistsAndProtectsModelRouting()
@@ -2564,6 +2565,38 @@ void ServiceTest::rejectsConflictingModelRoots()
     QVERIFY(QDir().mkpath(legacy)); QVERIFY(QDir().mkpath(destination));
     QString error; QVERIFY(!ServicePaths::migrateLegacyModels(&error)); QVERIFY(!error.isEmpty()); QVERIFY(QFileInfo::exists(legacy)); QVERIFY(QFileInfo::exists(destination));
     QDir(QFileInfo(legacy).dir().absolutePath()).removeRecursively(); QDir(QFileInfo(destination).dir().absolutePath()).removeRecursively();
+}
+
+void ServiceTest::separatesWeightsFromCatalogue()
+{
+    QTemporaryDir root;
+    const QString models = root.filePath("models"); const QString catalogue = root.filePath("config/catalog");
+    KiraServiceConfiguration orphan; orphan.port = 0; orphan.catalogRootPath = catalogue;
+    QString error; QVERIFY(!KiraServiceDaemon(orphan).start(&error)); QVERIFY(!error.isEmpty());
+    QVERIFY(!QFileInfo::exists(catalogue));
+    KiraServiceConfiguration configuration; configuration.port = 0; configuration.modelRootPath = models; configuration.catalogRootPath = catalogue;
+    {
+        KiraServiceDaemon service(configuration);
+        QVERIFY2(service.start(&error), qPrintable(error));
+    }
+    for (const auto &directory : {"generation", "upscale", "llm", "companion"}) QVERIFY(QFileInfo(QDir(models).filePath(directory)).isDir());
+    QVERIFY(QFileInfo(catalogue).isDir());
+
+    QFile weights(QDir(models).filePath("generation/test.gguf")); QVERIFY(weights.open(QIODevice::WriteOnly)); weights.write("weights"); weights.close();
+    QFile upscaler(QDir(models).filePath("upscale/two-x.gguf")); QVERIFY(upscaler.open(QIODevice::WriteOnly)); upscaler.write("weights"); upscaler.close();
+    ModelCatalog catalog(models, catalogue, false);
+    const QString id = "image-generation:test.gguf";
+    QVERIFY2(catalog.configure(id, KiraService::Protocol::defaultModelOptions("image-generation"), &error, {}, "Test"), qPrintable(error));
+    QVERIFY(QFileInfo::exists(QDir(catalogue).filePath("generation.json")));
+    QVERIFY(!QFileInfo::exists(QDir(models).filePath("generation/metadata.json")));
+    QCOMPARE(catalog.modelById(id)->displayName, QString("Test"));
+    QCOMPARE(catalog.models(ModelCategory::Upscaler).size(), 1);
+    auto routing = catalog.routing(&error); QVERIFY2(routing.has_value(), qPrintable(error));
+    routing->presets[0].model.modelId = id;
+    QVERIFY2(catalog.configureRouting(*routing, &error), qPrintable(error));
+    QVERIFY(QFileInfo::exists(QDir(catalogue).filePath("model-routing.json")));
+    QVERIFY(!QFileInfo::exists(QDir(models).filePath("model-routing.json")));
+    QCOMPARE(ModelCatalog(models, catalogue, false).routing(&error)->presets[0].model.modelId, id);
 }
 
 QTEST_MAIN(ServiceTest)

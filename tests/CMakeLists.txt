@@ -43,6 +43,9 @@ add_test(NAME kira-service-installer-test
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/KiraServiceInstallerTest.sh
             ${CMAKE_SOURCE_DIR} $<TARGET_FILE:kira-service> $<TARGET_FILE:kira-service-manager>)
 
+add_test(NAME kira-service-storage-migration-test
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/KiraServiceStorageMigrationTest.sh ${CMAKE_SOURCE_DIR})
+
 add_test(NAME kira-service-cmake-install-test
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/KiraServiceCMakeInstallTest.sh
             ${CMAKE_BINARY_DIR})

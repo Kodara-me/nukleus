@@ -121,6 +121,12 @@ ModelCatalog::ModelCatalog(QString rootPathOverride, bool allowInsecureTestUrls,
     if (!rootPathOverride.isEmpty()) m_rootPathOverride = QDir::cleanPath(rootPathOverride);
 }
 
+ModelCatalog::ModelCatalog(QString modelsPath, QString catalogPath, bool allowInsecureTestUrls, QObject *parent)
+    : ModelCatalog(std::move(modelsPath), allowInsecureTestUrls, parent)
+{
+    if (!catalogPath.isEmpty()) m_catalogPath = QDir::cleanPath(catalogPath);
+}
+
 ModelCatalog::~ModelCatalog() = default;
 
 QList<ModelCategory> ModelCatalog::categories()
@@ -471,7 +477,7 @@ bool ModelCatalog::configureStyles(const QString &id, const QList<KiraService::P
 
 std::optional<KiraService::ModelRouting> ModelCatalog::routing(QString *error) const
 {
-    const QString path = QDir(rootPath()).filePath("model-routing.json");
+    const QString path = QDir(configurationPath()).filePath("model-routing.json");
     if (!QFileInfo::exists(path)) return KiraService::Protocol::starterModelRouting();
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
@@ -525,11 +531,11 @@ bool ModelCatalog::configureRouting(const KiraService::ModelRouting &value, QStr
 {
     if (!routing(error) || !KiraService::Protocol::validateModelRouting(value, error)
         || !validateRoutingReferences(value, error)) return false;
-    if (!QDir().mkpath(rootPath())) {
+    if (!QDir().mkpath(configurationPath())) {
         if (error) *error = tr("Could not create the model configuration directory");
         return false;
     }
-    QSaveFile file(QDir(rootPath()).filePath("model-routing.json"));
+    QSaveFile file(QDir(configurationPath()).filePath("model-routing.json"));
     auto saved = value;
     initializeRoutingOptions(saved);
     if (!KiraService::Protocol::validateModelRouting(saved, error)) return false;
@@ -565,9 +571,15 @@ QString ModelCatalog::rootPath() const
     return m_rootPathOverride.has_value() ? *m_rootPathOverride : ServicePaths::modelsPath();
 }
 
+QString ModelCatalog::configurationPath() const
+{
+    return m_catalogPath.value_or(rootPath());
+}
+
 QString ModelCatalog::companionMetadataPath(ModelCategory category) const
 {
-    return QDir(directoryPath(category)).filePath(QStringLiteral("metadata.json"));
+    if (!m_catalogPath) return QDir(directoryPath(category)).filePath(QStringLiteral("metadata.json"));
+    return QDir(*m_catalogPath).filePath(QFileInfo(directoryPath(category)).fileName() + QStringLiteral(".json"));
 }
 
 QString ModelCatalog::companionPath(ModelCategory category, const QString &primaryFileName, const QString &companionFileName) const
@@ -593,6 +605,7 @@ std::optional<QJsonObject> ModelCatalog::readMetadata(ModelCategory category) co
 
 bool ModelCatalog::writeMetadata(ModelCategory category, const QJsonObject &metadata) const
 {
+    if (m_catalogPath && !QDir().mkpath(*m_catalogPath)) return false;
     QSaveFile file(companionMetadataPath(category));
     if (!file.open(QIODevice::WriteOnly)) return false;
     const auto bytes = QJsonDocument(metadata).toJson(QJsonDocument::Compact);
@@ -604,12 +617,23 @@ QString ModelCatalog::directoryPath(ModelCategory category) const
     const QString root = rootPath();
     if (root.isEmpty()) return {};
     switch (category) {
-    case ModelCategory::ImageGeneration: return root;
+    case ModelCategory::ImageGeneration: return m_catalogPath ? QDir(root).filePath(QStringLiteral("generation")) : root;
     case ModelCategory::Upscaler: return QDir(root).filePath(QStringLiteral("upscale"));
     case ModelCategory::LlmChat: return QDir(root).filePath(QStringLiteral("llm"));
     case ModelCategory::Companion: return QDir(root).filePath(QStringLiteral("companion"));
     }
     return {};
+}
+
+bool ModelCatalog::ensureStorage(QString *errorMessage) const
+{
+    for (const ModelCategory category : categories())
+        if (!ensureDirectory(category, errorMessage)) return false;
+    if (!QDir().mkpath(configurationPath())) {
+        if (errorMessage) *errorMessage = tr("Could not create the model configuration directory");
+        return false;
+    }
+    return true;
 }
 
 bool ModelCatalog::ensureDirectory(ModelCategory category, QString *errorMessage) const

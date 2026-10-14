@@ -76,12 +76,15 @@ class ModelCatalog final : public QObject
 public:
     explicit ModelCatalog(QObject *parent = nullptr);
     ModelCatalog(QString rootPathOverride, bool allowInsecureTestUrls, QObject *parent = nullptr);
+    // Split layout: weights under modelsPath/<category>/, catalogue JSON files in catalogPath.
+    ModelCatalog(QString modelsPath, QString catalogPath, bool allowInsecureTestUrls, QObject *parent = nullptr);
     ~ModelCatalog() override;
 
     static QList<ModelCategory> categories();
     static QString categoryName(ModelCategory category);
     static QString companionRole(ModelCategory category);
     static std::optional<ModelCategory> categoryFromName(const QString &name);
+    bool ensureStorage(QString *errorMessage = nullptr) const;
     QList<ModelInfo> models(ModelCategory category) const;
     std::optional<ModelInfo> model(ModelCategory category, const QString &id) const;
     std::optional<ModelInfo> modelById(const QString &id) const;
@@ -111,6 +114,7 @@ private:
     bool protectRouting(const QString &id, const QJsonObject *options, QString *error) const;
 
     QString rootPath() const;
+    QString configurationPath() const;
     QString directoryPath(ModelCategory category) const;
     QString companionMetadataPath(ModelCategory category) const;
     QString companionPath(ModelCategory category, const QString &primaryFileName, const QString &companionFileName) const;
@@ -130,6 +134,7 @@ private:
     void emitProgress(ModelInstallState state, qint64 bytesDownloaded = 0, std::optional<qint64> totalBytes = {});
 
     std::optional<QString> m_rootPathOverride;
+    std::optional<QString> m_catalogPath;
     bool m_allowInsecureTestUrls = false;
     class QNetworkAccessManager *m_networkManager;
     std::unique_ptr<InstallJob> m_activeInstall;

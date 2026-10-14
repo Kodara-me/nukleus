@@ -186,15 +186,53 @@ Image-generation models support generation and image.edit with uploaded referenc
 
 Service models live in `$XDG_DATA_HOME/kira-service/models/`: image-generation files in `models/`, upscalers in `models/upscale/`, LLM files in `models/llm/`, and shared VAE/MMPROJ companions in `models/companion/`. Assignments use opaque IDs and never expose service paths or delete shared files with a primary. The manager accepts HTTPS sources and local imports, never overwriting installed weights. VAE accepts `.safetensors`, `.ckpt`, or `.gguf`; MMPROJ requires `.gguf`. Hugging Face `blob` links normalize to `resolve` URLs. SHA-256 verification is not supported. Legacy category-local attachments remain stored under `companions/<primary filename>/`; legacy VAE/LLM weights remain usable as fallbacks. modelType defaults to checkpoint when absent.
 
+`kira-service --models-dir DIR --config-dir DIR` selects a split layout instead: weights in `models-dir/{generation,upscale,llm,companion}/` and the catalogue (`generation.json`, `upscale.json`, `llm.json`, `companion.json`, each in the former category `metadata.json` format, plus `model-routing.json`) in `config-dir/catalog/`. Both options are required together; the daemon creates the directories at startup. See `docs/plans/storage-layout.md`.
+
 The Linux installer moves legacy models from `$XDG_DATA_HOME/kira-canvas/models/` during an upgrade. It aborts without changing either directory if both model roots already exist.
 
 ## Linux system service
+
+### Runtime tools on Arch Linux
+
+The daemon runs `sd-cli` for image jobs and llama.cpp's `llama-server` or
+`llama-completion` for text jobs. On Arch Linux and derivatives such as
+CachyOS, build both with the Vulkan backend from the AUR:
+
+```sh
+paru -S llama.cpp-vulkan-git stable-diffusion.cpp-vulkan-git
+```
+
+Both packages build from the upstream sources and install into `/usr/bin`,
+which is on the systemd unit's `PATH`. stable-diffusion.cpp links its own ggml,
+so the packages do not conflict. Restart the service after installing or
+updating them, then check that the journal no longer reports a missing
+`sd-cli`:
+
+```sh
+sudo systemctl restart kira-service
+journalctl -u kira-service -n 20
+```
+
+The unit sets `ProtectHome=true`, so the service cannot run executables from a
+home directory: install manually built tools outside `/home` (for example
+`/usr/local/bin`) or point `KIRA_LLAMA_SERVER`/`KIRA_LLAMA_COMPLETION` at such a
+path. Manual Vulkan builds of llama.cpp also need the `spirv-headers` package.
+
+### Installing the service
 
 ```sh
 sudo scripts/install-kira-service.sh --binary build/src/kira-service --manager-binary build/src/kira-service-manager
 ```
 
-The installer uses port `9384`, preserves a valid existing bind/token configuration, installs the manager into the invoking user's `~/.local/bin`, and restarts updated installations. A LAN binding listens on both `127.0.0.1` and the selected IPv4 address. Loopback manager clients authenticate without a token; non-loopback clients require the shared LAN token. Configuration remains under `/etc/kira-service/`; system-service model data resolves to `/var/lib/kira-service/data/kira-service/models/`.
+The installer uses port `9384`, preserves a valid existing bind/token configuration, installs the manager into the invoking user's `~/.local/bin` with an application-menu entry (`~/.local/share/applications`, icons under `~/.local/share/icons/hicolor` referenced by absolute path); `--desktop-shortcut` also adds a shortcut to the user's XDG desktop directory, or `--desktop-dir PATH` to another directory, and restarts updated installations. A LAN binding listens on both `127.0.0.1` and the selected IPv4 address. Loopback manager clients authenticate without a token; non-loopback clients require the shared LAN token. Configuration remains under `/etc/kira-service/`; system-service model data resolves to `/var/lib/kira-service/data/kira-service/models/`.
+
+To use the split layout, pass `--models-dir DIR --config-dir DIR` to the installer (or after `--` to the updater). The installer stores both in `kira-service.conf`, keeps them on later updates, creates the category and `catalog/` directories, and restricts the unit's `ReadWritePaths=` to them. When a storage directory belongs to a non-root group (for example a shared `/srv/lab` owned by `users`), the service joins that group instead of taking ownership. Copy an existing model tree first with:
+
+```bash
+scripts/migrate-kira-service-storage.sh --source OLD_MODELS --models-dir /srv/lab/models --config-dir /srv/lab/config/kira-service --dry-run
+```
+
+Uninstalling, even with `--purge`, never removes the split storage directories.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/protocol-v3.md](docs/protocol-v3.md).
 

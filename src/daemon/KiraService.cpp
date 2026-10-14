@@ -320,7 +320,7 @@ KiraServiceDaemon::KiraServiceDaemon(KiraServiceConfiguration configuration, QOb
     , m_configuration(std::move(configuration))
     , m_models(m_configuration.modelRootPath.isEmpty()
                    ? std::make_unique<ModelCatalog>()
-                   : std::make_unique<ModelCatalog>(m_configuration.modelRootPath, false))
+                   : std::make_unique<ModelCatalog>(m_configuration.modelRootPath, m_configuration.catalogRootPath, false))
 {
     m_promptTimeout.setSingleShot(true);
     m_promptTimeout.setInterval(m_configuration.promptEnhancementTimeoutMs);
@@ -411,7 +411,12 @@ bool KiraServiceDaemon::start(QString *errorMessage)
         if (errorMessage) *errorMessage = tr("A token is required when listening on the LAN");
         return false;
     }
+    if (m_configuration.modelRootPath.isEmpty() && !m_configuration.catalogRootPath.isEmpty()) {
+        if (errorMessage) *errorMessage = tr("A catalogue directory requires a models directory");
+        return false;
+    }
     if (m_configuration.modelRootPath.isEmpty() && !ServicePaths::ensureModelDirectories(errorMessage)) return false;
+    if (!m_configuration.catalogRootPath.isEmpty() && !m_models->ensureStorage(errorMessage)) return false;
     m_servers.clear();
     QList<QHostAddress> addresses{QHostAddress(QStringLiteral("127.0.0.1"))};
     if (!m_configuration.listenAddress.isLoopback()) addresses.append(m_configuration.listenAddress);
