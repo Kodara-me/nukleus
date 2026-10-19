@@ -9,9 +9,9 @@
 #include <QUrl>
 
 #include <optional>
-#include <kira/service/PromptStyle.h>
+#include <nukleus/PromptStyle.h>
 
-namespace KiraService
+namespace Nukleus
 {
 enum class ModelCategory
 {
@@ -211,16 +211,16 @@ enum class JobState
 };
 }
 
-Q_DECLARE_METATYPE(KiraService::ModelInfo)
-Q_DECLARE_METATYPE(KiraService::ModelInstall)
-Q_DECLARE_METATYPE(KiraService::ImageGenerationRequest)
-Q_DECLARE_METATYPE(KiraService::ImageUpscaleRequest)
-Q_DECLARE_METATYPE(KiraService::ImageJobResult)
-Q_DECLARE_METATYPE(KiraService::PromptEnhancementRequest)
-Q_DECLARE_METATYPE(KiraService::PromptEnhancementResult)
-Q_DECLARE_METATYPE(KiraService::TextChatRequest)
-Q_DECLARE_METATYPE(KiraService::TextChatResult)
-Q_DECLARE_METATYPE(KiraService::ChatModelResult)
-Q_DECLARE_METATYPE(KiraService::ServiceCapabilities)
-Q_DECLARE_METATYPE(KiraService::ServiceConnectionState)
-Q_DECLARE_METATYPE(KiraService::JobState)
+Q_DECLARE_METATYPE(Nukleus::ModelInfo)
+Q_DECLARE_METATYPE(Nukleus::ModelInstall)
+Q_DECLARE_METATYPE(Nukleus::ImageGenerationRequest)
+Q_DECLARE_METATYPE(Nukleus::ImageUpscaleRequest)
+Q_DECLARE_METATYPE(Nukleus::ImageJobResult)
+Q_DECLARE_METATYPE(Nukleus::PromptEnhancementRequest)
+Q_DECLARE_METATYPE(Nukleus::PromptEnhancementResult)
+Q_DECLARE_METATYPE(Nukleus::TextChatRequest)
+Q_DECLARE_METATYPE(Nukleus::TextChatResult)
+Q_DECLARE_METATYPE(Nukleus::ChatModelResult)
+Q_DECLARE_METATYPE(Nukleus::ServiceCapabilities)
+Q_DECLARE_METATYPE(Nukleus::ServiceConnectionState)
+Q_DECLARE_METATYPE(Nukleus::JobState)

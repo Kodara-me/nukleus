@@ -3,8 +3,8 @@ add_subdirectory(sdk)
 
 set(SERVICE_DAEMON_SOURCES
     daemon/GenerationRequest.h
-    daemon/KiraService.cpp
-    daemon/KiraService.h
+    daemon/NukleusDaemon.cpp
+    daemon/NukleusDaemon.h
     daemon/LlamaServerRunner.cpp
     daemon/LlamaServerRunner.h
     daemon/ModelCatalog.cpp
@@ -18,19 +18,19 @@ set(SERVICE_DAEMON_SOURCES
     daemon/ServicePaths.h
 )
 
-add_executable(kira-service
-    daemon/kira-service-main.cpp
+add_executable(nukleusd
+    daemon/nukleusd-main.cpp
     ${SERVICE_DAEMON_SOURCES}
 )
-set_target_properties(kira-service PROPERTIES AUTORCC ON)
-target_include_directories(kira-service PRIVATE
+set_target_properties(nukleusd PROPERTIES AUTORCC ON)
+target_include_directories(nukleusd PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/daemon
 )
-target_link_libraries(kira-service PRIVATE KiraService::Protocol Qt6::Network Qt6::WebSockets)
+target_link_libraries(nukleusd PRIVATE Nukleus::Protocol Qt6::Network Qt6::WebSockets)
 
-add_executable(kira-service-manager
+add_executable(nukleus-manager
     manager/resources.qrc
-    manager/kira-service-manager-main.cpp
+    manager/nukleus-manager-main.cpp
     manager/ModelOptionsWidget.h
     manager/ModelOptionsWidget.cpp
     manager/AddModelDialog.h
@@ -43,21 +43,23 @@ add_executable(kira-service-manager
     manager/ServiceConnectionDialog.h
     manager/ManagerServiceClient.cpp
     manager/ManagerServiceClient.h
+    manager/ManagerSettings.cpp
+    manager/ManagerSettings.h
 )
-set_target_properties(kira-service-manager PROPERTIES AUTORCC ON)
-target_include_directories(kira-service-manager PRIVATE
+set_target_properties(nukleus-manager PROPERTIES AUTORCC ON)
+target_include_directories(nukleus-manager PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/manager
 )
-target_link_libraries(kira-service-manager PRIVATE KiraService::Protocol Ardoise::Widgets Qt6::Network Qt6::WebSockets Qt6::Widgets)
+target_link_libraries(nukleus-manager PRIVATE Nukleus::Protocol Ardoise::Widgets Qt6::Network Qt6::WebSockets Qt6::Widgets)
 
-install(TARGETS kira-service
-    RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/kira-service
+install(TARGETS nukleusd
+    RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/nukleus
 )
-install(TARGETS kira-service-manager
+install(TARGETS nukleus-manager
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-foreach(target kira-service kira-service-manager)
+foreach(target nukleusd nukleus-manager)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
     elseif(MSVC)

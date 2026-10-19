@@ -1,5 +1,5 @@
 // Minimal stand-in for llama-server used by ServiceTest. It records its launches and the last
-// chat request in KIRA_FAKE_LLAMA_DIR, and changes behavior when marker files exist there.
+// chat request in NUKLEUS_FAKE_LLAMA_DIR, and changes behavior when marker files exist there.
 #include <QCoreApplication>
 #include <QDir>
 #include <QElapsedTimer>
@@ -18,7 +18,7 @@
 
 namespace
 {
-QDir directory() { return QDir(qEnvironmentVariable("KIRA_FAKE_LLAMA_DIR")); }
+QDir directory() { return QDir(qEnvironmentVariable("NUKLEUS_FAKE_LLAMA_DIR")); }
 bool marker(const QString &name) { return directory().exists(name); }
 
 void append(const QString &name, const QByteArray &bytes)

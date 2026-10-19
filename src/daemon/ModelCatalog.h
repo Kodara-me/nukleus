@@ -4,8 +4,8 @@
 #include <QHash>
 #include <QObject>
 #include <QUrl>
-#include <kira/service/PromptStyle.h>
-#include <kira/service/ModelRouting.h>
+#include <nukleus/PromptStyle.h>
+#include <nukleus/ModelRouting.h>
 
 #include <optional>
 #include <QJsonObject>
@@ -31,7 +31,7 @@ struct ModelInfo
     QJsonObject companionFiles;
     QString modelType = QStringLiteral("checkpoint");
     bool explicitContent = false;
-    QList<KiraService::PromptStyle> styles;
+    QList<Nukleus::PromptStyle> styles;
     QString displayName;
     QString mmprojModelId;
 };
@@ -94,9 +94,9 @@ public:
     void cancel(const QString &installId);
     bool isInstalling() const;
     bool configure(const QString &id, const QJsonObject &options, QString *error = nullptr, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {}, std::optional<QString> mmprojModelId = {});
-    bool configureStyles(const QString &id, const QList<KiraService::PromptStyle> &styles, QString *error = nullptr);
-    std::optional<KiraService::ModelRouting> routing(QString *error = nullptr) const;
-    bool configureRouting(const KiraService::ModelRouting &routing, QString *error = nullptr);
+    bool configureStyles(const QString &id, const QList<Nukleus::PromptStyle> &styles, QString *error = nullptr);
+    std::optional<Nukleus::ModelRouting> routing(QString *error = nullptr) const;
+    bool configureRouting(const Nukleus::ModelRouting &routing, QString *error = nullptr);
 
 signals:
     void installProgress(const ModelInstallProgress &progress);
@@ -109,8 +109,8 @@ private:
     bool validateMmproj(ModelCategory category, const std::optional<QString>& id, QString* error) const;
     bool validateImageReferences(ModelCategory category, const QJsonObject& options, QString* error) const;
     bool isImageReference(const QString& id) const;
-    bool validateRoutingReferences(const KiraService::ModelRouting &routing, QString *error) const;
-    void initializeRoutingOptions(KiraService::ModelRouting &routing) const;
+    bool validateRoutingReferences(const Nukleus::ModelRouting &routing, QString *error) const;
+    void initializeRoutingOptions(Nukleus::ModelRouting &routing) const;
     bool protectRouting(const QString &id, const QJsonObject *options, QString *error) const;
 
     QString rootPath() const;

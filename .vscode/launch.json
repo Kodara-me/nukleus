@@ -2,22 +2,22 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug Kira Service",
+            "name": "Debug Nukleus",
             "type": "lldb",
             "request": "launch",
             "program": "${command:cmake.launchTargetPath}",
             "args": [],
             "cwd": "${workspaceFolder}",
-            "preLaunchTask": "Build Kira Service"
+            "preLaunchTask": "Build Nukleus"
         },
         {
-            "name": "Debug Kira Service Manager",
+            "name": "Debug Nukleus Manager",
             "type": "lldb",
             "request": "launch",
-            "program": "${workspaceFolder}/build/src/kira-service-manager",
+            "program": "${workspaceFolder}/build/src/nukleus-manager",
             "args": [],
             "cwd": "${workspaceFolder}",
-            "preLaunchTask": "Build Kira Service Manager"
+            "preLaunchTask": "Build Nukleus Manager"
         }
     ]
 }

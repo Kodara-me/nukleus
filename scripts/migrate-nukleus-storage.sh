@@ -11,9 +11,9 @@ dry_run=false
 
 usage() {
     cat <<'EOF'
-Usage: scripts/migrate-kira-service-storage.sh --source DIR --models-dir DIR --config-dir DIR [--dry-run]
+Usage: scripts/migrate-nukleus-storage.sh --source DIR --models-dir DIR --config-dir DIR [--dry-run]
 
-Copy a legacy Kira Service model tree into the split storage layout:
+Copy a legacy Nukleus model tree into the split storage layout:
 weights to MODELS_DIR/{generation,upscale,llm,companion}/ and the catalogue
 (category metadata.json files and model-routing.json) to CONFIG_DIR/catalog/.
 
@@ -22,7 +22,7 @@ merged or overwritten. Files are staged beside each destination and moved into
 place only after every copy succeeded and its size matches the source.
 
 Options:
-  --source DIR       Legacy model root (the former .../kira-service/models)
+  --source DIR       Legacy model root (the former .../nukleus/models)
   --models-dir DIR   Destination weight directory
   --config-dir DIR   Destination configuration directory
   --dry-run          Print the planned copies without modifying the filesystem
@@ -49,8 +49,8 @@ source_dir="$(cd -- "$source_dir" && pwd)"
 models_dir="$(realpath -m -- "$models_dir")"
 config_dir="$(realpath -m -- "$config_dir")"
 catalog_dir="$config_dir/catalog"
-stage_models="$models_dir/.kira-migration"
-stage_catalog="$config_dir/.kira-migration-catalog"
+stage_models="$models_dir/.nukleus-migration"
+stage_catalog="$config_dir/.nukleus-migration-catalog"
 
 for path in "$models_dir" "$config_dir"; do
     [[ "$path/" != "$source_dir/"* && "$source_dir/" != "$path/"* ]] || fail "Source and destination must not overlap: $path"

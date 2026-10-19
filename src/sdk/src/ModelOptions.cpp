@@ -1,7 +1,7 @@
-#include "kira/service/ModelOptions.h"
+#include "nukleus/ModelOptions.h"
 #include <cmath>
 
-namespace KiraService::Protocol
+namespace Nukleus::Protocol
 {
 QStringList modelSamplers() { return {QString(), "euler", "euler_a", "heun", "dpm2", "dpm++2m", "lcm"}; }
 QStringList modelSchedulers()
@@ -83,4 +83,4 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
         return fail();
     return true;
 }
-} // namespace KiraService::Protocol
+} // namespace Nukleus::Protocol

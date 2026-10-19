@@ -9,6 +9,8 @@ public:
     static QString modelsPath();
     static QString upscaleModelsPath();
     static QString chatModelsPath();
+    static QString legacyDataRoot();
+    static bool migrateLegacyDataRoot(QString *errorMessage = nullptr);
     static QString legacyModelsPath();
     static bool migrateLegacyModels(QString *errorMessage = nullptr);
     static bool ensureModelDirectories(QString *errorMessage = nullptr);

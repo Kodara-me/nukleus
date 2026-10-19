@@ -1,4 +1,4 @@
-# Kira Service WebSocket protocol v3
+# Nukleus WebSocket protocol v3
 
 Clients authenticate first:
 
@@ -39,7 +39,7 @@ description using the system instructions. Temperature zero selects greedy outpu
 The subprocess uses repetition penalty 1.1 (unless penalizeRepeats is false). It passes no
 top-k, min-p or sampler order, so these follow the GGUF's `general.sampling.*`
 recommendations, or llama.cpp's defaults (top-k 40, min-p 0.05) when the file has none.
-KIRA_LLAMA_COMPLETION selects the executable. Preserve the ten-minute timeout,
+NUKLEUS_LLAMA_COMPLETION selects the executable. Preserve the ten-minute timeout,
 1 MiB output limit, single-job queue, disconnect cancellation and explicit errors.
 
 Success returns one JSON message without binary data:
@@ -106,7 +106,7 @@ Engines:
   restarts it. The service
   unloads it before any other job (image work, a `completion` chat; not
   prompt.enhance, which runs on it) and after an idle period: ten minutes, or
-  `KIRA_LLAMA_SERVER_IDLE_SECONDS`. `KIRA_LLAMA_SERVER` selects the
+  `NUKLEUS_LLAMA_SERVER_IDLE_SECONDS`. `NUKLEUS_LLAMA_SERVER` selects the
   executable.
 - `completion` runs llama-completion through the shared FIFO like
   prompt.enhance and reloads the model on every turn: the system content opens

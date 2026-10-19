@@ -3,7 +3,7 @@
 #include <QString>
 #include <QList>
 
-namespace KiraService {
+namespace Nukleus {
 struct IdentityPackage {
     QList<QByteArray> references;
     QString identityPrompt;

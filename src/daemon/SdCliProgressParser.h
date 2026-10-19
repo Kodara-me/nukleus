@@ -1,6 +1,6 @@
 #pragma once
 
-#include <kira/service/GenerationProgress.h>
+#include <nukleus/GenerationProgress.h>
 
 #include <optional>
 
@@ -10,17 +10,17 @@ class QString;
 class SdCliProgressParser final
 {
 public:
-    KiraService::GenerationProgress begin(int samplingSteps);
-    std::optional<KiraService::GenerationProgress> starting();
-    std::optional<KiraService::GenerationProgress> processLine(const QString &line);
+    Nukleus::GenerationProgress begin(int samplingSteps);
+    std::optional<Nukleus::GenerationProgress> starting();
+    std::optional<Nukleus::GenerationProgress> processLine(const QString &line);
     // Reads a complete step counter from output whose line has not ended yet.
-    std::optional<KiraService::GenerationProgress> processPartialLine(const QString &text);
-    std::optional<KiraService::GenerationProgress> complete();
-    std::optional<KiraService::GenerationProgress> failed();
+    std::optional<Nukleus::GenerationProgress> processPartialLine(const QString &text);
+    std::optional<Nukleus::GenerationProgress> complete();
+    std::optional<Nukleus::GenerationProgress> failed();
 
 private:
-    std::optional<KiraService::GenerationProgress> samplingProgress(const QRegularExpressionMatch &match);
-    std::optional<KiraService::GenerationProgress> update(KiraService::GenerationProgressStage stage,
+    std::optional<Nukleus::GenerationProgress> samplingProgress(const QRegularExpressionMatch &match);
+    std::optional<Nukleus::GenerationProgress> update(Nukleus::GenerationProgressStage stage,
                                              int percentage,
                                              const QString &statusText,
                                              std::optional<int> currentStep = std::nullopt,
@@ -28,7 +28,7 @@ private:
 
     int m_samplingSteps = 0;
     int m_percentage = 0;
-    KiraService::GenerationProgressStage m_stage = KiraService::GenerationProgressStage::Preparing;
+    Nukleus::GenerationProgressStage m_stage = Nukleus::GenerationProgressStage::Preparing;
     bool m_samplingStarted = false;
     std::optional<int> m_currentStep;
     bool m_hasProgress = false;

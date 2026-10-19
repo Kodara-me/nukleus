@@ -8,8 +8,8 @@ trap 'rm -rf "$stage_root"' EXIT
 
 cmake --install "$build_root" --prefix "$stage_root"
 
-daemon="$stage_root/libexec/kira-service/kira-service"
-manager="$stage_root/bin/kira-service-manager"
+daemon="$stage_root/libexec/nukleus/nukleusd"
+manager="$stage_root/bin/nukleus-manager"
 
 [[ -x "$daemon" ]]
 [[ -x "$manager" ]]

@@ -7,7 +7,7 @@
 #include <QString>
 #include <optional>
 
-namespace KiraService
+namespace Nukleus
 {
 struct PromptStyle
 {
@@ -28,4 +28,4 @@ QString composeStyledPrompt(const QString &prefix, const QString &prompt);
 }
 }
 
-Q_DECLARE_METATYPE(KiraService::PromptStyle)
+Q_DECLARE_METATYPE(Nukleus::PromptStyle)

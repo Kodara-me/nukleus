@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Nukleus Manager
+Name[fr]=Gestionnaire Nukleus
+Comment=Manage the models installed by Nukleus
+Comment[fr]=Gérer les modèles installés par Nukleus
+Exec="@NUKLEUS_MANAGER@" --gui
+TryExec=@NUKLEUS_MANAGER@
+Icon=@NUKLEUS_MANAGER_ICON@
+Terminal=false
+Categories=Graphics;Utility;
+StartupWMClass=nukleus-manager

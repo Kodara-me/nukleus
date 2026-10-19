@@ -1,6 +1,7 @@
 #include "ManageModelsWindow.h"
 
 #include "ManagerServiceClient.h"
+#include "ManagerSettings.h"
 
 #include <QApplication>
 #include <Ardoise/Theme.h>
@@ -113,7 +114,7 @@ int runCli(QCoreApplication &application, const QCommandLineParser &parser)
         if (!message.isEmpty()) QTextStream(stderr) << message << '\n';
         loop.quit();
     };
-    QObject::connect(&connectionTimeout, &QTimer::timeout, &loop, [&] { finish(1, QStringLiteral("The local Kira Service is unavailable.")); });
+    QObject::connect(&connectionTimeout, &QTimer::timeout, &loop, [&] { finish(1, QStringLiteral("The local Nukleus is unavailable.")); });
     QObject::connect(&client, &ManagerServiceClient::serviceStateChanged, &loop, [&](const QString &state, const QString &message) {
         if (state == QStringLiteral("connected")) connectionTimeout.stop();
         if (state == QStringLiteral("connection-error") || state == QStringLiteral("authentication-failed")) finish(1, message);
@@ -232,11 +233,12 @@ int main(int argc, char *argv[])
     std::unique_ptr<QCoreApplication> application;
     if (guiRequested) application = std::make_unique<QApplication>(argc, argv);
     else application = std::make_unique<QCoreApplication>(argc, argv);
-    application->setOrganizationName(QStringLiteral("Kira Service"));
-    application->setApplicationName(QStringLiteral("Kira Service Manager"));
+    application->setOrganizationName(QStringLiteral("Nukleus"));
+    application->setApplicationName(QStringLiteral("Nukleus Manager"));
+    ManagerSettings::migrateLegacySettings();
 
     QCommandLineParser parser;
-    parser.setApplicationDescription(QStringLiteral("Manage models installed by the local Kira Service."));
+    parser.setApplicationDescription(QStringLiteral("Manage models installed by the local Nukleus service."));
     parser.addHelpOption();
     parser.addOption({QStringLiteral("gui"), QStringLiteral("Start the graphical manager.")});
     parser.addOption({QStringLiteral("category"), QStringLiteral("Model category for add."), QStringLiteral("category")});
@@ -264,8 +266,8 @@ int main(int argc, char *argv[])
         QIcon icon;
         for (const int size : {16, 32, 48, 64, 128, 256, 512, 1024}) icon.addFile(QStringLiteral(":/manager/icons/manager-%1.png").arg(size));
         QApplication::setWindowIcon(icon);
-        // Matches the installed kira-service-manager.desktop so Wayland shells show its icon.
-        QGuiApplication::setDesktopFileName(QStringLiteral("kira-service-manager"));
+        // Matches the installed nukleus-manager.desktop so Wayland shells show its icon.
+        QGuiApplication::setDesktopFileName(QStringLiteral("nukleus-manager"));
         auto *window = new ManageModelsWindow;
         window->show();
         return application->exec();

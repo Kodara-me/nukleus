@@ -1,11 +1,11 @@
-#include "KiraService.h"
+#include "NukleusDaemon.h"
 #include "ModelCatalog.h"
 #include "ServicePaths.h"
 #include "SdCliProgressParser.h"
 #include "SdCliRunner.h"
-#include <kira/service/ServiceProtocol.h>
-#include <kira/service/ModelOptions.h>
-#include <kira/service/ServiceClient.h>
+#include <nukleus/ServiceProtocol.h>
+#include <nukleus/ModelOptions.h>
+#include <nukleus/ServiceClient.h>
 
 #include <QDir>
 #include <QScopeGuard>
@@ -120,6 +120,7 @@ private slots:
     void acceptsExternalModelUrls();
     void rejectsInvalidModelInstall();
     void migratesLegacyModelRoot();
+    void migratesLegacyDataRoot();
     void rejectsConflictingModelRoots();
     void separatesWeightsFromCatalogue();
 };
@@ -142,7 +143,7 @@ void ServiceTest::persistsAndProtectsModelRouting()
     QFile model(directory.filePath("test.gguf"));
     QVERIFY(model.open(QIODevice::WriteOnly)); model.write("weights"); model.close();
     const QString id = "image-generation:test.gguf";
-    auto options = KiraService::Protocol::defaultModelOptions("image-generation");
+    auto options = Nukleus::Protocol::defaultModelOptions("image-generation");
     options.insert("steps", 37); options.insert("cfgScale", 5.75);
     QVERIFY2(catalog.configure(id, options, &error, {}, "Test"), qPrintable(error));
     routing->presets[0].model.modelId = id;
@@ -165,7 +166,7 @@ void ServiceTest::persistsAndProtectsModelRouting()
     QFile llmFile(directory.filePath("llm/chat.gguf"));
     QVERIFY(llmFile.open(QIODevice::WriteOnly)); llmFile.write("weights"); llmFile.close();
     const QString llmId = "llm-chat:chat.gguf";
-    const auto llmOptions = KiraService::Protocol::defaultModelOptions("llm-chat");
+    const auto llmOptions = Nukleus::Protocol::defaultModelOptions("llm-chat");
     QVERIFY2(catalog.configure(llmId, llmOptions, &error, {}, "Chat"), qPrintable(error));
     QVERIFY2(catalog.remove(llmId, &error), qPrintable(error)); // Routing never holds LLMs.
     auto invalid = *routing;
@@ -178,7 +179,7 @@ void ServiceTest::persistsAndProtectsModelRouting()
     QVERIFY(model.remove());
     QCOMPARE(catalog.routing(), routing); // External disappearance preserves the assignment.
     QVERIFY(!catalog.configureRouting({}, &error));
-    QVERIFY(catalog.configureRouting(KiraService::Protocol::starterModelRouting(), &error));
+    QVERIFY(catalog.configureRouting(Nukleus::Protocol::starterModelRouting(), &error));
     QCOMPARE(catalog.routing()->presets.size(), 2);
 #ifdef Q_OS_UNIX
     const auto permissions = QFileInfo(directory.path()).permissions();
@@ -186,8 +187,8 @@ void ServiceTest::persistsAndProtectsModelRouting()
     QVERIFY(QFile::setPermissions(directory.path(), QFile::ReadOwner | QFile::ExeOwner));
     QFile probe(directory.filePath("write-probe"));
     if (!probe.open(QIODevice::WriteOnly)) {
-        QVERIFY(!catalog.configureRouting(KiraService::Protocol::starterModelRouting(), &error));
-        QCOMPARE(catalog.routing(), std::optional<KiraService::ModelRouting>(KiraService::Protocol::starterModelRouting()));
+        QVERIFY(!catalog.configureRouting(Nukleus::Protocol::starterModelRouting(), &error));
+        QCOMPARE(catalog.routing(), std::optional<Nukleus::ModelRouting>(Nukleus::Protocol::starterModelRouting()));
     }
     probe.close();
     QVERIFY(QFile::setPermissions(directory.path(), permissions));
@@ -204,7 +205,7 @@ void ServiceTest::persistsAndProtectsModelRouting()
 
 void ServiceTest::fixedRoutingLabelsAndLegacyMigration()
 {
-    const auto fixed = KiraService::Protocol::starterModelRouting();
+    const auto fixed = Nukleus::Protocol::starterModelRouting();
     QCOMPARE(fixed.presets[0].displayLabel(QLocale("fr_CA")), QString("Photoréalisme"));
     QCOMPARE(fixed.presets[0].displayLabel(QLocale("en_US")), QString("Photorealism"));
     QCOMPARE(fixed.presets[1].displayLabel(QLocale("fr_FR")), QString("Illustration"));
@@ -229,26 +230,26 @@ void ServiceTest::fixedRoutingLabelsAndLegacyMigration()
                         {"positivePrefix", ""}, {"negativePrefix", ""},
                         {"qualities", tiers("illustration", "image-generation:drawn-")}, {"promptFlow", QJsonArray{}}}}},
         {"editingQualities", tiers("edit", "image-generation:edit-")}};
-    auto migrated = KiraService::Protocol::modelRoutingFromJson(tiered);
+    auto migrated = Nukleus::Protocol::modelRoutingFromJson(tiered);
     QVERIFY(migrated.has_value());
     QCOMPARE(migrated->presets[0].positivePrefix, QString("saved prefix"));
     QCOMPARE(migrated->presets[0].negativePrefix, QString("saved negative"));
-    QCOMPARE(migrated->presets[0].model, (KiraService::ModelAssignment{"image-generation:photo-low", 4, 1.25}));
-    QCOMPARE(migrated->presets[1].model, (KiraService::ModelAssignment{"image-generation:drawn-low", 4, 1.25}));
+    QCOMPARE(migrated->presets[0].model, (Nukleus::ModelAssignment{"image-generation:photo-low", 4, 1.25}));
+    QCOMPARE(migrated->presets[1].model, (Nukleus::ModelAssignment{"image-generation:drawn-low", 4, 1.25}));
     // Editing keeps all three tiers; the permanent Balanced tier becomes the default.
-    QCOMPARE(migrated->editingQualities[0].model, (KiraService::ModelAssignment{"image-generation:edit-low", 4, 1.25}));
-    QCOMPARE(migrated->editingQualities[1].model, (KiraService::ModelAssignment{"image-generation:edit-medium", 5, 2.25}));
-    QCOMPARE(migrated->editingQualities[2].model, (KiraService::ModelAssignment{"image-generation:edit-high", 6, 3.25}));
+    QCOMPARE(migrated->editingQualities[0].model, (Nukleus::ModelAssignment{"image-generation:edit-low", 4, 1.25}));
+    QCOMPARE(migrated->editingQualities[1].model, (Nukleus::ModelAssignment{"image-generation:edit-medium", 5, 2.25}));
+    QCOMPARE(migrated->editingQualities[2].model, (Nukleus::ModelAssignment{"image-generation:edit-high", 6, 3.25}));
     QCOMPARE(migrated->defaultEditingQuality()->id, QString("edit-medium"));
     QCOMPARE(migrated->editingQualities[0].name, QString("Fast"));
     auto version2 = tiered; version2.insert("version", 2); // Retired prompt flows are ignored.
-    migrated = KiraService::Protocol::modelRoutingFromJson(version2);
+    migrated = Nukleus::Protocol::modelRoutingFromJson(version2);
     QVERIFY(migrated.has_value());
     QCOMPARE(migrated->presets[0].identityViews, 1);
     QCOMPARE(migrated->presets[0].model.modelId, QString("image-generation:photo-low"));
-    QCOMPARE(KiraService::Protocol::modelRoutingFromJson(KiraService::Protocol::modelRoutingToJson(fixed)),
-        std::optional<KiraService::ModelRouting>(fixed));
-    const auto fixedJson = KiraService::Protocol::modelRoutingToJson(fixed);
+    QCOMPARE(Nukleus::Protocol::modelRoutingFromJson(Nukleus::Protocol::modelRoutingToJson(fixed)),
+        std::optional<Nukleus::ModelRouting>(fixed));
+    const auto fixedJson = Nukleus::Protocol::modelRoutingToJson(fixed);
     QCOMPARE(fixedJson.value("version").toInt(), 6);
     QVERIFY(!fixedJson.value("presets").toArray().first().toObject().contains("promptFlow"));
     auto legacyFlow = fixedJson; // Version-6 documents saved before the removal still load.
@@ -257,69 +258,69 @@ void ServiceTest::fixedRoutingLabelsAndLegacyMigration()
     legacyPreset.insert("promptFlow", QJsonArray{QJsonObject{{"id", "enhance"}, {"name", "Enhance"}}});
     legacyPresets[0] = legacyPreset;
     legacyFlow.insert("presets", legacyPresets);
-    QCOMPARE(KiraService::Protocol::modelRoutingFromJson(legacyFlow), std::optional<KiraService::ModelRouting>(fixed));
+    QCOMPARE(Nukleus::Protocol::modelRoutingFromJson(legacyFlow), std::optional<Nukleus::ModelRouting>(fixed));
     auto unknownVersion = fixedJson; unknownVersion.insert("version", 7);
-    QVERIFY(!KiraService::Protocol::modelRoutingFromJson(unknownVersion));
+    QVERIFY(!Nukleus::Protocol::modelRoutingFromJson(unknownVersion));
     auto invalid = fixed; invalid.presets.swapItemsAt(0, 1);
-    QVERIFY(KiraService::Protocol::validateModelRouting(invalid)); // Presets may be reordered.
+    QVERIFY(Nukleus::Protocol::validateModelRouting(invalid)); // Presets may be reordered.
     invalid = fixed; invalid.presets.append({"portrait", "Portrait", {}, {}, {}, "Portrait"});
-    QVERIFY(KiraService::Protocol::validateModelRouting(invalid)); // Presets may be added...
-    QCOMPARE(KiraService::Protocol::modelRoutingFromJson(KiraService::Protocol::modelRoutingToJson(invalid)),
-        std::optional<KiraService::ModelRouting>(invalid));
+    QVERIFY(Nukleus::Protocol::validateModelRouting(invalid)); // Presets may be added...
+    QCOMPARE(Nukleus::Protocol::modelRoutingFromJson(Nukleus::Protocol::modelRoutingToJson(invalid)),
+        std::optional<Nukleus::ModelRouting>(invalid));
     invalid.presets.removeFirst();
     invalid.presets.removeFirst();
-    QVERIFY(KiraService::Protocol::validateModelRouting(invalid)); // ...and removed, keeping at least one.
+    QVERIFY(Nukleus::Protocol::validateModelRouting(invalid)); // ...and removed, keeping at least one.
     invalid.presets.clear();
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    QVERIFY(!Nukleus::Protocol::validateModelRouting(invalid));
     invalid = fixed; invalid.presets[1].id = invalid.presets[0].id;
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid)); // Duplicate preset ID.
+    QVERIFY(!Nukleus::Protocol::validateModelRouting(invalid)); // Duplicate preset ID.
     invalid = fixed; invalid.presets[0].nameFr = " ";
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    QVERIFY(!Nukleus::Protocol::validateModelRouting(invalid));
     invalid = fixed; invalid.presets[0].name = QString(257, 'x');
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    QVERIFY(!Nukleus::Protocol::validateModelRouting(invalid));
     invalid = fixed;
-    while (invalid.presets.size() < KiraService::Protocol::MaximumGenerationPresets)
+    while (invalid.presets.size() < Nukleus::Protocol::MaximumGenerationPresets)
         invalid.presets.append({QString("extra-%1").arg(invalid.presets.size()), "Extra", {}, {}, {}, "Extra"});
-    QVERIFY(KiraService::Protocol::validateModelRouting(invalid));
+    QVERIFY(Nukleus::Protocol::validateModelRouting(invalid));
     invalid.presets.append({"one-too-many", "Extra", {}, {}, {}, "Extra"});
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    QVERIFY(!Nukleus::Protocol::validateModelRouting(invalid));
     invalid = fixed; invalid.presets[0].model.steps = 201;
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    QVERIFY(!Nukleus::Protocol::validateModelRouting(invalid));
     invalid = fixed; invalid.editingQualities[0].model.steps = 0;
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    QVERIFY(!Nukleus::Protocol::validateModelRouting(invalid));
     invalid = fixed; invalid.editingQualities[2].model.cfgScale = 101;
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    QVERIFY(!Nukleus::Protocol::validateModelRouting(invalid));
     invalid = fixed; invalid.editingQualities[0].isDefault = true;
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid)); // Exactly one default.
+    QVERIFY(!Nukleus::Protocol::validateModelRouting(invalid)); // Exactly one default.
     invalid = fixed; invalid.editingQualities[1].isDefault = false;
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    QVERIFY(!Nukleus::Protocol::validateModelRouting(invalid));
     invalid = fixed; invalid.editingQualities[0].name = "Rapid";
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid)); // Qualities stay fixed.
+    QVERIFY(!Nukleus::Protocol::validateModelRouting(invalid)); // Qualities stay fixed.
     invalid = fixed; invalid.editingQualities.removeLast();
-    QVERIFY(!KiraService::Protocol::validateModelRouting(invalid));
+    QVERIFY(!Nukleus::Protocol::validateModelRouting(invalid));
     for (const QJsonValue bad : {QJsonValue(1.5), QJsonValue("4"), QJsonValue(false)}) {
-        auto json = KiraService::Protocol::modelRoutingToJson(fixed);
+        auto json = Nukleus::Protocol::modelRoutingToJson(fixed);
         auto qualities = json.value("editingQualities").toArray();
         auto quality = qualities[0].toObject(); quality.insert("steps", bad); qualities[0] = quality;
         json.insert("editingQualities", qualities);
-        QVERIFY(!KiraService::Protocol::modelRoutingFromJson(json));
+        QVERIFY(!Nukleus::Protocol::modelRoutingFromJson(json));
     }
     // Versions 4 and 5 stored one editing assignment, copied into every quality.
-    auto version5 = KiraService::Protocol::modelRoutingToJson(fixed);
+    auto version5 = Nukleus::Protocol::modelRoutingToJson(fixed);
     version5.insert("version", 5);
     version5.remove("editingQualities");
     version5.insert("editing", QJsonObject{{"modelId", "image-generation:edit.gguf"}, {"steps", 12}, {"cfgScale", 2.25}});
-    const auto copied = KiraService::Protocol::modelRoutingFromJson(version5);
+    const auto copied = Nukleus::Protocol::modelRoutingFromJson(version5);
     QVERIFY(copied.has_value());
     for (const auto &quality : copied->editingQualities)
-        QCOMPARE(quality.model, (KiraService::ModelAssignment{"image-generation:edit.gguf", 12, 2.25}));
+        QCOMPARE(quality.model, (Nukleus::ModelAssignment{"image-generation:edit.gguf", 12, 2.25}));
     QCOMPARE(copied->defaultEditingQuality()->id, QString("edit-medium"));
     QTemporaryDir directory;
     QFile weights(directory.filePath("legacy.gguf"));
     QVERIFY(weights.open(QIODevice::WriteOnly)); weights.write("weights"); weights.close();
     ModelCatalog catalog(directory.path(), false);
     QString error;
-    auto options = KiraService::Protocol::defaultModelOptions("image-generation");
+    auto options = Nukleus::Protocol::defaultModelOptions("image-generation");
     options.insert("steps", 37); options.insert("cfgScale", 5.75);
     QVERIFY2(catalog.configure("image-generation:legacy.gguf", options, &error, {}, "Legacy"), qPrintable(error));
     const QJsonObject legacy{{"version", 1}, {"presets", QJsonArray{QJsonObject{
@@ -359,31 +360,31 @@ void ServiceTest::fixedRoutingLabelsAndLegacyMigration()
 void ServiceTest::configuresModelRoutingThroughSdk()
 {
     QTemporaryDir directory;
-    KiraServiceConfiguration configuration;
+    NukleusConfiguration configuration;
     configuration.port = 0; configuration.modelRootPath = directory.path();
-    KiraServiceDaemon daemon(configuration);
+    NukleusDaemon daemon(configuration);
     QString error; QVERIFY2(daemon.start(&error), qPrintable(error));
-    KiraService::ServiceClient client;
+    Nukleus::ServiceClient client;
     client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
     client.connectToService();
     QTRY_VERIFY(client.modelRouting().has_value());
     QVERIFY(client.capabilities().modelRouting);
-    KiraService::ServiceClient observer;
+    Nukleus::ServiceClient observer;
     observer.setConfiguration(client.endpoint(), {}); observer.connectToService();
     QTRY_VERIFY(observer.modelRouting().has_value());
-    QSignalSpy saved(&client, &KiraService::ServiceClient::modelRoutingConfigured);
+    QSignalSpy saved(&client, &Nukleus::ServiceClient::modelRoutingConfigured);
     auto routing = *client.modelRouting();
     routing.presets[0].positivePrefix = "realism";
     routing.presets[0].negativePrefix = "illustration";
     QVERIFY(client.configureModelRouting(routing));
     QTRY_COMPARE(saved.size(), 1);
-    QTRY_COMPARE(client.modelRouting(), std::optional<KiraService::ModelRouting>(routing));
-    QTRY_COMPARE(observer.modelRouting(), std::optional<KiraService::ModelRouting>(routing));
+    QTRY_COMPARE(client.modelRouting(), std::optional<Nukleus::ModelRouting>(routing));
+    QTRY_COMPARE(observer.modelRouting(), std::optional<Nukleus::ModelRouting>(routing));
     QVERIFY(!client.configureModelRouting({}));
     routing.presets[1].positivePrefix = "illustrated";
     QVERIFY(client.configureModelRouting(routing));
     QTRY_COMPARE(saved.size(), 2);
-    QTRY_COMPARE(client.modelRouting(), std::optional<KiraService::ModelRouting>(routing));
+    QTRY_COMPARE(client.modelRouting(), std::optional<Nukleus::ModelRouting>(routing));
 }
 
 void ServiceTest::keepsSingleDefaultPromptLlms()
@@ -393,25 +394,25 @@ void ServiceTest::keepsSingleDefaultPromptLlms()
     for (const auto &name : {"first.gguf", "second.gguf"}) {
         QFile file(directory.filePath(QString("llm/") + name)); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("llm");
     }
-    KiraServiceConfiguration configuration;
+    NukleusConfiguration configuration;
     configuration.port = 0; configuration.modelRootPath = directory.path();
-    KiraServiceDaemon daemon(configuration);
+    NukleusDaemon daemon(configuration);
     QString error; QVERIFY2(daemon.start(&error), qPrintable(error));
-    KiraService::ServiceClient client, observer;
+    Nukleus::ServiceClient client, observer;
     client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
     observer.setConfiguration(client.endpoint(), {});
     client.connectToService(); observer.connectToService();
     QTRY_VERIFY(client.modelListAvailable() && observer.modelListAvailable());
     QVERIFY(client.defaultPromptEnhancerModelId().isEmpty());
     QVERIFY(client.defaultPromptTranslatorModelId().isEmpty());
-    auto both = KiraService::Protocol::defaultModelOptions("llm-chat");
+    auto both = Nukleus::Protocol::defaultModelOptions("llm-chat");
     QVERIFY(!both.value("defaultPromptEnhancer").toBool() && !both.value("defaultPromptTranslator").toBool());
     both.insert("defaultPromptEnhancer", true); both.insert("defaultPromptTranslator", true);
     QVERIFY(client.configureModel("llm-chat:first.gguf", both, std::nullopt, QString("First")));
     QTRY_COMPARE(observer.defaultPromptEnhancerModelId(), QString("llm-chat:first.gguf"));
     QTRY_COMPARE(observer.defaultPromptTranslatorModelId(), QString("llm-chat:first.gguf"));
     // Taking one role moves only that role; the other stays on the first model.
-    auto enhancer = KiraService::Protocol::defaultModelOptions("llm-chat");
+    auto enhancer = Nukleus::Protocol::defaultModelOptions("llm-chat");
     enhancer.insert("defaultPromptEnhancer", true);
     QVERIFY(client.configureModel("llm-chat:second.gguf", enhancer, std::nullopt, QString("Second")));
     QTRY_COMPARE(observer.defaultPromptEnhancerModelId(), QString("llm-chat:second.gguf"));
@@ -425,7 +426,7 @@ void ServiceTest::keepsSingleDefaultPromptLlms()
     QVERIFY(restored.configure("llm-chat:second.gguf", enhancer, &error));
     QVERIFY(!restored.modelById("llm-chat:first.gguf")->recommendedOptions.value("defaultPromptEnhancer").toBool());
     enhancer.insert("defaultPromptTranslator", "yes");
-    QVERIFY(!KiraService::Protocol::validateModelOptions("llm-chat", enhancer));
+    QVERIFY(!Nukleus::Protocol::validateModelOptions("llm-chat", enhancer));
 }
 
 void ServiceTest::persistsPromptStyles()
@@ -445,7 +446,7 @@ void ServiceTest::persistsPromptStyles()
     initialMetadata.write(QJsonDocument(QJsonObject{{"test.gguf", "companions/test.gguf/vae.gguf"}, {"untouched.gguf", "legacy"}}).toJson());
     initialMetadata.close();
     QString error;
-    const QList<KiraService::PromptStyle> styles{{"custom", "Custom", " light ", " blur "}};
+    const QList<Nukleus::PromptStyle> styles{{"custom", "Custom", " light ", " blur "}};
     QVERIFY(catalog.configureStyles(id, styles, &error));
     ModelCatalog restarted(directory.path(), false);
     QCOMPARE(restarted.modelById(id)->styles, styles);
@@ -453,7 +454,7 @@ void ServiceTest::persistsPromptStyles()
     auto invalid = styles; invalid.append(styles.first());
     QVERIFY(!catalog.configureStyles(id, invalid, &error));
     QCOMPARE(catalog.modelById(id)->styles, styles);
-    auto options = KiraService::Protocol::defaultModelOptions("image-generation");
+    auto options = Nukleus::Protocol::defaultModelOptions("image-generation");
     options.insert("steps", 30);
     QVERIFY(configureNamed(catalog, id, options, &error, true));
     QCOMPARE(catalog.modelById(id)->styles, styles);
@@ -491,29 +492,29 @@ void ServiceTest::configuresStylesOverProtocol()
     QTemporaryDir directory;
     QFile model(directory.filePath("test.gguf"));
     QVERIFY(model.open(QIODevice::WriteOnly)); model.write("model"); model.close();
-    KiraServiceConfiguration configuration;
+    NukleusConfiguration configuration;
     configuration.port = 0; configuration.modelRootPath = directory.path();
-    KiraServiceDaemon service(configuration);
+    NukleusDaemon service(configuration);
     QString error; QVERIFY2(service.start(&error), qPrintable(error));
-    KiraService::ServiceClient owner, observer;
+    Nukleus::ServiceClient owner, observer;
     const QUrl endpoint(QString("ws://127.0.0.1:%1").arg(service.serverPort()));
     owner.setConfiguration(endpoint, {}); observer.setConfiguration(endpoint, {});
     owner.connectToService(); observer.connectToService();
     QTRY_VERIFY(owner.modelListAvailable() && observer.modelListAvailable());
-    QCOMPARE(observer.models(KiraService::ModelCategory::ImageGeneration).first().styles.size(), 3);
-    QSignalSpy completed(&owner, &KiraService::ServiceClient::modelStylesConfigured);
-    QSignalSpy failed(&owner, &KiraService::ServiceClient::modelOperationFailed);
-    const QList<KiraService::PromptStyle> styles{{"custom", "Custom", "positive", ""}};
+    QCOMPARE(observer.models(Nukleus::ModelCategory::ImageGeneration).first().styles.size(), 3);
+    QSignalSpy completed(&owner, &Nukleus::ServiceClient::modelStylesConfigured);
+    QSignalSpy failed(&owner, &Nukleus::ServiceClient::modelOperationFailed);
+    const QList<Nukleus::PromptStyle> styles{{"custom", "Custom", "positive", ""}};
     QVERIFY(owner.configureModelStyles("image-generation:test.gguf", styles));
     QTRY_COMPARE(completed.size(), 1);
-    QTRY_COMPARE(observer.models(KiraService::ModelCategory::ImageGeneration).first().styles, styles);
+    QTRY_COMPARE(observer.models(Nukleus::ModelCategory::ImageGeneration).first().styles, styles);
     QVERIFY(owner.configureModelStyles("upscaler:test.gguf", styles));
     QTRY_COMPARE(failed.size(), 1);
-    QCOMPARE(observer.models(KiraService::ModelCategory::ImageGeneration).first().styles, styles);
+    QCOMPARE(observer.models(Nukleus::ModelCategory::ImageGeneration).first().styles, styles);
     QVERIFY(owner.configureModelStyles("image-generation:test.gguf", {}));
     QTRY_COMPARE(completed.size(), 2);
-    QTRY_VERIFY(observer.models(KiraService::ModelCategory::ImageGeneration).first().styles.isEmpty());
-    const auto validStyles = KiraService::Protocol::promptStylesToJson(styles);
+    QTRY_VERIFY(observer.models(Nukleus::ModelCategory::ImageGeneration).first().styles.isEmpty());
+    const auto validStyles = Nukleus::Protocol::promptStylesToJson(styles);
     const QList<QJsonValue> invalidLists{QJsonObject{}, QJsonArray{validStyles.first(), validStyles.first()},
         QJsonArray{QJsonObject{{"id", "invalid"}, {"name", "Invalid"}, {"positivePrefix", true}, {"negativePrefix", ""}}}};
     auto *socket = owner.findChild<QWebSocket *>();
@@ -524,7 +525,7 @@ void ServiceTest::configuresStylesOverProtocol()
             {"id", "image-generation:test.gguf"}, {"styles", invalid}}).toJson()));
         ++failureCount;
         QTRY_COMPARE(failed.size(), failureCount);
-        QVERIFY(observer.models(KiraService::ModelCategory::ImageGeneration).first().styles.isEmpty());
+        QVERIFY(observer.models(Nukleus::ModelCategory::ImageGeneration).first().styles.isEmpty());
     }
 }
 
@@ -553,26 +554,26 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
         [oldPath]
         {
             qputenv("PATH", oldPath);
-            qunsetenv("KIRA_TEST_ARGS");
-            qunsetenv("KIRA_TEST_IMAGE");
+            qunsetenv("NUKLEUS_TEST_ARGS");
+            qunsetenv("NUKLEUS_TEST_IMAGE");
         });
     qputenv("PATH", directory.path().toUtf8() + ':' + oldPath);
     const QString capture = directory.filePath("args.txt");
-    qputenv("KIRA_TEST_ARGS", capture.toUtf8());
+    qputenv("NUKLEUS_TEST_ARGS", capture.toUtf8());
     const QByteArray image = QByteArray::fromBase64(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1kAAAAASUVORK5CYII=");
     QFile imageFile(directory.filePath("fixture.png"));
     QVERIFY(imageFile.open(QIODevice::WriteOnly));
     imageFile.write(image);
     imageFile.close();
-    qputenv("KIRA_TEST_IMAGE", imageFile.fileName().toUtf8());
+    qputenv("NUKLEUS_TEST_IMAGE", imageFile.fileName().toUtf8());
     QFile executable(directory.filePath("sd-cli"));
     QVERIFY(executable.open(QIODevice::WriteOnly));
     executable.write("#!/bin/sh\n"
-                     "printf '%s\\n' \"$@\" > \"$KIRA_TEST_ARGS\"\nprevious=\"\"\nfor argument in "
-                     "\"$@\"; do\n if [ \"$previous\" = --output ]; then cp \"$KIRA_TEST_IMAGE\" "
+                     "printf '%s\\n' \"$@\" > \"$NUKLEUS_TEST_ARGS\"\nprevious=\"\"\nfor argument in "
+                     "\"$@\"; do\n if [ \"$previous\" = --output ]; then cp \"$NUKLEUS_TEST_IMAGE\" "
                      "\"$argument\"; fi\n"
-                     " if [ \"$previous\" = --ref-image ]; then cp \"$argument\" \"$KIRA_TEST_ARGS.source\"; fi\n previous=\"$argument\"\ndone\nexit 0\n");
+                     " if [ \"$previous\" = --ref-image ]; then cp \"$argument\" \"$NUKLEUS_TEST_ARGS.source\"; fi\n previous=\"$argument\"\ndone\nexit 0\n");
     executable.close();
     QVERIFY(executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
     const QString root = directory.filePath("models");
@@ -612,11 +613,11 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QVERIFY(editMetadata.open(QIODevice::WriteOnly));
     editMetadata.write(QJsonDocument(editEntries).toJson());
     editMetadata.close();
-    KiraServiceConfiguration configuration;
+    NukleusConfiguration configuration;
     configuration.port = 0;
     configuration.modelRootPath = root;
     configuration.maximumImageBytes = 1024;
-    KiraServiceDaemon service(configuration);
+    NukleusDaemon service(configuration);
     QString error;
     QVERIFY2(service.start(&error), qPrintable(error));
     QWebSocket socket;
@@ -830,22 +831,22 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QTRY_VERIFY(terminal("ignored-references"));
     QCOMPARE(messages.last().value("code").toString(), QString("invalid-request"));
     QCOMPARE(images.count(), 2);
-    KiraService::ServiceClient capabilityClient;
+    Nukleus::ServiceClient capabilityClient;
     capabilityClient.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(service.serverPort())), {});
     capabilityClient.connectToService();
     QTRY_VERIFY(capabilityClient.modelListAvailable());
-    QVERIFY(capabilityClient.canSubmit(KiraService::ImageOperation::Generate, "image-generation:model.gguf"));
-    QVERIFY(!capabilityClient.canSubmit(KiraService::ImageOperation::Edit, "image-generation:model.gguf"));
+    QVERIFY(capabilityClient.canSubmit(Nukleus::ImageOperation::Generate, "image-generation:model.gguf"));
+    QVERIFY(!capabilityClient.canSubmit(Nukleus::ImageOperation::Edit, "image-generation:model.gguf"));
     ModelCatalog capabilityCatalog(root, true);
-    auto capabilities = KiraService::Protocol::defaultModelOptions("image-generation");
+    auto capabilities = Nukleus::Protocol::defaultModelOptions("image-generation");
     capabilities.insert("canGenerate", false);
     capabilities.insert("canEdit", true);
     capabilities.insert("vaeModelId", "companion:shared-vae.gguf");
     capabilities.insert("textEncoderModelId", "llm-chat:shared-encoder.gguf");
     QVERIFY(configureNamed(capabilityCatalog, "image-generation:model.gguf", capabilities, &error));
     capabilityClient.requestModels();
-    QTRY_VERIFY(!capabilityClient.canSubmit(KiraService::ImageOperation::Generate, "image-generation:model.gguf"));
-    QVERIFY(capabilityClient.canSubmit(KiraService::ImageOperation::Edit, "image-generation:model.gguf"));
+    QTRY_VERIFY(!capabilityClient.canSubmit(Nukleus::ImageOperation::Generate, "image-generation:model.gguf"));
+    QVERIFY(capabilityClient.canSubmit(Nukleus::ImageOperation::Edit, "image-generation:model.gguf"));
     messages.clear(); send("disabled-generation", valid);
     QTRY_VERIFY(terminal("disabled-generation"));
     QCOMPARE(messages.last().value("code").toString(), QString("model-unavailable"));
@@ -981,7 +982,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
         QTRY_VERIFY(terminal("invalid-style"));
         QCOMPARE(messages.last().value("code").toString(), QString("invalid-request"));
     }
-    auto routing = KiraService::Protocol::starterModelRouting();
+    auto routing = Nukleus::Protocol::starterModelRouting();
     routing.presets[0].positivePrefix = "  realism  ";
     routing.presets[0].negativePrefix = "  cartoon  ";
     routing.presets[0].model = {"image-generation:plain.gguf", 4, 1.0};
@@ -1054,7 +1055,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
         QTRY_VERIFY(terminal("unrouted-edit"));
         QCOMPARE(messages.last().value("code").toString(), QString("model-routing-unavailable"));
     }
-    QVERIFY(styleCatalog.configureRouting(KiraService::Protocol::starterModelRouting(), &error));
+    QVERIFY(styleCatalog.configureRouting(Nukleus::Protocol::starterModelRouting(), &error));
 
     QVERIFY(executable.open(QIODevice::WriteOnly | QIODevice::Truncate));
     executable.write("#!/bin/sh\nprintf 'Klein fixture failure\\n' >&2\nexit 17\n");
@@ -1078,7 +1079,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QVERIFY(executable.open(QIODevice::WriteOnly | QIODevice::Truncate));
     executable.write("#!/bin/sh\nprintf '[WARN] Failed to allocate pinned memory: ErrorOutOfDeviceMemory\\n'\n"
         "previous=\"\"\nfor argument in \"$@\"; do\n"
-        "if [ \"$previous\" = --output ]; then cp \"$KIRA_TEST_IMAGE\" \"$argument\"; fi\n"
+        "if [ \"$previous\" = --output ]; then cp \"$NUKLEUS_TEST_IMAGE\" \"$argument\"; fi\n"
         "previous=\"$argument\"\ndone\nexit 0\n");
     executable.close();
     messages.clear();
@@ -1100,7 +1101,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
 
 void ServiceTest::reportsTheRunningSamplingStep()
 {
-    using Stage = KiraService::GenerationProgressStage;
+    using Stage = Nukleus::GenerationProgressStage;
     SdCliProgressParser parser;
     parser.begin(4);
     // Printed while loading the VAE; it is not the decoding stage.
@@ -1146,9 +1147,9 @@ void ServiceTest::readsProgressBeforeTheLineEnds()
     executable.close();
     QVERIFY(executable.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
     SdCliRunner runner(executable.fileName());
-    QList<KiraService::GenerationProgress> progress;
+    QList<Nukleus::GenerationProgress> progress;
     connect(&runner, &SdCliRunner::generationProgressChanged, this,
-            [&](const KiraService::GenerationProgress &value) { progress.append(value); });
+            [&](const Nukleus::GenerationProgress &value) { progress.append(value); });
     GenerationRequest request;
     request.steps = 2;
     request.modelPath = directory.filePath("model.gguf");
@@ -1164,7 +1165,7 @@ void ServiceTest::readsProgressBeforeTheLineEnds()
 
 void ServiceTest::validatesRecommendedOptions()
 {
-    using namespace KiraService::Protocol;
+    using namespace Nukleus::Protocol;
     for (const auto& category : {"image-generation", "llm-chat", "upscaler"}) {
         auto options = defaultModelOptions(category);
         QVERIFY(validateModelOptions(category, options));
@@ -1194,7 +1195,7 @@ void ServiceTest::validatesRecommendedOptions()
     format.insert("promptFormat", "prose"); QVERIFY(!validateModelOptions("image-generation", format));
     format.insert("promptFormat", 1); QVERIFY(!validateModelOptions("image-generation", format));
     format.remove("promptFormat"); QVERIFY(validateModelOptions("image-generation", format));
-    QCOMPARE(KiraService::ModelInfo{}.promptFormat(), QString("phrases"));
+    QCOMPARE(Nukleus::ModelInfo{}.promptFormat(), QString("phrases"));
     auto llm = defaultModelOptions("llm-chat");
     llm.insert("canBeTextEncoder", "yes"); QVERIFY(!validateModelOptions("llm-chat", llm));
     llm.insert("canBeTextEncoder", true); QVERIFY(validateModelOptions("llm-chat", llm));
@@ -1218,12 +1219,12 @@ void ServiceTest::assignsImageReferencesAndProtectsSharedModels()
     QVERIFY(catalog.install(request, &error)); QTRY_COMPARE(installed.count(), 1);
     request.installId = "encoder"; request.category = ModelCategory::LlmChat;
     request.url = source.url("encoder.gguf"); request.displayName = "Encoder";
-    auto llm = KiraService::Protocol::defaultModelOptions("llm-chat");
+    auto llm = Nukleus::Protocol::defaultModelOptions("llm-chat");
     llm.insert("canBeTextEncoder", true); request.recommendedOptions = llm;
     QVERIFY(catalog.install(request, &error)); QTRY_COMPARE(installed.count(), 2);
     request.installId = "image"; request.category = ModelCategory::ImageGeneration;
     request.url = source.url("image.gguf"); request.displayName = "Image";
-    auto image = KiraService::Protocol::defaultModelOptions("image-generation");
+    auto image = Nukleus::Protocol::defaultModelOptions("image-generation");
     image.insert("canGenerate", false);
     image.insert("vaeModelId", "llm-chat:encoder.gguf"); request.recommendedOptions = image;
     QVERIFY(!catalog.install(request, &error));
@@ -1258,7 +1259,7 @@ void ServiceTest::persistsOptionsAndLegacyMetadata()
     ModelCatalog catalog(directory.path(), true); const QString id = "image-generation:legacy.gguf";
     QVERIFY(catalog.modelById(id)); QVERIFY(catalog.modelById(id)->recommendedOptions.isEmpty());
     QVERIFY(!catalog.modelById(id)->explicitContent);
-    const auto options = KiraService::Protocol::defaultModelOptions("image-generation"); QString error;
+    const auto options = Nukleus::Protocol::defaultModelOptions("image-generation"); QString error;
     QVERIFY2(configureNamed(catalog, id, options, &error, true), qPrintable(error));
     QVERIFY(catalog.modelById(id)->explicitContent);
     QVERIFY(configureNamed(catalog, id, options, &error));
@@ -1290,8 +1291,8 @@ void ServiceTest::reservesSingleInstallAndCancels()
     QVERIFY(installNamed(catalog, {"first", ModelCategory::Upscaler, server.url(), {}}, &error)); QVERIFY(catalog.isInstalling());
     QVERIFY(!installNamed(catalog, {"second", ModelCategory::Upscaler, server.url("other.gguf"), {}}, &error));
     catalog.cancel("first"); QCOMPARE(canceled.count(), 1); QVERIFY(!catalog.isInstalling());
-    QVERIFY(installNamed(catalog, {"third", ModelCategory::Upscaler, server.url(), {}, KiraService::Protocol::defaultModelOptions("upscaler")}, &error));
-    QTRY_COMPARE(completed.count(), 1); QCOMPARE(catalog.models(ModelCategory::Upscaler).first().recommendedOptions, KiraService::Protocol::defaultModelOptions("upscaler"));
+    QVERIFY(installNamed(catalog, {"third", ModelCategory::Upscaler, server.url(), {}, Nukleus::Protocol::defaultModelOptions("upscaler")}, &error));
+    QTRY_COMPARE(completed.count(), 1); QCOMPARE(catalog.models(ModelCategory::Upscaler).first().recommendedOptions, Nukleus::Protocol::defaultModelOptions("upscaler"));
     QVERIFY(!QFileInfo::exists(directory.filePath("upscale/model.gguf.part")));
 }
 
@@ -1299,7 +1300,7 @@ void ServiceTest::cancelsDuringCompanionDownload()
 {
     TestHttpServer server("model"); QVERIFY(server.start()); QTemporaryDir directory; ModelCatalog catalog(directory.path(), true);
     QSignalSpy canceled(&catalog, &ModelCatalog::installCanceled); QSignalSpy completed(&catalog, &ModelCatalog::installFinished); QSignalSpy progress(&catalog, &ModelCatalog::installProgress); QString error;
-    QVERIFY(installNamed(catalog, {"pair", ModelCategory::ImageGeneration, server.url(), server.url("slow.gguf"), KiraService::Protocol::defaultModelOptions("image-generation")}, &error));
+    QVERIFY(installNamed(catalog, {"pair", ModelCategory::ImageGeneration, server.url(), server.url("slow.gguf"), Nukleus::Protocol::defaultModelOptions("image-generation")}, &error));
     const auto companionStarted = [&progress] {
         for (const auto &event : progress) if (event.first().value<ModelInstallProgress>().fileRole == "companion") return true;
         return false;
@@ -1313,7 +1314,7 @@ void ServiceTest::rollsBackMetadataFailure()
 {
     TestHttpServer server("model"); QVERIFY(server.start()); QTemporaryDir directory; ModelCatalog catalog(directory.path(), true);
     QSignalSpy failed(&catalog, &ModelCatalog::installFailed); QSignalSpy completed(&catalog, &ModelCatalog::installFinished); QString error;
-    QVERIFY(installNamed(catalog, {"broken", ModelCategory::ImageGeneration, server.url(), server.url("vae.gguf"), KiraService::Protocol::defaultModelOptions("image-generation")}, &error));
+    QVERIFY(installNamed(catalog, {"broken", ModelCategory::ImageGeneration, server.url(), server.url("vae.gguf"), Nukleus::Protocol::defaultModelOptions("image-generation")}, &error));
     QVERIFY(QDir().mkpath(directory.filePath("metadata.json")));
     QTRY_COMPARE(failed.count(), 1); QCOMPARE(completed.count(), 0); QVERIFY(catalog.models(ModelCategory::ImageGeneration).isEmpty());
     QVERIFY(!QFileInfo::exists(directory.filePath("model.gguf"))); QVERIFY(!QFileInfo::exists(directory.filePath("companions/model.gguf/vae.gguf")));
@@ -1322,11 +1323,11 @@ void ServiceTest::rollsBackMetadataFailure()
 void ServiceTest::configuresModelsOverProtocol()
 {
     QTemporaryDir directory; QFile model(directory.filePath("test.gguf")); QVERIFY(model.open(QIODevice::WriteOnly)); model.write("model"); model.close();
-    KiraServiceConfiguration configuration; configuration.port = 0; configuration.modelRootPath = directory.path(); KiraServiceDaemon service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
+    NukleusConfiguration configuration; configuration.port = 0; configuration.modelRootPath = directory.path(); NukleusDaemon service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
     QWebSocket client; QSignalSpy received(&client, &QWebSocket::textMessageReceived); client.open(QUrl(QString("ws://127.0.0.1:%1").arg(service.serverPort()))); QTRY_COMPARE(client.state(), QAbstractSocket::ConnectedState);
     const auto send = [&client](const QJsonObject &object) { client.sendTextMessage(QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact))); };
     send({{"type", "authenticate"}, {"version", 3}}); QTRY_VERIFY(received.count() >= 2); received.clear();
-    const auto options = KiraService::Protocol::defaultModelOptions("image-generation");
+    const auto options = Nukleus::Protocol::defaultModelOptions("image-generation");
     send({{"type", "models.configure"}, {"displayName", "Fixture model"}, {"id", "image-generation:test.gguf"}, {"recommendedOptions", options}, {"explicitContent", true}});
     QTRY_COMPARE(received.count(), 1);
     auto response = QJsonDocument::fromJson(received.takeFirst().first().toString().toUtf8()).object();
@@ -1370,8 +1371,8 @@ void ServiceTest::configuresModelsOverProtocol()
 
 void ServiceTest::preservesProtocolV3()
 {
-    QCOMPARE(KiraService::Protocol::Version, 3);
-    QCOMPARE(KiraService::Protocol::DefaultPort, quint16(9384));
+    QCOMPARE(Nukleus::Protocol::Version, 3);
+    QCOMPARE(Nukleus::Protocol::DefaultPort, quint16(9384));
 }
 
 void ServiceTest::requiresNamesAndAssignsSharedMmproj()
@@ -1407,7 +1408,7 @@ void ServiceTest::requiresNamesAndAssignsSharedMmproj()
     llm.category = ModelCategory::LlmChat;
     llm.url = source.url("chat.gguf");
     llm.displayName = "Chat";
-    llm.recommendedOptions = KiraService::Protocol::defaultModelOptions("llm-chat");
+    llm.recommendedOptions = Nukleus::Protocol::defaultModelOptions("llm-chat");
     llm.mmprojModelId = "companion:vae.safetensors";
     QVERIFY(!catalog.install(llm, &error));
     llm.mmprojModelId = projectorId;
@@ -1419,18 +1420,18 @@ void ServiceTest::requiresNamesAndAssignsSharedMmproj()
     QVERIFY(QFileInfo::exists(directory.filePath("companion/projector.gguf")));
     QVERIFY(!restored.configure(projectorId, {{"subtype", "vae"}}, &error));
     QVERIFY(!restored.configure("llm-chat:chat.gguf", *llm.recommendedOptions, &error, {}, QString()));
-    KiraServiceConfiguration configuration;
+    NukleusConfiguration configuration;
     configuration.port = 0;
     configuration.modelRootPath = directory.path();
-    KiraServiceDaemon daemon(configuration);
+    NukleusDaemon daemon(configuration);
     QVERIFY(daemon.start());
-    KiraService::ServiceClient client;
+    Nukleus::ServiceClient client;
     client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
     client.connectToService();
-    QTRY_COMPARE(client.models(KiraService::ModelCategory::Companion).size(), 2);
-    QCOMPARE(client.models(KiraService::ModelCategory::LlmChat).first().mmprojModelId, projectorId);
+    QTRY_COMPARE(client.models(Nukleus::ModelCategory::Companion).size(), 2);
+    QCOMPARE(client.models(Nukleus::ModelCategory::LlmChat).first().mmprojModelId, projectorId);
     QVERIFY(client.configureModel("llm-chat:chat.gguf", *llm.recommendedOptions, {}, {}, QString()));
-    QTRY_VERIFY(client.models(KiraService::ModelCategory::LlmChat).first().mmprojModelId.isEmpty());
+    QTRY_VERIFY(client.models(Nukleus::ModelCategory::LlmChat).first().mmprojModelId.isEmpty());
     QVERIFY(restored.remove(projectorId, &error));
     QVERIFY(QFileInfo::exists(directory.filePath("llm/chat.gguf")));
     QVERIFY(QFileInfo::exists(directory.filePath("companion/vae.safetensors")));
@@ -1446,16 +1447,16 @@ void ServiceTest::rejectsRetiredCategoriesAndOperations()
         QVERIFY(file.open(QIODevice::WriteOnly));
         file.write("existing model");
         QVERIFY(!ModelCatalog::categoryFromName(category));
-        QVERIFY(KiraService::Protocol::defaultModelOptions(category).isEmpty());
+        QVERIFY(Nukleus::Protocol::defaultModelOptions(category).isEmpty());
     }
     ModelCatalog catalog(directory.path(), false);
     QCOMPARE(ModelCatalog::categories().size(), 4);
     for (const auto& category : retired)
         QVERIFY(QFileInfo::exists(directory.filePath(category + "/model.gguf")));
-    KiraServiceConfiguration configuration;
+    NukleusConfiguration configuration;
     configuration.port = 0;
     configuration.modelRootPath = directory.path();
-    KiraServiceDaemon service(configuration);
+    NukleusDaemon service(configuration);
     QVERIFY(service.start());
     QWebSocket client;
     QSignalSpy messages(&client, &QWebSocket::textMessageReceived);
@@ -1479,8 +1480,8 @@ void ServiceTest::rejectsLanWithoutToken()
     const QHostAddress lan = availableLanAddress();
     if (lan.isNull()) QSKIP("No non-loopback IPv4 address is available");
     QTemporaryDir directory; QVERIFY(directory.isValid());
-    KiraServiceConfiguration configuration; configuration.listenAddress = lan; configuration.port = 0; configuration.modelRootPath = directory.path();
-    KiraServiceDaemon service(configuration); QString error;
+    NukleusConfiguration configuration; configuration.listenAddress = lan; configuration.port = 0; configuration.modelRootPath = directory.path();
+    NukleusDaemon service(configuration); QString error;
     QVERIFY(!service.start(&error)); QVERIFY(error.contains(QStringLiteral("token"), Qt::CaseInsensitive));
 }
 
@@ -1489,8 +1490,8 @@ void ServiceTest::startsOnLoopbackAndLanAddress()
     const QHostAddress lan = availableLanAddress();
     if (lan.isNull()) QSKIP("No non-loopback IPv4 address is available");
     QTemporaryDir directory; QVERIFY(directory.isValid());
-    KiraServiceConfiguration configuration; configuration.listenAddress = lan; configuration.port = 0; configuration.token = QStringLiteral("lan-secret"); configuration.modelRootPath = directory.path();
-    KiraServiceDaemon service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
+    NukleusConfiguration configuration; configuration.listenAddress = lan; configuration.port = 0; configuration.token = QStringLiteral("lan-secret"); configuration.modelRootPath = directory.path();
+    NukleusDaemon service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
     QTcpSocket local; local.connectToHost(QHostAddress(QStringLiteral("127.0.0.1")), service.serverPort()); QVERIFY(local.waitForConnected(1000));
     QTcpSocket network; network.connectToHost(lan, service.serverPort()); QVERIFY(network.waitForConnected(1000));
 }
@@ -1498,8 +1499,8 @@ void ServiceTest::startsOnLoopbackAndLanAddress()
 void ServiceTest::authenticatesLoopbackWithoutToken()
 {
     QTemporaryDir directory; QVERIFY(directory.isValid());
-    KiraServiceConfiguration configuration; configuration.listenAddress = QHostAddress(QStringLiteral("127.0.0.1")); configuration.port = 0; configuration.token = QStringLiteral("lan-secret"); configuration.modelRootPath = directory.path();
-    KiraServiceDaemon service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
+    NukleusConfiguration configuration; configuration.listenAddress = QHostAddress(QStringLiteral("127.0.0.1")); configuration.port = 0; configuration.token = QStringLiteral("lan-secret"); configuration.modelRootPath = directory.path();
+    NukleusDaemon service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
     QWebSocket client; QSignalSpy messages(&client, &QWebSocket::textMessageReceived);
     client.open(QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(service.serverPort()))); QTRY_VERIFY_WITH_TIMEOUT(client.state() == QAbstractSocket::ConnectedState, 1000);
     client.sendTextMessage(QStringLiteral("{\"type\":\"authenticate\",\"version\":3,\"token\":\"\"}"));
@@ -1514,8 +1515,8 @@ void ServiceTest::rejectsLanAuthenticationWithoutToken()
     const QHostAddress lan = availableLanAddress();
     if (lan.isNull()) QSKIP("No non-loopback IPv4 address is available");
     QTemporaryDir directory; QVERIFY(directory.isValid());
-    KiraServiceConfiguration configuration; configuration.listenAddress = lan; configuration.port = 0; configuration.token = QStringLiteral("lan-secret"); configuration.modelRootPath = directory.path();
-    KiraServiceDaemon service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
+    NukleusConfiguration configuration; configuration.listenAddress = lan; configuration.port = 0; configuration.token = QStringLiteral("lan-secret"); configuration.modelRootPath = directory.path();
+    NukleusDaemon service(configuration); QString error; QVERIFY2(service.start(&error), qPrintable(error));
     QWebSocket client; QSignalSpy messages(&client, &QWebSocket::textMessageReceived);
     client.open(QUrl(QStringLiteral("ws://%1:%2").arg(lan.toString()).arg(service.serverPort()))); QTRY_VERIFY_WITH_TIMEOUT(client.state() == QAbstractSocket::ConnectedState, 1000);
     client.sendTextMessage(QStringLiteral("{\"type\":\"authenticate\",\"version\":3,\"token\":\"\"}"));
@@ -1534,8 +1535,8 @@ void ServiceTest::rollsBackWhenLanListenerFails()
     if (lan.isNull()) QSKIP("No non-loopback IPv4 address is available");
     QTcpServer blocker; QVERIFY(blocker.listen(lan, 0));
     QTemporaryDir directory; QVERIFY(directory.isValid());
-    KiraServiceConfiguration configuration; configuration.listenAddress = lan; configuration.port = blocker.serverPort(); configuration.token = QStringLiteral("lan-secret"); configuration.modelRootPath = directory.path();
-    KiraServiceDaemon service(configuration); QString error; QVERIFY(!service.start(&error));
+    NukleusConfiguration configuration; configuration.listenAddress = lan; configuration.port = blocker.serverPort(); configuration.token = QStringLiteral("lan-secret"); configuration.modelRootPath = directory.path();
+    NukleusDaemon service(configuration); QString error; QVERIFY(!service.start(&error));
     QTcpSocket local; local.connectToHost(QHostAddress(QStringLiteral("127.0.0.1")), blocker.serverPort()); QVERIFY(!local.waitForConnected(100));
 }
 
@@ -1591,26 +1592,26 @@ void ServiceTest::routesPresetGenerationWithoutLlm()
     ModelCatalog catalog(root, false);
     QString error;
     QVERIFY2(configureNamed(catalog, "image-generation:image.gguf",
-        KiraService::Protocol::defaultModelOptions("image-generation"), &error), qPrintable(error));
+        Nukleus::Protocol::defaultModelOptions("image-generation"), &error), qPrintable(error));
     QVERIFY2(configureNamed(catalog, "llm-chat:chat.gguf",
-        KiraService::Protocol::defaultModelOptions("llm-chat"), &error), qPrintable(error));
-    auto routing = KiraService::Protocol::starterModelRouting();
+        Nukleus::Protocol::defaultModelOptions("llm-chat"), &error), qPrintable(error));
+    auto routing = Nukleus::Protocol::starterModelRouting();
     routing.presets[1].positivePrefix = "illustration";
     routing.presets[1].negativePrefix = "lowres";
     routing.presets[1].model.modelId = "image-generation:image.gguf";
     routing.editingQualities[0].model.modelId = "image-generation:image.gguf";
     QVERIFY2(catalog.configureRouting(routing, &error), qPrintable(error));
-    KiraServiceConfiguration configuration;
+    NukleusConfiguration configuration;
     configuration.port = 0; configuration.modelRootPath = root;
     configuration.llamaCompletion = directory.filePath("completion");
-    KiraServiceDaemon daemon(configuration);
+    NukleusDaemon daemon(configuration);
     QVERIFY2(daemon.start(&error), qPrintable(error));
-    KiraService::ServiceClient client;
+    Nukleus::ServiceClient client;
     client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
-    QSignalSpy finished(&client, &KiraService::ServiceClient::imageJobFinished);
+    QSignalSpy finished(&client, &Nukleus::ServiceClient::imageJobFinished);
     client.connectToService();
-    QTRY_VERIFY(client.modelRouting().has_value() && client.canSubmit(KiraService::ImageOperation::Generate, "image-generation:image.gguf"));
-    KiraService::ImageGenerationRequest request;
+    QTRY_VERIFY(client.modelRouting().has_value() && client.canSubmit(Nukleus::ImageOperation::Generate, "image-generation:image.gguf"));
+    Nukleus::ImageGenerationRequest request;
     request.prompt = "  un chat roux  ";
     request.negativePrompt = "blurry";
     request.presetId = "illustration";
@@ -1625,7 +1626,7 @@ void ServiceTest::routesPresetGenerationWithoutLlm()
     };
     const auto takeResult = [&] {
         [&] { QTRY_COMPARE(finished.count(), 1); }();
-        return qvariant_cast<KiraService::ImageJobResult>(finished.takeFirst().at(0));
+        return qvariant_cast<Nukleus::ImageJobResult>(finished.takeFirst().at(0));
     };
     QVERIFY(!client.submitGeneration(request).isEmpty());
     auto result = takeResult();
@@ -1638,7 +1639,7 @@ void ServiceTest::routesPresetGenerationWithoutLlm()
     QVERIFY(!QFileInfo::exists(directory.filePath("llm-called")));
     request.qualityId = "edit-low";
     QVERIFY(client.submitGeneration(request).isEmpty()); // Generation is routed by preset only.
-    KiraService::ImageGenerationRequest edit;
+    Nukleus::ImageGenerationRequest edit;
     edit.qualityId = "edit-low";
     edit.prompt = "make it blue";
     edit.width = 512; edit.height = 512;
@@ -1654,7 +1655,7 @@ void ServiceTest::routesPresetGenerationWithoutLlm()
 
 void ServiceTest::enhancesPromptThroughSdk()
 {
-    using namespace KiraService::Protocol;
+    using namespace Nukleus::Protocol;
     QTemporaryDir directory;
     QVERIFY(QDir(directory.path()).mkpath("llm"));
     for (const auto& name : {"llm.gguf"}) {
@@ -1680,24 +1681,24 @@ void ServiceTest::enhancesPromptThroughSdk()
         "printf 'warning on stderr\\n' >&2\nprintf '  portrait détaillé\\n [end of text]\\n'\n");
     executable.close();
     QVERIFY(executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
-    KiraServiceConfiguration configuration;
+    NukleusConfiguration configuration;
     configuration.port = 0; configuration.modelRootPath = directory.path();
     configuration.llamaCompletion = executablePath;
     // Without llama-server, prompt.enhance falls back to llama-completion.
     configuration.llamaServer = directory.filePath("missing-llama-server");
     configuration.promptEnhancementTimeoutMs = 400;
-    KiraServiceDaemon daemon(configuration); QString error;
+    NukleusDaemon daemon(configuration); QString error;
     QVERIFY2(daemon.start(&error), qPrintable(error));
-    KiraService::ServiceClient client;
+    Nukleus::ServiceClient client;
     client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
-    QSignalSpy finished(&client, &KiraService::ServiceClient::promptEnhancementFinished);
-    QSignalSpy imageFinished(&client, &KiraService::ServiceClient::imageJobFinished);
+    QSignalSpy finished(&client, &Nukleus::ServiceClient::promptEnhancementFinished);
+    QSignalSpy imageFinished(&client, &Nukleus::ServiceClient::imageJobFinished);
     client.connectToService();
     QTRY_VERIFY(client.canEnhancePrompt("llm-chat:llm.gguf"));
     QVERIFY(client.enhancePrompt({"missing", "person", {}}).isEmpty());
     QVERIFY(!client.enhancePrompt({"llm-chat:llm.gguf", "  ", {}}).isEmpty());
     QTRY_COMPARE(finished.count(), 1);
-    QVERIFY(qvariant_cast<KiraService::PromptEnhancementResult>(finished.takeFirst().at(0)).succeeded);
+    QVERIFY(qvariant_cast<Nukleus::PromptEnhancementResult>(finished.takeFirst().at(0)).succeeded);
     QFile emptyInput(directory.filePath("input"));
     QVERIFY(emptyInput.open(QIODevice::ReadOnly));
     QVERIFY(emptyInput.readAll().contains("Generate a new description"));
@@ -1705,7 +1706,7 @@ void ServiceTest::enhancesPromptThroughSdk()
     auto id = client.enhancePrompt({"llm-chat:llm.gguf", prompt, {{"maxTokens", 80}, {"temperature", 0}, {"systemPrompt", "Keep the description in French."}}});
     QVERIFY(!id.isEmpty());
     QTRY_COMPARE(finished.count(), 1);
-    auto result = qvariant_cast<KiraService::PromptEnhancementResult>(finished.takeFirst().at(0));
+    auto result = qvariant_cast<Nukleus::PromptEnhancementResult>(finished.takeFirst().at(0));
     QVERIFY2(result.succeeded, qPrintable(result.message));
     QCOMPARE(result.jobId, id); QCOMPARE(result.prompt, QString("portrait détaillé"));
     QCOMPARE(imageFinished.count(), 0);
@@ -1724,10 +1725,10 @@ void ServiceTest::enhancesPromptThroughSdk()
     // The instructions open the single user message, followed by the prompt.
     QCOMPARE(QString::fromUtf8(read("input")), "Keep the description in French.\n\n" + prompt);
     QVERIFY(!arguments.contains("--system-prompt-file"));
-    const auto expectFailure = [&](const KiraService::PromptEnhancementRequest& request, const QString& code) {
+    const auto expectFailure = [&](const Nukleus::PromptEnhancementRequest& request, const QString& code) {
         QVERIFY(!client.enhancePrompt(request).isEmpty());
         QTRY_COMPARE(finished.count(), 1);
-        const auto failure = qvariant_cast<KiraService::PromptEnhancementResult>(finished.takeFirst().at(0));
+        const auto failure = qvariant_cast<Nukleus::PromptEnhancementResult>(finished.takeFirst().at(0));
         QVERIFY(!failure.succeeded); QCOMPARE(failure.errorCode, code); QVERIFY(failure.prompt.isEmpty());
     };
     expectFailure({"llm-chat:llm.gguf", "person", {{"unknownOption", true}}}, "invalid-request");
@@ -1736,7 +1737,7 @@ void ServiceTest::enhancesPromptThroughSdk()
     // Faithful rewrites may reuse the input's words: penalizeRepeats false lifts the penalty.
     QVERIFY(!client.enhancePrompt({"llm-chat:llm.gguf", "une personne", {{"penalizeRepeats", false}}}).isEmpty());
     QTRY_COMPARE(finished.count(), 1);
-    QVERIFY(qvariant_cast<KiraService::PromptEnhancementResult>(finished.takeFirst().at(0)).succeeded);
+    QVERIFY(qvariant_cast<Nukleus::PromptEnhancementResult>(finished.takeFirst().at(0)).succeeded);
     QVERIFY(read("args").contains("--repeat-penalty\n1.0\n--repeat-last-n\n0\n"));
     const auto marker = [&](const QString& name) { QFile file(directory.filePath(name)); return file.open(QIODevice::WriteOnly); };
     QVERIFY(marker("fail"));
@@ -1753,7 +1754,7 @@ void ServiceTest::enhancesPromptThroughSdk()
     QVERIFY(QFile::remove(directory.filePath("wait")));
     QVERIFY(!client.enhancePrompt({"llm-chat:llm.gguf", "retry", {}}).isEmpty());
     QTRY_COMPARE(finished.count(), 1);
-    QVERIFY(qvariant_cast<KiraService::PromptEnhancementResult>(finished.takeFirst().at(0)).succeeded);
+    QVERIFY(qvariant_cast<Nukleus::PromptEnhancementResult>(finished.takeFirst().at(0)).succeeded);
     // Disconnect cancels active and queued work and releases the shared queue.
     QVERIFY(marker("wait"));
     QVERIFY(QFile::remove(directory.filePath("args")));
@@ -1763,7 +1764,7 @@ void ServiceTest::enhancesPromptThroughSdk()
     client.disconnectFromService();
     QTRY_COMPARE(finished.count(), 2);
     for (const auto& notification : finished) {
-        QVERIFY(!qvariant_cast<KiraService::PromptEnhancementResult>(notification.at(0)).succeeded);
+        QVERIFY(!qvariant_cast<Nukleus::PromptEnhancementResult>(notification.at(0)).succeeded);
     }
     finished.clear();
     QVERIFY(QFile::remove(directory.filePath("wait")));
@@ -1771,7 +1772,7 @@ void ServiceTest::enhancesPromptThroughSdk()
     QTRY_VERIFY(client.canEnhancePrompt("llm-chat:llm.gguf"));
     QVERIFY(!client.enhancePrompt({"llm-chat:llm.gguf", "after reconnect", {}}).isEmpty());
     QTRY_COMPARE(finished.count(), 1);
-    QVERIFY(qvariant_cast<KiraService::PromptEnhancementResult>(finished.takeFirst().at(0)).succeeded);
+    QVERIFY(qvariant_cast<Nukleus::PromptEnhancementResult>(finished.takeFirst().at(0)).succeeded);
 }
 
 void ServiceTest::chatsThroughCompletionEngine()
@@ -1779,7 +1780,7 @@ void ServiceTest::chatsThroughCompletionEngine()
 #ifdef Q_OS_WIN
     QSKIP("The fake llama-completion fixture requires a POSIX shell.");
 #endif
-    using namespace KiraService::Protocol;
+    using namespace Nukleus::Protocol;
     QTemporaryDir directory;
     QVERIFY(QDir(directory.path()).mkpath("llm"));
     QFile model(directory.filePath("llm/llm.gguf"));
@@ -1805,29 +1806,29 @@ void ServiceTest::chatsThroughCompletionEngine()
         "printf '<think>plan</think>\\n *smiles* Hello, Alex.\\nUser: I am fine.\\n [end of text]\\n'\n");
     executable.close();
     QVERIFY(executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
-    KiraServiceConfiguration configuration;
+    NukleusConfiguration configuration;
     configuration.port = 0; configuration.modelRootPath = directory.path();
     configuration.llamaCompletion = executablePath;
     configuration.llamaServer = directory.filePath("missing-llama-server");
     configuration.promptEnhancementTimeoutMs = 400;
-    KiraServiceDaemon daemon(configuration); QString error;
+    NukleusDaemon daemon(configuration); QString error;
     QVERIFY2(daemon.start(&error), qPrintable(error));
-    KiraService::ServiceClient client;
+    Nukleus::ServiceClient client;
     client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
-    QSignalSpy finished(&client, &KiraService::ServiceClient::chatFinished);
+    QSignalSpy finished(&client, &Nukleus::ServiceClient::chatFinished);
     client.connectToService();
     QTRY_VERIFY(client.canChat("llm-chat:llm.gguf"));
     QCOMPARE(client.capabilities().textChatEngines, QStringList{"completion"});
-    const QList<KiraService::TextChatMessage> conversation{
+    const QList<Nukleus::TextChatMessage> conversation{
         {"system", "You are Mia."}, {"user", "Hi."}, {"assistant", "Hey."}, {"user", "*sits down* How are you?"}};
     const QJsonObject completion{{"engine", "completion"}};
     const auto read = [&](const QString& name) {
         QFile file(directory.filePath(name)); if (!file.open(QIODevice::ReadOnly)) return QByteArray(); return file.readAll();
     };
-    const auto expectFailure = [&](const KiraService::TextChatRequest& request, const QString& code) {
+    const auto expectFailure = [&](const Nukleus::TextChatRequest& request, const QString& code) {
         QVERIFY(!client.submitChat(request).isEmpty());
         QTRY_COMPARE(finished.count(), 1);
-        const auto failure = qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0));
+        const auto failure = qvariant_cast<Nukleus::TextChatResult>(finished.takeFirst().at(0));
         QVERIFY(!failure.succeeded); QCOMPARE(failure.errorCode, code); QVERIFY(failure.text.isEmpty());
     };
 
@@ -1863,7 +1864,7 @@ void ServiceTest::chatsThroughCompletionEngine()
         {"topK", 40}, {"minP", 0.05}, {"repeatPenalty", 1.15}, {"seed", 7}, {"flashAttention", "on"}}});
     QVERIFY(!id.isEmpty());
     QTRY_COMPARE(finished.count(), 1);
-    auto result = qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0));
+    auto result = qvariant_cast<Nukleus::TextChatResult>(finished.takeFirst().at(0));
     QVERIFY2(result.succeeded, qPrintable(result.message));
     QCOMPARE(result.jobId, id); QCOMPARE(result.text, QString("*smiles* Hello, Alex."));
     QCOMPARE(result.engine, QString("completion"));
@@ -1886,7 +1887,7 @@ void ServiceTest::chatsThroughCompletionEngine()
     // Defaults keep every layer and the KV cache on the GPU, and never let llama.cpp spill layers silently.
     QVERIFY(!client.submitChat({"llm-chat:llm.gguf", {{"user", "Hi."}}, completion}).isEmpty());
     QTRY_COMPARE(finished.count(), 1);
-    QVERIFY(qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0)).succeeded);
+    QVERIFY(qvariant_cast<Nukleus::TextChatResult>(finished.takeFirst().at(0)).succeeded);
     arguments = read("args");
     QVERIFY(arguments.contains("--n-gpu-layers\nall\n--fit\noff\n--cache-type-k\nf16\n--cache-type-v\nf16\n--flash-attn\nauto\n"));
     QVERIFY(arguments.contains("--repeat-penalty\n1.1\n--repeat-last-n\n4096\n"));
@@ -1894,7 +1895,7 @@ void ServiceTest::chatsThroughCompletionEngine()
     QVERIFY(!arguments.contains("--no-kv-offload"));
     QVERIFY(!client.submitChat({"llm-chat:llm.gguf", {{"user", "Hi."}}, {{"engine", "completion"}, {"gpuLayers", 40}}}).isEmpty());
     QTRY_COMPARE(finished.count(), 1);
-    QVERIFY(qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0)).succeeded);
+    QVERIFY(qvariant_cast<Nukleus::TextChatResult>(finished.takeFirst().at(0)).succeeded);
     QVERIFY(read("args").contains("--n-gpu-layers\n40\n--fit\noff\n"));
     QVERIFY(!read("args").contains("--json-schema-file"));
     // Reasoning, DRY, XTC and a built-in chat template are passed through; unknown template names are refused.
@@ -1902,7 +1903,7 @@ void ServiceTest::chatsThroughCompletionEngine()
         {"dryMultiplier", 0.8}, {"dryBase", 1.5}, {"dryAllowedLength", 3}, {"dryPenaltyLastN", -1},
         {"xtcProbability", 0.5}, {"xtcThreshold", 0.2}, {"chatTemplate", "chatml"}}}).isEmpty());
     QTRY_COMPARE(finished.count(), 1);
-    QVERIFY(qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0)).succeeded);
+    QVERIFY(qvariant_cast<Nukleus::TextChatResult>(finished.takeFirst().at(0)).succeeded);
     arguments = read("args");
     QVERIFY(arguments.contains("--reasoning\non\n"));
     QVERIFY(arguments.contains("--dry-multiplier\n0.8\n--dry-base\n1.5\n--dry-allowed-length\n3\n--dry-penalty-last-n\n-1\n"
@@ -1921,7 +1922,7 @@ void ServiceTest::chatsThroughCompletionEngine()
     QVERIFY(marker("json"));
     QVERIFY(!client.submitChat({"llm-chat:llm.gguf", conversation, structured}).isEmpty());
     QTRY_COMPARE(finished.count(), 1);
-    result = qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0));
+    result = qvariant_cast<Nukleus::TextChatResult>(finished.takeFirst().at(0));
     QVERIFY2(result.succeeded, qPrintable(result.message));
     QCOMPARE(result.text, QString("{\"speech\":\"*smiles* Hi\"}"));
     QCOMPARE(result.json.toObject().value("speech").toString(), QString("*smiles* Hi"));
@@ -1934,7 +1935,7 @@ void ServiceTest::chatsThroughCompletionEngine()
     // Without a schema the reply stays plain text.
     QVERIFY(!client.submitChat({"llm-chat:llm.gguf", conversation, completion}).isEmpty());
     QTRY_COMPARE(finished.count(), 1);
-    QVERIFY(qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0)).json.isUndefined());
+    QVERIFY(qvariant_cast<Nukleus::TextChatResult>(finished.takeFirst().at(0)).json.isUndefined());
     QVERIFY(marker("thinking"));
     expectFailure({"llm-chat:llm.gguf", conversation, completion}, "chat-empty-result");
     QVERIFY(QFile::remove(directory.filePath("thinking")));
@@ -1946,7 +1947,7 @@ void ServiceTest::chatsThroughCompletionEngine()
     QVERIFY(QFile::remove(directory.filePath("wait")));
     QVERIFY(!client.submitChat({"llm-chat:llm.gguf", conversation, completion}).isEmpty());
     QTRY_COMPARE(finished.count(), 1);
-    QVERIFY(qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0)).succeeded);
+    QVERIFY(qvariant_cast<Nukleus::TextChatResult>(finished.takeFirst().at(0)).succeeded);
 }
 
 void ServiceTest::chatsThroughServerEngine()
@@ -1954,7 +1955,7 @@ void ServiceTest::chatsThroughServerEngine()
 #ifdef Q_OS_WIN
     QSKIP("The fake llama-completion fixture requires a POSIX shell.");
 #endif
-    using namespace KiraService::Protocol;
+    using namespace Nukleus::Protocol;
     QTemporaryDir directory;
     QVERIFY(QDir(directory.path()).mkpath("llm"));
     QFile model(directory.filePath("llm/llm.gguf"));
@@ -1966,20 +1967,20 @@ void ServiceTest::chatsThroughServerEngine()
     completion.write("#!/bin/sh\nprintf 'enhanced'\n");
     completion.close();
     QVERIFY(completion.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
-    qputenv("KIRA_FAKE_LLAMA_DIR", directory.path().toUtf8());
-    const auto unsetFakeDirectory = qScopeGuard([] { qunsetenv("KIRA_FAKE_LLAMA_DIR"); });
-    KiraServiceConfiguration configuration;
+    qputenv("NUKLEUS_FAKE_LLAMA_DIR", directory.path().toUtf8());
+    const auto unsetFakeDirectory = qScopeGuard([] { qunsetenv("NUKLEUS_FAKE_LLAMA_DIR"); });
+    NukleusConfiguration configuration;
     configuration.port = 0; configuration.modelRootPath = directory.path();
     configuration.llamaCompletion = completion.fileName();
-    configuration.llamaServer = QStringLiteral(KIRA_FAKE_LLAMA_SERVER);
+    configuration.llamaServer = QStringLiteral(NUKLEUS_FAKE_LLAMA_SERVER);
     configuration.promptEnhancementTimeoutMs = 1500;
     configuration.llamaServerIdleMs = 1500;
-    KiraServiceDaemon daemon(configuration); QString error;
+    NukleusDaemon daemon(configuration); QString error;
     QVERIFY2(daemon.start(&error), qPrintable(error));
-    KiraService::ServiceClient client;
+    Nukleus::ServiceClient client;
     client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
-    QSignalSpy finished(&client, &KiraService::ServiceClient::chatFinished);
-    QSignalSpy enhanced(&client, &KiraService::ServiceClient::promptEnhancementFinished);
+    QSignalSpy finished(&client, &Nukleus::ServiceClient::chatFinished);
+    QSignalSpy enhanced(&client, &Nukleus::ServiceClient::promptEnhancementFinished);
     client.connectToService();
     QTRY_VERIFY(client.canChat("llm-chat:llm.gguf"));
     QCOMPARE(client.capabilities().textChatEngines, QStringList({"server", "completion"}));
@@ -1993,13 +1994,13 @@ void ServiceTest::chatsThroughServerEngine()
         return !pid.isEmpty() && QFileInfo::exists("/proc/" + QString::fromUtf8(pid));
     };
     const auto marker = [&](const QString& name) { QFile file(directory.filePath(name)); return file.open(QIODevice::WriteOnly); };
-    const QList<KiraService::TextChatMessage> conversation{
+    const QList<Nukleus::TextChatMessage> conversation{
         {"system", "You are Mia."}, {"user", "Hi."}, {"assistant", "Hey."}, {"user", "*sits down* How are you?"}};
     const auto chat = [&](const QJsonObject& parameters) {
-        KiraService::TextChatResult result;
+        Nukleus::TextChatResult result;
         if (client.submitChat({"llm-chat:llm.gguf", conversation, parameters}).isEmpty()) return result;
         if (!QTest::qWaitFor([&] { return finished.count() == 1; }, 5000)) return result;
-        return qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0));
+        return qvariant_cast<Nukleus::TextChatResult>(finished.takeFirst().at(0));
     };
     const QJsonObject turn{{"maxTokens", 100}, {"stop", QJsonArray{"\nUser:"}}, {"kvCacheLocation", "ram"}, {"seed", 3}};
 
@@ -2066,10 +2067,10 @@ void ServiceTest::chatsThroughServerEngine()
     // prompt.enhance runs on llama-server with text.chat's default load settings: a model loaded with
     // other settings restarts, then consecutive jobs and such chats share the loaded model.
     const auto enhance = [&](const QJsonObject& parameters) {
-        KiraService::PromptEnhancementResult result;
+        Nukleus::PromptEnhancementResult result;
         if (client.enhancePrompt({"llm-chat:llm.gguf", "person", parameters}).isEmpty()) return result;
         if (!QTest::qWaitFor([&] { return enhanced.count() == 1; }, 5000)) return result;
-        return qvariant_cast<KiraService::PromptEnhancementResult>(enhanced.takeFirst().at(0));
+        return qvariant_cast<Nukleus::PromptEnhancementResult>(enhanced.takeFirst().at(0));
     };
     QVERIFY(serverAlive());
     auto enhancement = enhance({});
@@ -2134,11 +2135,11 @@ void ServiceTest::chatsThroughServerEngine()
 
     // text.chat.load preloads the model with the chat's own settings; text.chat.unload frees it.
     QVERIFY(client.capabilities().chatModelControl);
-    QSignalSpy modelFinished(&client, &KiraService::ServiceClient::chatModelFinished);
+    QSignalSpy modelFinished(&client, &Nukleus::ServiceClient::chatModelFinished);
     const auto control = [&](const QString& jobId) {
-        KiraService::ChatModelResult result;
+        Nukleus::ChatModelResult result;
         if (jobId.isEmpty() || !QTest::qWaitFor([&] { return modelFinished.count() == 1; }, 5000)) return result;
-        return qvariant_cast<KiraService::ChatModelResult>(modelFinished.takeFirst().at(0));
+        return qvariant_cast<Nukleus::ChatModelResult>(modelFinished.takeFirst().at(0));
     };
     const auto launchesBeforeLoad = launches();
     QFile::remove(directory.filePath("request.json"));
@@ -2172,7 +2173,7 @@ void ServiceTest::chatsThroughServerEngine()
     QTRY_VERIFY(QFileInfo::exists(directory.filePath("request.json")));
     client.disconnectFromService();
     QTRY_COMPARE(finished.count(), 1);
-    QVERIFY(!qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0)).succeeded);
+    QVERIFY(!qvariant_cast<Nukleus::TextChatResult>(finished.takeFirst().at(0)).succeeded);
     QTRY_VERIFY(!serverAlive());
 }
 
@@ -2181,7 +2182,7 @@ void ServiceTest::chatsWithImagesThroughVisionProjector()
 #ifdef Q_OS_WIN
     QSKIP("The fake llama-completion fixture requires a POSIX shell.");
 #endif
-    using namespace KiraService::Protocol;
+    using namespace Nukleus::Protocol;
     QTemporaryDir directory;
     QVERIFY(QDir(directory.path()).mkpath("llm")); QVERIFY(QDir(directory.path()).mkpath("companion"));
     for (const auto& name : {"llm/vision.gguf", "llm/plain.gguf", "companion/projector.gguf"}) {
@@ -2201,20 +2202,20 @@ void ServiceTest::chatsWithImagesThroughVisionProjector()
     completion.write("#!/bin/sh\nprintf 'enhanced'\n");
     completion.close();
     QVERIFY(completion.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
-    qputenv("KIRA_FAKE_LLAMA_DIR", directory.path().toUtf8());
-    const auto unsetFakeDirectory = qScopeGuard([] { qunsetenv("KIRA_FAKE_LLAMA_DIR"); });
-    KiraServiceConfiguration configuration;
+    qputenv("NUKLEUS_FAKE_LLAMA_DIR", directory.path().toUtf8());
+    const auto unsetFakeDirectory = qScopeGuard([] { qunsetenv("NUKLEUS_FAKE_LLAMA_DIR"); });
+    NukleusConfiguration configuration;
     configuration.port = 0; configuration.modelRootPath = directory.path();
     configuration.llamaCompletion = completion.fileName();
-    configuration.llamaServer = QStringLiteral(KIRA_FAKE_LLAMA_SERVER);
+    configuration.llamaServer = QStringLiteral(NUKLEUS_FAKE_LLAMA_SERVER);
     configuration.promptEnhancementTimeoutMs = 1500;
     configuration.llamaServerIdleMs = 1500;
-    KiraServiceDaemon daemon(configuration);
+    NukleusDaemon daemon(configuration);
     QVERIFY2(daemon.start(&error), qPrintable(error));
-    KiraService::ServiceClient client;
+    Nukleus::ServiceClient client;
     client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
-    QSignalSpy finished(&client, &KiraService::ServiceClient::chatFinished);
-    QSignalSpy enhanced(&client, &KiraService::ServiceClient::promptEnhancementFinished);
+    QSignalSpy finished(&client, &Nukleus::ServiceClient::chatFinished);
+    QSignalSpy enhanced(&client, &Nukleus::ServiceClient::promptEnhancementFinished);
     client.connectToService();
     QTRY_VERIFY(client.canChat("llm-chat:vision.gguf"));
     QVERIFY(client.capabilities().textChatImages);
@@ -2227,12 +2228,12 @@ void ServiceTest::chatsWithImagesThroughVisionProjector()
     };
     const auto launches = [&] { return read("launches").count('\n'); };
     const auto chat = [&](const QString& modelId, const QList<QByteArray>& images, const QJsonObject& parameters = {}) {
-        KiraService::TextChatResult result;
-        KiraService::TextChatRequest request{modelId, {{"system", "Describe."}, {"user", "What is shown?"}}, parameters};
+        Nukleus::TextChatResult result;
+        Nukleus::TextChatRequest request{modelId, {{"system", "Describe."}, {"user", "What is shown?"}}, parameters};
         request.images = images;
         if (client.submitChat(request).isEmpty()) return result;
         if (!QTest::qWaitFor([&] { return finished.count() == 1; }, 5000)) return result;
-        return qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0));
+        return qvariant_cast<Nukleus::TextChatResult>(finished.takeFirst().at(0));
     };
     const QByteArray png("\x89PNG\r\n\x1a\nfirst");
     const QByteArray jpeg("\xff\xd8\xff\xe0second");
@@ -2261,7 +2262,7 @@ void ServiceTest::chatsWithImagesThroughVisionProjector()
                 .toObject().value("content").isString());
     QVERIFY(!client.enhancePrompt({"llm-chat:vision.gguf", "person", {}}).isEmpty());
     QTRY_COMPARE(enhanced.count(), 1);
-    QVERIFY(qvariant_cast<KiraService::PromptEnhancementResult>(enhanced.takeFirst().at(0)).succeeded);
+    QVERIFY(qvariant_cast<Nukleus::PromptEnhancementResult>(enhanced.takeFirst().at(0)).succeeded);
     QCOMPARE(launches(), 1);
 
     // Only PNG and JPEG images are accepted; the engine and the count are checked.
@@ -2270,7 +2271,7 @@ void ServiceTest::chatsWithImagesThroughVisionProjector()
     result = chat("llm-chat:vision.gguf", {png}, {{"engine", "completion"}});
     QCOMPARE(result.errorCode, QString("invalid-request"));
     QList<QByteArray> tooMany;
-    for (int i = 0; i <= KiraService::ServiceClient::MaximumChatImages; ++i) tooMany.append(png);
+    for (int i = 0; i <= Nukleus::ServiceClient::MaximumChatImages; ++i) tooMany.append(png);
     QVERIFY(client.submitChat({"llm-chat:vision.gguf", {{"user", "Hi."}}, {}, tooMany}).isEmpty());
     QVERIFY(client.submitChat({"llm-chat:plain.gguf", {{"user", "Hi."}}, {}, {png}}).isEmpty());
 
@@ -2322,7 +2323,7 @@ void ServiceTest::attachesModularCompanionsWithoutReplacingModel()
     QVERIFY(!installNamed(restored, request, &error));
     request.companionUrls = {{"clip-l", true}};
     QVERIFY(!installNamed(restored, request, &error));
-    const auto options = KiraService::Protocol::defaultModelOptions("image-generation");
+    const auto options = Nukleus::Protocol::defaultModelOptions("image-generation");
     QVERIFY(configureNamed(restored, request.existingModelId, options, &error));
     QCOMPARE(restored.modelById(request.existingModelId)->companionFiles, model->companionFiles);
     QVERIFY(restored.remove(request.existingModelId, &error));
@@ -2370,10 +2371,10 @@ void ServiceTest::attachesFilesOverProtocol()
     QVERIFY(primary.open(QIODevice::WriteOnly));
     primary.write("original model");
     primary.close();
-    KiraServiceConfiguration configuration;
+    NukleusConfiguration configuration;
     configuration.port = 0;
     configuration.modelRootPath = directory.path();
-    KiraServiceDaemon service(configuration);
+    NukleusDaemon service(configuration);
     QString error;
     QVERIFY(service.start(&error));
     QWebSocket socket;
@@ -2431,10 +2432,10 @@ void ServiceTest::installsOptionalCompanions()
         QCOMPARE(restored.modelById(id)->companionRole, model->companionRole);
         QCOMPARE(restored.models(category).size(), 1);
     }
-    KiraServiceConfiguration configuration;
+    NukleusConfiguration configuration;
     configuration.port = 0;
     configuration.modelRootPath = directory.path();
-    KiraServiceDaemon service(configuration);
+    NukleusDaemon service(configuration);
     QString startError; QVERIFY2(service.start(&startError), qPrintable(startError));
     QWebSocket socket;
     QJsonArray listedCategories;
@@ -2557,6 +2558,22 @@ void ServiceTest::migratesLegacyModelRoot()
     QDir(QFileInfo(destination).dir().absolutePath()).removeRecursively();
 }
 
+void ServiceTest::migratesLegacyDataRoot()
+{
+    QStandardPaths::setTestModeEnabled(true);
+    const QString legacy = ServicePaths::legacyDataRoot(); const QString destination = ServicePaths::dataRoot();
+    QDir(legacy).removeRecursively(); QDir(destination).removeRecursively();
+    QVERIFY(QDir().mkpath(QDir(legacy).filePath(QStringLiteral("models/llm"))));
+    QFile model(QDir(legacy).filePath(QStringLiteral("models/llm/chat.gguf"))); QVERIFY(model.open(QIODevice::WriteOnly)); model.write("model"); model.close();
+    QString error; QVERIFY(ServicePaths::ensureModelDirectories(&error));
+    QVERIFY(QFileInfo::exists(QDir(destination).filePath(QStringLiteral("models/llm/chat.gguf")))); QVERIFY(!QFileInfo::exists(legacy));
+
+    QVERIFY(QDir().mkpath(legacy));
+    QVERIFY(!ServicePaths::migrateLegacyDataRoot(&error)); QVERIFY(error.contains(legacy));
+    QVERIFY(QFileInfo::exists(legacy)); QVERIFY(QFileInfo::exists(QDir(destination).filePath(QStringLiteral("models/llm/chat.gguf"))));
+    QDir(legacy).removeRecursively(); QDir(destination).removeRecursively();
+}
+
 void ServiceTest::rejectsConflictingModelRoots()
 {
     QStandardPaths::setTestModeEnabled(true);
@@ -2571,12 +2588,12 @@ void ServiceTest::separatesWeightsFromCatalogue()
 {
     QTemporaryDir root;
     const QString models = root.filePath("models"); const QString catalogue = root.filePath("config/catalog");
-    KiraServiceConfiguration orphan; orphan.port = 0; orphan.catalogRootPath = catalogue;
-    QString error; QVERIFY(!KiraServiceDaemon(orphan).start(&error)); QVERIFY(!error.isEmpty());
+    NukleusConfiguration orphan; orphan.port = 0; orphan.catalogRootPath = catalogue;
+    QString error; QVERIFY(!NukleusDaemon(orphan).start(&error)); QVERIFY(!error.isEmpty());
     QVERIFY(!QFileInfo::exists(catalogue));
-    KiraServiceConfiguration configuration; configuration.port = 0; configuration.modelRootPath = models; configuration.catalogRootPath = catalogue;
+    NukleusConfiguration configuration; configuration.port = 0; configuration.modelRootPath = models; configuration.catalogRootPath = catalogue;
     {
-        KiraServiceDaemon service(configuration);
+        NukleusDaemon service(configuration);
         QVERIFY2(service.start(&error), qPrintable(error));
     }
     for (const auto &directory : {"generation", "upscale", "llm", "companion"}) QVERIFY(QFileInfo(QDir(models).filePath(directory)).isDir());
@@ -2586,7 +2603,7 @@ void ServiceTest::separatesWeightsFromCatalogue()
     QFile upscaler(QDir(models).filePath("upscale/two-x.gguf")); QVERIFY(upscaler.open(QIODevice::WriteOnly)); upscaler.write("weights"); upscaler.close();
     ModelCatalog catalog(models, catalogue, false);
     const QString id = "image-generation:test.gguf";
-    QVERIFY2(catalog.configure(id, KiraService::Protocol::defaultModelOptions("image-generation"), &error, {}, "Test"), qPrintable(error));
+    QVERIFY2(catalog.configure(id, Nukleus::Protocol::defaultModelOptions("image-generation"), &error, {}, "Test"), qPrintable(error));
     QVERIFY(QFileInfo::exists(QDir(catalogue).filePath("generation.json")));
     QVERIFY(!QFileInfo::exists(QDir(models).filePath("generation/metadata.json")));
     QCOMPARE(catalog.modelById(id)->displayName, QString("Test"));
@@ -2660,15 +2677,15 @@ void ServiceTest::importsLocalModelWithoutChangingSources()
     QCOMPARE(catalog.modelById(id)->fileName, QString("local model.gguf"));
     ModelCatalog restoredNames(storage.path(), true);
     QCOMPARE(restoredNames.modelById(duplicate->id)->displayName, duplicate->displayName);
-    const auto options = KiraService::Protocol::defaultModelOptions("image-generation");
+    const auto options = Nukleus::Protocol::defaultModelOptions("image-generation");
     QVERIFY(!configureNamed(catalog, duplicate->id, options, &error, {}, QString()));
     QCOMPARE(catalog.modelById(duplicate->id)->name, QString("My second model"));
     QVERIFY(configureNamed(catalog, duplicate->id, options, &error, {}, QString("Renamed model")));
     QCOMPARE(catalog.modelById(duplicate->id)->name, QString("Renamed model"));
-    KiraServiceConfiguration configuration;
+    NukleusConfiguration configuration;
     configuration.port = 0;
     configuration.modelRootPath = storage.path();
-    KiraServiceDaemon service(configuration);
+    NukleusDaemon service(configuration);
     QVERIFY2(service.start(&error), qPrintable(error));
     QWebSocket socket;
     QSignalSpy messages(&socket, &QWebSocket::textMessageReceived);

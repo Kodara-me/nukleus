@@ -11,12 +11,12 @@ volume shared with other lab services.
 
 | Content | Location |
 |---|---|
-| Listener, port and token path | `/etc/kira-service/kira-service.conf` |
-| LAN token | `/etc/kira-service/token` |
-| Weights | `$XDG_DATA_HOME/kira-service/models/{,upscale,llm,companion}/` |
+| Listener, port and token path | `/etc/nukleus/nukleus.conf` |
+| LAN token | `/etc/nukleus/token` |
+| Weights | `$XDG_DATA_HOME/nukleus/models/{,upscale,llm,companion}/` |
 | Per-category `metadata.json` | beside the weights of each category |
 | `model-routing.json` | at the model root |
-| Jobs and llama-server key | `/run/kira-service` (`TMPDIR`) |
+| Jobs and llama-server key | `/run/nukleus` (`TMPDIR`) |
 
 Catalogue configuration (display names, recommendations, shared VAE/LLM/MMPROJ
 assignments, explicit-content classification, presets and editing qualities) is
@@ -31,9 +31,9 @@ interleaved with the weights.
 │   ├── upscale/
 │   ├── llm/
 │   └── companion/
-└── config/kira-service/
-    ├── service/                  # root:kira-service, read-only for the daemon
-    │   ├── kira-service.conf
+└── config/nukleus/
+    ├── service/                  # root:nukleus, read-only for the daemon
+    │   ├── nukleus.conf
     │   └── token
     └── catalog/                  # written by the daemon through QSaveFile
         ├── generation.json
@@ -51,7 +51,7 @@ interleaved with the weights.
 - Publication order is unchanged: weights are published first, then the
   catalogue entry is written atomically.
 - The weight tree may be shared with other applications; only the catalogue
-  is specific to Kira Service. Every accepted file in a category directory
+  is specific to Nukleus. Every accepted file in a category directory
   is listed as a model, and Manager deletion currently removes the file.
   Before other applications use the tree, deletion of shared weights should
   remove only the catalogue entry (deployment slice).
@@ -70,11 +70,11 @@ interleaved with the weights.
    `catalog/`. Offer `--dry-run`, refuse non-empty destinations, never modify
    the source and never merge. Tests use disposable fixtures only.
 4. **Deployment.** Installer options for both directories, preserved across
-   updates; `kira-service.conf` provides `KIRA_SERVICE_MODELS_DIR` and
-   `KIRA_SERVICE_CONFIG_DIR`. The systemd unit adds `RequiresMountsFor=` and
+   updates; `nukleus.conf` provides `NUKLEUS_MODELS_DIR` and
+   `NUKLEUS_CONFIG_DIR`. The systemd unit adds `RequiresMountsFor=` and
    restricts `ReadWritePaths=` to the weight tree, the catalogue directory and
-   `/run/kira-service`, keeping `ProtectSystem=strict`, `ProtectHome` and
-   `PrivateTmp`. `/etc/kira-service/kira-service.conf` remains the
+   `/run/nukleus`, keeping `ProtectSystem=strict`, `ProtectHome` and
+   `PrivateTmp`. `/etc/nukleus/nukleus.conf` remains the
    `EnvironmentFile` bootstrap.
 5. **Documentation.** Update AGENTS.md, README and CONTRIBUTING.
 

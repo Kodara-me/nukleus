@@ -10,7 +10,7 @@
 QString ServicePaths::dataRoot()
 {
     const QString dataPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
-    return dataPath.isEmpty() ? QString() : QDir(dataPath).filePath(QStringLiteral("kira-service"));
+    return dataPath.isEmpty() ? QString() : QDir(dataPath).filePath(QStringLiteral("nukleus"));
 }
 
 QString ServicePaths::modelsPath()
@@ -37,6 +37,32 @@ QString ServicePaths::legacyModelsPath()
     return dataPath.isEmpty() ? QString() : QDir(dataPath).filePath(QStringLiteral("kira-canvas/models"));
 }
 
+QString ServicePaths::legacyDataRoot()
+{
+    const QString dataPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+    return dataPath.isEmpty() ? QString() : QDir(dataPath).filePath(QStringLiteral("kira-service"));
+}
+
+bool ServicePaths::migrateLegacyDataRoot(QString *errorMessage)
+{
+    const QString legacy = legacyDataRoot();
+    const QString destination = dataRoot();
+    if (legacy.isEmpty() || destination.isEmpty()) {
+        if (errorMessage) *errorMessage = QObject::tr("Service data directory is unavailable");
+        return false;
+    }
+    if (!QFileInfo::exists(legacy)) return true;
+    if (QFileInfo::exists(destination)) {
+        if (errorMessage) *errorMessage = QObject::tr("Both %1 and %2 exist; move them manually before starting Nukleus").arg(legacy, destination);
+        return false;
+    }
+    if (!QDir().rename(legacy, destination)) {
+        if (errorMessage) *errorMessage = QObject::tr("Could not migrate %1 to %2").arg(legacy, destination);
+        return false;
+    }
+    return true;
+}
+
 bool ServicePaths::migrateLegacyModels(QString *errorMessage)
 {
     const QString legacy = legacyModelsPath();
@@ -47,7 +73,7 @@ bool ServicePaths::migrateLegacyModels(QString *errorMessage)
     }
     if (!QFileInfo::exists(legacy)) return true;
     if (QFileInfo::exists(destination)) {
-        if (errorMessage) *errorMessage = QObject::tr("Both legacy and service model directories exist; move them manually before starting Kira Service");
+        if (errorMessage) *errorMessage = QObject::tr("Both legacy and service model directories exist; move them manually before starting Nukleus");
         return false;
     }
     if (!QDir().mkpath(QFileInfo(destination).dir().absolutePath()) || !QDir().rename(legacy, destination)) {
@@ -59,7 +85,7 @@ bool ServicePaths::migrateLegacyModels(QString *errorMessage)
 
 bool ServicePaths::ensureModelDirectories(QString *errorMessage)
 {
-    if (!migrateLegacyModels(errorMessage)) return false;
+    if (!migrateLegacyDataRoot(errorMessage) || !migrateLegacyModels(errorMessage)) return false;
     const QString root = dataRoot();
     if (root.isEmpty()) {
         if (errorMessage) *errorMessage = QObject::tr("Service data directory is unavailable");

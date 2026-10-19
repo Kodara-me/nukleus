@@ -2,15 +2,15 @@
 
 set -euo pipefail
 
-readonly SERVICE_NAME="kira-service"
-readonly SERVICE_USER="kira-service"
-readonly SERVICE_GROUP="kira-service"
+readonly SERVICE_NAME="nukleus"
+readonly SERVICE_USER="nukleus"
+readonly SERVICE_GROUP="nukleus"
 readonly DEFAULT_PORT=9384
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd -- "$script_dir/.." && pwd)"
-binary_path="$project_root/build/src/kira-service"
-manager_binary_path="$project_root/build/src/kira-service-manager"
+binary_path="$project_root/build/src/nukleusd"
+manager_binary_path="$project_root/build/src/nukleus-manager"
 listen_address=""
 token=""
 install_root=""
@@ -25,17 +25,17 @@ desktop_shortcut=false
 
 usage() {
     cat <<'EOF'
-Usage: sudo scripts/install-kira-service.sh [options]
+Usage: sudo scripts/install-nukleus.sh [options]
 
-Install or update the Kira Service systemd unit and local model manager.
+Install or update the Nukleus systemd unit and local model manager.
 Fresh interactive installs offer loopback-only binding and detected LAN IPv4
 addresses. A LAN address also keeps the service available on loopback.
 
 Options:
-  --binary PATH       Built kira-service executable (default: build/src/kira-service)
+  --binary PATH       Built nukleusd executable (default: build/src/nukleusd)
   --manager-binary PATH
-                      Built kira-service-manager executable (default: build/src/kira-service-manager)
-  --user-bin PATH     User-local bin directory for kira-service-manager
+                      Built nukleus-manager executable (default: build/src/nukleus-manager)
+  --user-bin PATH     User-local bin directory for nukleus-manager
   --listen ADDRESS    LAN bind address, or 127.0.0.1 for local-only service
   --token TOKEN       Shared LAN passphrase; avoid this option in a shared shell history
   --models-dir DIR    Shared model weight directory for the split storage layout;
@@ -101,7 +101,7 @@ choose_listen_address() {
     done < <(detected_ipv4_addresses)
     [[ -t 0 ]] || fail "Provide --listen ADDRESS when input is not interactive."
 
-    printf 'Choose where Kira Service listens:\n'
+    printf 'Choose where Nukleus listens:\n'
     printf '  1) Local computer only (127.0.0.1)\n'
     index=2
     for entry in "${addresses[@]}"; do
@@ -144,10 +144,10 @@ while (( $# > 0 )); do
 done
 
 [[ -n "$install_root" || $EUID -eq 0 ]] || fail "Run with sudo, or use --root for a staging installation."
-[[ -x "$binary_path" ]] || fail "Kira Service executable is not executable: $binary_path"
-[[ -x "$manager_binary_path" ]] || fail "Kira Service Manager executable is not executable: $manager_binary_path"
-[[ -f "$project_root/packaging/systemd/kira-service.service.in" ]] || fail "Systemd unit template is missing."
-[[ -f "$project_root/packaging/desktop/kira-service-manager.desktop.in" ]] || fail "Desktop entry template is missing."
+[[ -x "$binary_path" ]] || fail "Nukleus executable is not executable: $binary_path"
+[[ -x "$manager_binary_path" ]] || fail "Nukleus Manager executable is not executable: $manager_binary_path"
+[[ -f "$project_root/packaging/systemd/nukleus.service.in" ]] || fail "Systemd unit template is missing."
+[[ -f "$project_root/packaging/desktop/nukleus-manager.desktop.in" ]] || fail "Desktop entry template is missing."
 [[ -z "$desktop_dir" || "$desktop_dir" == /* ]] || fail "--desktop-dir must be an absolute path."
 if [[ -n "$models_dir" || -n "$storage_config_dir" ]]; then
     [[ -n "$models_dir" && -n "$storage_config_dir" ]] || fail "--models-dir and --config-dir must be given together."
@@ -180,7 +180,7 @@ else
 fi
 
 manager_bin_dir="$(destination "$user_bin_path")"
-manager_path="$manager_bin_dir/kira-service-manager"
+manager_path="$manager_bin_dir/nukleus-manager"
 manager_uid=""
 manager_gid=""
 if [[ -z "$install_root" ]]; then
@@ -197,8 +197,61 @@ token_path="$(destination "/etc/$SERVICE_NAME/token")"
 config_path="$(destination "/etc/$SERVICE_NAME/$SERVICE_NAME.conf")"
 unit_path="$(destination "/usr/lib/systemd/system/$SERVICE_NAME.service")"
 legacy_models_path="$(destination "/var/lib/$SERVICE_NAME/data/kira-canvas/models")"
-service_models_path="$(destination "/var/lib/$SERVICE_NAME/data/kira-service/models")"
+service_models_path="$(destination "/var/lib/$SERVICE_NAME/data/nukleus/models")"
 service_models_parent="$(dirname "$service_models_path")"
+
+# Deployments made before the rename used the kira-service unit, account and
+# directories. They are moved, never merged: the account is renamed in place
+# so file ownership and supplementary groups survive.
+readonly LEGACY_NAME="kira-service"
+legacy_config_dir="$(destination "/etc/$LEGACY_NAME")"
+legacy_state_dir="$(destination "/var/lib/$LEGACY_NAME")"
+legacy_program_dir="$(destination "/usr/local/libexec/$LEGACY_NAME")"
+legacy_unit_path="$(destination "/usr/lib/systemd/system/$LEGACY_NAME.service")"
+migrated_legacy=false
+if [[ -e "$legacy_config_dir" || -e "$legacy_state_dir" ]]; then
+    [[ ! -e "$config_dir" && ! -e "$state_dir" ]] \
+        || fail "Both $LEGACY_NAME and $SERVICE_NAME deployments exist; move them manually before installing Nukleus."
+    migrated_legacy=true
+    if [[ -z "$install_root" ]]; then
+        if [[ -f "$legacy_unit_path" ]]; then
+            run systemctl disable --now "$LEGACY_NAME.service"
+        fi
+        if id -u "$LEGACY_NAME" >/dev/null 2>&1 && ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
+            run usermod --login "$SERVICE_USER" --home "/var/lib/$SERVICE_NAME" "$LEGACY_NAME"
+        fi
+        if getent group "$LEGACY_NAME" >/dev/null && ! getent group "$SERVICE_GROUP" >/dev/null; then
+            run groupmod --new-name "$SERVICE_GROUP" "$LEGACY_NAME"
+        fi
+    fi
+    if [[ -e "$legacy_config_dir" ]]; then
+        run mv "$legacy_config_dir" "$config_dir"
+        legacy_config_path="$config_dir/$LEGACY_NAME.conf"
+        if [[ -f "$legacy_config_path" ]]; then
+            if "$dry_run"; then
+                printf '+ rewrite %q as %q\n' "$legacy_config_path" "$config_path"
+            else
+                (umask 0077; sed -e 's/^KIRA_SERVICE_/NUKLEUS_/' \
+                    -e "s|^NUKLEUS_TOKEN_FILE=/etc/$LEGACY_NAME/token\$|NUKLEUS_TOKEN_FILE=/etc/$SERVICE_NAME/token|" \
+                    "$legacy_config_path" > "$config_path")
+                chmod 0600 "$config_path"
+                rm -f "$legacy_config_path"
+            fi
+        fi
+    fi
+    if [[ -e "$legacy_state_dir" ]]; then
+        [[ ! -e "$legacy_state_dir/data/$LEGACY_NAME" || ! -e "$legacy_state_dir/data/$SERVICE_NAME" ]] \
+            || fail "Both data/$LEGACY_NAME and data/$SERVICE_NAME exist in $legacy_state_dir; move them manually before installing Nukleus."
+        had_legacy_data=false
+        [[ ! -e "$legacy_state_dir/data/$LEGACY_NAME" ]] || had_legacy_data=true
+        run mv "$legacy_state_dir" "$state_dir"
+        if "$had_legacy_data"; then
+            run mv "$state_dir/data/$LEGACY_NAME" "$service_models_parent"
+        fi
+    fi
+    if [[ -f "$legacy_unit_path" ]]; then run rm -f "$legacy_unit_path"; fi
+    if [[ -d "$legacy_program_dir" ]]; then run rm -rf "$legacy_program_dir"; fi
+fi
 
 existing_listen=""
 existing_port=""
@@ -207,11 +260,11 @@ existing_models_dir=""
 existing_storage_config_dir=""
 has_valid_config=false
 if [[ -f "$config_path" ]]; then
-    existing_listen="$(config_value KIRA_SERVICE_LISTEN "$config_path")"
-    existing_port="$(config_value KIRA_SERVICE_PORT "$config_path")"
-    existing_token_file="$(config_value KIRA_SERVICE_TOKEN_FILE "$config_path")"
-    existing_models_dir="$(config_value KIRA_SERVICE_MODELS_DIR "$config_path")"
-    existing_storage_config_dir="$(config_value KIRA_SERVICE_CONFIG_DIR "$config_path")"
+    existing_listen="$(config_value NUKLEUS_LISTEN "$config_path")"
+    existing_port="$(config_value NUKLEUS_PORT "$config_path")"
+    existing_token_file="$(config_value NUKLEUS_TOKEN_FILE "$config_path")"
+    existing_models_dir="$(config_value NUKLEUS_MODELS_DIR "$config_path")"
+    existing_storage_config_dir="$(config_value NUKLEUS_CONFIG_DIR "$config_path")"
     if valid_address "$existing_listen" && valid_port "$existing_port" \
         && [[ "$existing_token_file" == "/etc/$SERVICE_NAME/token" ]]; then
         if is_loopback_address "$existing_listen" || { [[ -f "$token_path" ]] && token_has_content "$(<"$token_path")"; }; then
@@ -285,7 +338,7 @@ if [[ -z "$install_root" ]]; then
 fi
 
 if [[ -e "$legacy_models_path" ]]; then
-    [[ ! -e "$service_models_path" ]] || fail "Both legacy and service model directories exist; move them manually before updating Kira Service."
+    [[ ! -e "$service_models_path" ]] || fail "Both legacy and service model directories exist; move them manually before updating Nukleus."
     run install -d -m 0750 "$(dirname "$service_models_path")"
     if [[ -z "$install_root" && "$updating" == true ]]; then
         run systemctl stop "$SERVICE_NAME.service"
@@ -295,7 +348,7 @@ fi
 
 run install -d -m 0755 "$program_dir" "$config_dir" "$unit_dir"
 run install -d -m 0750 "$state_dir"
-run install -m 0755 "$binary_path" "$program_dir/$SERVICE_NAME"
+run install -m 0755 "$binary_path" "$program_dir/nukleusd"
 if [[ -z "$install_root" ]]; then
     run install -d -o "$manager_uid" -g "$manager_gid" -m 0755 "$manager_bin_dir"
     run install -o "$manager_uid" -g "$manager_gid" -m 0755 "$manager_binary_path" "$manager_path"
@@ -327,20 +380,20 @@ fi
 desktop_entry="$(mktemp)"
 trap 'rm -f "$desktop_entry"' EXIT
 # An absolute icon path avoids depending on icon-theme caches and inheritance.
-sed -e "s|@KIRA_SERVICE_MANAGER@|$user_bin_path/kira-service-manager|g" \
-    -e "s|@KIRA_SERVICE_MANAGER_ICON@|$user_data_path/icons/hicolor/256x256/apps/kira-service-manager.png|g" \
-    "$project_root/packaging/desktop/kira-service-manager.desktop.in" > "$desktop_entry"
+sed -e "s|@NUKLEUS_MANAGER@|$user_bin_path/nukleus-manager|g" \
+    -e "s|@NUKLEUS_MANAGER_ICON@|$user_data_path/icons/hicolor/256x256/apps/nukleus-manager.png|g" \
+    "$project_root/packaging/desktop/nukleus-manager.desktop.in" > "$desktop_entry"
 as_manager install -d -m 0755 "$applications_dir"
-install_user_file 0644 "$desktop_entry" "$applications_dir/kira-service-manager.desktop"
+install_user_file 0644 "$desktop_entry" "$applications_dir/nukleus-manager.desktop"
 for size in 16 32 48 64 128 256 512; do
     as_manager install -d -m 0755 "$icon_root/${size}x${size}/apps"
-    install_user_file 0644 "$project_root/assets/icons/kira-service-manager-$size.png" \
-        "$icon_root/${size}x${size}/apps/kira-service-manager.png"
+    install_user_file 0644 "$project_root/assets/icons/nukleus-manager-$size.png" \
+        "$icon_root/${size}x${size}/apps/nukleus-manager.png"
 done
 desktop_shortcut_path=""
 if "$desktop_shortcut" && [[ -n "$desktop_dir" && -d "$(destination "$desktop_dir")" ]]; then
     # Desktop shells only launch shortcuts the user trusts through the executable bit.
-    desktop_shortcut_path="$(destination "$desktop_dir")/kira-service-manager.desktop"
+    desktop_shortcut_path="$(destination "$desktop_dir")/nukleus-manager.desktop"
     install_user_file 0755 "$desktop_entry" "$desktop_shortcut_path"
 fi
 if [[ -z "$install_root" ]]; then
@@ -389,10 +442,10 @@ if "$write_configuration" || "$storage_changed"; then
     else
         umask 0077
         {
-            printf 'KIRA_SERVICE_LISTEN=%s\nKIRA_SERVICE_PORT=%s\nKIRA_SERVICE_TOKEN_FILE=/etc/%s/token\n' \
+            printf 'NUKLEUS_LISTEN=%s\nNUKLEUS_PORT=%s\nNUKLEUS_TOKEN_FILE=/etc/%s/token\n' \
                 "$listen_address" "$port" "$SERVICE_NAME"
             if [[ -n "$models_dir" ]]; then
-                printf 'KIRA_SERVICE_MODELS_DIR=%s\nKIRA_SERVICE_CONFIG_DIR=%s\n' "$models_dir" "$storage_config_dir"
+                printf 'NUKLEUS_MODELS_DIR=%s\nNUKLEUS_CONFIG_DIR=%s\n' "$models_dir" "$storage_config_dir"
             fi
         } > "$config_path"
         chmod 0600 "$config_path"
@@ -430,16 +483,16 @@ storage_args=""
 storage_paths=""
 if [[ -n "$models_dir" ]]; then
     storage_mounts="RequiresMountsFor=$models_dir $storage_config_dir"
-    storage_args=' --models-dir ${KIRA_SERVICE_MODELS_DIR} --config-dir ${KIRA_SERVICE_CONFIG_DIR}'
+    storage_args=' --models-dir ${NUKLEUS_MODELS_DIR} --config-dir ${NUKLEUS_CONFIG_DIR}'
     storage_paths=" $models_dir $storage_config_dir/catalog"
 fi
 if "$dry_run"; then
     printf '+ render %q\n' "$unit_path"
 else
-    sed -e "s|@KIRA_SERVICE_GPU_GROUPS@|$gpu_line|" \
-        -e "s|@KIRA_SERVICE_STORAGE_MOUNTS@|$storage_mounts|" \
-        -e "s|@KIRA_SERVICE_STORAGE_ARGS@|$storage_args|" \
-        -e "s|@KIRA_SERVICE_STORAGE_PATHS@|$storage_paths|" \
+    sed -e "s|@NUKLEUS_GPU_GROUPS@|$gpu_line|" \
+        -e "s|@NUKLEUS_STORAGE_MOUNTS@|$storage_mounts|" \
+        -e "s|@NUKLEUS_STORAGE_ARGS@|$storage_args|" \
+        -e "s|@NUKLEUS_STORAGE_PATHS@|$storage_paths|" \
         "$project_root/packaging/systemd/$SERVICE_NAME.service.in" > "$unit_path"
     chmod 0644 "$unit_path"
 fi
@@ -450,7 +503,7 @@ fi
 
 if [[ -z "$install_root" && "$enable_service" == true ]]; then
     run systemctl daemon-reload
-    if "$updating"; then
+    if "$updating" && ! "$migrated_legacy"; then
         run systemctl restart "$SERVICE_NAME.service"
     else
         run systemctl enable --now "$SERVICE_NAME.service"
@@ -463,7 +516,7 @@ if command -v ip >/dev/null 2>&1; then
 fi
 action="Installed"
 if "$updating"; then action="Updated"; fi
-printf '\n%s Kira Service.\n' "$action"
+printf '\n%s Nukleus.\n' "$action"
 printf 'Manage it with: sudo systemctl status|restart|stop|enable --now %s\n' "$SERVICE_NAME"
 printf 'Logs: journalctl -u %s -f\n' "$SERVICE_NAME"
 if is_loopback_address "$listen_address"; then
@@ -477,7 +530,7 @@ else
     printf '.\n'
 fi
 printf 'Model manager installed at %s. Start the GUI with: %s --gui\n' "$manager_path" "$manager_path"
-printf 'Application-menu entry: %s\n' "$applications_dir/kira-service-manager.desktop"
+printf 'Application-menu entry: %s\n' "$applications_dir/nukleus-manager.desktop"
 if [[ -n "$desktop_shortcut_path" ]]; then
     printf 'Desktop shortcut: %s\n' "$desktop_shortcut_path"
 fi

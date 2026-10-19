@@ -4,12 +4,12 @@ endif()
 
 find_package(Qt6 6.2 REQUIRED COMPONENTS Network Test WebSockets)
 
-add_executable(kira-service-test
+add_executable(nukleus-test
     ServiceTest.cpp
     ../src/daemon/GenerationRequest.h
-    ../src/sdk/include/kira/service/GenerationProgress.h
-    ../src/daemon/KiraService.cpp
-    ../src/daemon/KiraService.h
+    ../src/sdk/include/nukleus/GenerationProgress.h
+    ../src/daemon/NukleusDaemon.cpp
+    ../src/daemon/NukleusDaemon.h
     ../src/daemon/LlamaServerRunner.cpp
     ../src/daemon/LlamaServerRunner.h
     ../src/daemon/ModelCatalog.cpp
@@ -22,44 +22,44 @@ add_executable(kira-service-test
     ../src/daemon/ServicePaths.cpp
     ../src/daemon/ServicePaths.h
 )
-set_target_properties(kira-service-test PROPERTIES AUTORCC ON)
-target_include_directories(kira-service-test PRIVATE
+set_target_properties(nukleus-test PROPERTIES AUTORCC ON)
+target_include_directories(nukleus-test PRIVATE
     ../src/daemon
 )
-target_link_libraries(kira-service-test PRIVATE KiraService::SDK Qt6::Network Qt6::Test Qt6::WebSockets)
+target_link_libraries(nukleus-test PRIVATE Nukleus::SDK Qt6::Network Qt6::Test Qt6::WebSockets)
 # Stand-in for llama-server, so tests never start the real one installed on the host.
-add_executable(kira-service-fake-llama-server FakeLlamaServer.cpp)
-target_link_libraries(kira-service-fake-llama-server PRIVATE Qt6::Network)
-add_dependencies(kira-service-test kira-service-fake-llama-server)
-target_compile_definitions(kira-service-test PRIVATE
-    KIRA_FAKE_LLAMA_SERVER="$<TARGET_FILE:kira-service-fake-llama-server>")
-add_test(NAME kira-service-test COMMAND kira-service-test)
+add_executable(nukleus-fake-llama-server FakeLlamaServer.cpp)
+target_link_libraries(nukleus-fake-llama-server PRIVATE Qt6::Network)
+add_dependencies(nukleus-test nukleus-fake-llama-server)
+target_compile_definitions(nukleus-test PRIVATE
+    NUKLEUS_FAKE_LLAMA_SERVER="$<TARGET_FILE:nukleus-fake-llama-server>")
+add_test(NAME nukleus-test COMMAND nukleus-test)
 
-add_executable(kira-service-sdk-test ServiceSdkTest.cpp)
-target_link_libraries(kira-service-sdk-test PRIVATE KiraService::SDK Qt6::Network Qt6::Test Qt6::WebSockets)
-add_test(NAME kira-service-sdk-test COMMAND kira-service-sdk-test)
+add_executable(nukleus-sdk-test ServiceSdkTest.cpp)
+target_link_libraries(nukleus-sdk-test PRIVATE Nukleus::SDK Qt6::Network Qt6::Test Qt6::WebSockets)
+add_test(NAME nukleus-sdk-test COMMAND nukleus-sdk-test)
 
-add_test(NAME kira-service-installer-test
-    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/KiraServiceInstallerTest.sh
-            ${CMAKE_SOURCE_DIR} $<TARGET_FILE:kira-service> $<TARGET_FILE:kira-service-manager>)
+add_test(NAME nukleus-installer-test
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/NukleusInstallerTest.sh
+            ${CMAKE_SOURCE_DIR} $<TARGET_FILE:nukleusd> $<TARGET_FILE:nukleus-manager>)
 
-add_test(NAME kira-service-storage-migration-test
-    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/KiraServiceStorageMigrationTest.sh ${CMAKE_SOURCE_DIR})
+add_test(NAME nukleus-storage-migration-test
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/NukleusStorageMigrationTest.sh ${CMAKE_SOURCE_DIR})
 
-add_test(NAME kira-service-cmake-install-test
-    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/KiraServiceCMakeInstallTest.sh
+add_test(NAME nukleus-cmake-install-test
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/NukleusCMakeInstallTest.sh
             ${CMAKE_BINARY_DIR})
 
-add_test(NAME kira-service-manager-help COMMAND $<TARGET_FILE:kira-service-manager> --help)
-add_test(NAME kira-service-manager-rejects-companion-category
-    COMMAND $<TARGET_FILE:kira-service-manager> add https://example.test/model.gguf
+add_test(NAME nukleus-manager-help COMMAND $<TARGET_FILE:nukleus-manager> --help)
+add_test(NAME nukleus-manager-rejects-companion-category
+    COMMAND $<TARGET_FILE:nukleus-manager> add https://example.test/model.gguf
             --category upscaler --companion-lora https://example.test/companion.safetensors)
-set_tests_properties(kira-service-manager-rejects-companion-category PROPERTIES WILL_FAIL TRUE)
-add_test(NAME kira-service-manager-unavailable COMMAND ${CMAKE_COMMAND}
-    -DMANAGER=$<TARGET_FILE:kira-service-manager> -P ${CMAKE_CURRENT_SOURCE_DIR}/ManagerUnavailableTest.cmake)
-set_tests_properties(kira-service-manager-unavailable PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: local service is running")
+set_tests_properties(nukleus-manager-rejects-companion-category PROPERTIES WILL_FAIL TRUE)
+add_test(NAME nukleus-manager-unavailable COMMAND ${CMAKE_COMMAND}
+    -DMANAGER=$<TARGET_FILE:nukleus-manager> -P ${CMAKE_CURRENT_SOURCE_DIR}/ManagerUnavailableTest.cmake)
+set_tests_properties(nukleus-manager-unavailable PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: local service is running")
 
-add_executable(kira-service-manager-ui-test
+add_executable(nukleus-manager-ui-test
     ManagerUiTest.cpp
     ../src/manager/resources.qrc
     ../src/manager/ModelOptionsWidget.h
@@ -74,13 +74,15 @@ add_executable(kira-service-manager-ui-test
     ../src/manager/ServiceConnectionDialog.h
     ../src/manager/ManagerServiceClient.cpp
     ../src/manager/ManagerServiceClient.h
+    ../src/manager/ManagerSettings.cpp
+    ../src/manager/ManagerSettings.h
 )
-set_target_properties(kira-service-manager-ui-test PROPERTIES AUTORCC ON)
-target_link_libraries(kira-service-manager-ui-test PRIVATE KiraService::Protocol Ardoise::Widgets Qt6::Widgets Qt6::Test Qt6::WebSockets)
-add_test(NAME kira-service-manager-ui-test COMMAND kira-service-manager-ui-test)
-set_tests_properties(kira-service-manager-ui-test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+set_target_properties(nukleus-manager-ui-test PROPERTIES AUTORCC ON)
+target_link_libraries(nukleus-manager-ui-test PRIVATE Nukleus::Protocol Ardoise::Widgets Qt6::Widgets Qt6::Test Qt6::WebSockets)
+add_test(NAME nukleus-manager-ui-test COMMAND nukleus-manager-ui-test)
+set_tests_properties(nukleus-manager-ui-test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    add_test(NAME kira-service-updater-test
-        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/KiraServiceUpdaterTest.sh ${CMAKE_SOURCE_DIR})
+    add_test(NAME nukleus-updater-test
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/NukleusUpdaterTest.sh ${CMAKE_SOURCE_DIR})
 endif()

@@ -1,9 +1,9 @@
-#include <kira/service/ServiceClient.h>
-#include <kira/service/Identity.h>
+#include <nukleus/ServiceClient.h>
+#include <nukleus/Identity.h>
 #include <archive.h>
 #include <archive_entry.h>
-#include <kira/service/ServiceProtocol.h>
-#include <kira/service/ModelOptions.h>
+#include <nukleus/ServiceProtocol.h>
+#include <nukleus/ModelOptions.h>
 
 #include <QHostAddress>
 #include <QJsonDocument>
@@ -102,12 +102,12 @@ class ServiceSdkTest final : public QObject
 private slots:
     void presetAndEditingAssignmentValidation()
     {
-        auto routing = KiraService::Protocol::starterModelRouting();
+        auto routing = Nukleus::Protocol::starterModelRouting();
         routing.presets[0].model = {"image-generation:photo.gguf", 30, 6.5};
         routing.editingQualities[2].model = {"image-generation:edit.gguf", 12, 2.25};
         routing.editingQualities[2].positivePrefix = "sharp details";
         routing.editingQualities[2].negativePrefix = "blurry";
-        const auto json = KiraService::Protocol::modelRoutingToJson(routing);
+        const auto json = Nukleus::Protocol::modelRoutingToJson(routing);
         {
             // Editing quality prefixes round-trip; documents without them load empty.
             QCOMPARE(json.value("editingQualities").toArray()[2].toObject().value("positivePrefix").toString(),
@@ -119,50 +119,50 @@ private slots:
             qualities[2] = quality;
             auto withoutPrefixes = json;
             withoutPrefixes.insert("editingQualities", qualities);
-            QVERIFY(KiraService::Protocol::modelRoutingFromJson(withoutPrefixes)->editingQualities[2].positivePrefix.isEmpty());
+            QVERIFY(Nukleus::Protocol::modelRoutingFromJson(withoutPrefixes)->editingQualities[2].positivePrefix.isEmpty());
             quality.insert("negativePrefix", 3);
             qualities[2] = quality;
             withoutPrefixes.insert("editingQualities", qualities);
-            QVERIFY(!KiraService::Protocol::modelRoutingFromJson(withoutPrefixes));
+            QVERIFY(!Nukleus::Protocol::modelRoutingFromJson(withoutPrefixes));
             auto tooLong = routing;
             tooLong.editingQualities[0].negativePrefix = QString(65537, 'x');
-            QVERIFY(!KiraService::Protocol::validateModelRouting(tooLong));
+            QVERIFY(!Nukleus::Protocol::validateModelRouting(tooLong));
         }
         QCOMPARE(json.value("version").toInt(), 6);
         QVERIFY(!json.contains("editing"));
         QCOMPARE(json.value("editingQualities").toArray()[1].toObject().value("default").toBool(), true);
-        QCOMPARE(KiraService::Protocol::modelRoutingFromJson(json), std::optional(routing));
+        QCOMPARE(Nukleus::Protocol::modelRoutingFromJson(json), std::optional(routing));
         QCOMPARE(routing.presets[1].identityViews, 1); // Presets default to a single portrait.
         routing.presets[0].identityViews = 4;
-        const auto viewsJson = KiraService::Protocol::modelRoutingToJson(routing);
+        const auto viewsJson = Nukleus::Protocol::modelRoutingToJson(routing);
         QCOMPARE(viewsJson.value("presets").toArray()[0].toObject().value("identityViews").toInt(), 4);
-        QCOMPARE(KiraService::Protocol::modelRoutingFromJson(viewsJson), std::optional(routing));
+        QCOMPARE(Nukleus::Protocol::modelRoutingFromJson(viewsJson), std::optional(routing));
         auto version4 = viewsJson; // Version 4 predates identity views and loads with one.
         version4.insert("version", 4);
         version4.insert("editing", QJsonObject{{"modelId", QString()}});
-        QCOMPARE(KiraService::Protocol::modelRoutingFromJson(version4)->presets[0].identityViews, 1);
+        QCOMPARE(Nukleus::Protocol::modelRoutingFromJson(version4)->presets[0].identityViews, 1);
         auto invalidViews = viewsJson;
         auto viewPresets = invalidViews.value("presets").toArray();
         auto viewPreset = viewPresets[0].toObject();
         viewPreset.insert("identityViews", 3);
         viewPresets[0] = viewPreset;
         invalidViews.insert("presets", viewPresets);
-        QVERIFY(!KiraService::Protocol::modelRoutingFromJson(invalidViews));
+        QVERIFY(!Nukleus::Protocol::modelRoutingFromJson(invalidViews));
         viewPreset.remove("identityViews");
         viewPresets[0] = viewPreset;
         invalidViews.insert("presets", viewPresets);
-        QVERIFY(!KiraService::Protocol::modelRoutingFromJson(invalidViews));
+        QVERIFY(!Nukleus::Protocol::modelRoutingFromJson(invalidViews));
         routing.presets[0].identityViews = 3;
-        QVERIFY(!KiraService::Protocol::validateModelRouting(routing));
+        QVERIFY(!Nukleus::Protocol::validateModelRouting(routing));
         routing.presets[0].identityViews = 4;
         routing.editingQualities[2].model.steps = 0;
-        QVERIFY(!KiraService::Protocol::validateModelRouting(routing));
+        QVERIFY(!Nukleus::Protocol::validateModelRouting(routing));
         routing.editingQualities[2].model.steps = 12;
         routing.presets[1].model.cfgScale = 101;
-        QVERIFY(!KiraService::Protocol::validateModelRouting(routing));
+        QVERIFY(!Nukleus::Protocol::validateModelRouting(routing));
         auto missing = json;
         missing.remove("editingQualities");
-        QVERIFY(!KiraService::Protocol::modelRoutingFromJson(missing));
+        QVERIFY(!Nukleus::Protocol::modelRoutingFromJson(missing));
     }
     void validatesPromptStyles();
     void configuresAndCancelsModels();
@@ -179,7 +179,7 @@ private slots:
 
 void ServiceSdkTest::validatesPromptStyles()
 {
-    using namespace KiraService::Protocol;
+    using namespace Nukleus::Protocol;
     QString error;
     const auto starters = starterPromptStyles();
     QCOMPARE(promptStylesFromJson(promptStylesToJson(starters)).value(), starters);
@@ -208,7 +208,7 @@ void ServiceSdkTest::validatesPromptStyles()
 void ServiceSdkTest::identityPackages()
 {
     const QByteArray png = QByteArray::fromHex("89504e470d0a1a0a") + QByteArray(2000, 'x');
-    KiraService::IdentityPackage original;
+    Nukleus::IdentityPackage original;
     original.references = {png, png + "2", png + "3", png + "4"};
     original.identityPrompt = "adult with green eyes";
     original.hairPrompt = "curly brown hair";
@@ -216,11 +216,11 @@ void ServiceSdkTest::identityPackages()
     original.editPrompt = "Edit the face and hair to match the reference images.";
     original.seed = 123;
     QString error;
-    const auto package = KiraService::packIdentity(original, &error);
+    const auto package = Nukleus::packIdentity(original, &error);
     QVERIFY2(!package.isEmpty(), qPrintable(error));
     QVERIFY(package.startsWith("PK"));
-    KiraService::IdentityPackage decoded;
-    QVERIFY2(KiraService::unpackIdentity(package, decoded, &error), qPrintable(error));
+    Nukleus::IdentityPackage decoded;
+    QVERIFY2(Nukleus::unpackIdentity(package, decoded, &error), qPrintable(error));
     QCOMPARE(decoded.references, original.references);
     QCOMPARE(decoded.identityPrompt, original.identityPrompt);
     QCOMPARE(decoded.hairPrompt, original.hairPrompt);
@@ -240,67 +240,67 @@ void ServiceSdkTest::identityPackages()
     archive_read_free(reader);
     names.sort();
     QCOMPARE(names, QStringList({"manifest.json", "reference-2.png", "reference-3.png", "reference-4.png", "reference.png"}));
-    QVERIFY(!KiraService::unpackIdentity("not a zip", decoded, &error));
+    QVERIFY(!Nukleus::unpackIdentity("not a zip", decoded, &error));
     QVERIFY(!error.isEmpty());
     QVERIFY(decoded.references.isEmpty());
-    QVERIFY(!KiraService::unpackIdentity(package.left(package.size() / 2), decoded));
-    QVERIFY(KiraService::packIdentity({}).isEmpty());
+    QVERIFY(!Nukleus::unpackIdentity(package.left(package.size() / 2), decoded));
+    QVERIFY(Nukleus::packIdentity({}).isEmpty());
     original.references = {"not a png"};
-    QVERIFY(KiraService::packIdentity(original).isEmpty());
+    QVERIFY(Nukleus::packIdentity(original).isEmpty());
     original.references = {png, png, png, png, png};
-    QVERIFY(KiraService::packIdentity(original).isEmpty());
+    QVERIFY(Nukleus::packIdentity(original).isEmpty());
 }
 
 void ServiceSdkTest::configuresAndCancelsModels()
 {
-    FakeSdkService service; QVERIFY(service.start()); KiraService::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService(); QTRY_VERIFY(client.modelListAvailable());
-    QCOMPARE(client.models(KiraService::ModelCategory::Upscaler).first().recommendedOptions, QJsonObject{});
-    QSignalSpy configured(&client, &KiraService::ServiceClient::modelConfigured);
+    FakeSdkService service; QVERIFY(service.start()); Nukleus::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService(); QTRY_VERIFY(client.modelListAvailable());
+    QCOMPARE(client.models(Nukleus::ModelCategory::Upscaler).first().recommendedOptions, QJsonObject{});
+    QSignalSpy configured(&client, &Nukleus::ServiceClient::modelConfigured);
     QVERIFY(!client.configureModel("upscaler:test.gguf", {}, {}, QString("  ")));
-    QVERIFY(client.installModel(KiraService::ModelCategory::LlmChat, QUrl("https://example.test/model.gguf")).isEmpty());
+    QVERIFY(client.installModel(Nukleus::ModelCategory::LlmChat, QUrl("https://example.test/model.gguf")).isEmpty());
     QVERIFY(client.configureModel("upscaler:test.gguf", {}, {}, QString("Upscaler"))); QTRY_COMPARE(configured.count(), 1); QCOMPARE(configured.first().at(1).value<QJsonObject>(), QJsonObject{});
-    const auto options = KiraService::Protocol::defaultModelOptions("llm-chat");
-    const auto id = client.installModel(KiraService::ModelCategory::LlmChat, QUrl("https://example.test/model.gguf"), {}, options, {}, "checkpoint", {}, true, QString("Chat")); QVERIFY(!id.isEmpty());
-    QTRY_COMPARE(client.installs().last().state, KiraService::ModelInstallState::Accepted);
+    const auto options = Nukleus::Protocol::defaultModelOptions("llm-chat");
+    const auto id = client.installModel(Nukleus::ModelCategory::LlmChat, QUrl("https://example.test/model.gguf"), {}, options, {}, "checkpoint", {}, true, QString("Chat")); QVERIFY(!id.isEmpty());
+    QTRY_COMPARE(client.installs().last().state, Nukleus::ModelInstallState::Accepted);
     const auto installMessage = std::find_if(service.messages().cbegin(), service.messages().cend(), [](const QJsonObject &message) { return message.value("type") == "models.install"; });
     QVERIFY(installMessage != service.messages().cend()); QCOMPARE(installMessage->value("recommendedOptions").toObject(), options);
     QVERIFY(installMessage->value("explicitContent").toBool());
-    QVERIFY(client.cancelInstall(id)); QTRY_COMPARE(client.installs().last().state, KiraService::ModelInstallState::Canceled);
-    client.disconnectFromService(); QTRY_VERIFY(!client.isAuthenticated()); QCOMPARE(client.installs().last().state, KiraService::ModelInstallState::Canceled);
+    QVERIFY(client.cancelInstall(id)); QTRY_COMPARE(client.installs().last().state, Nukleus::ModelInstallState::Canceled);
+    client.disconnectFromService(); QTRY_VERIFY(!client.isAuthenticated()); QCOMPARE(client.installs().last().state, Nukleus::ModelInstallState::Canceled);
 }
 
 void ServiceSdkTest::preservesProtocolV3()
 {
-    QCOMPARE(KiraService::Protocol::Version, 3);
-    QCOMPARE(KiraService::Protocol::DefaultPort, quint16(9384));
+    QCOMPARE(Nukleus::Protocol::Version, 3);
+    QCOMPARE(Nukleus::Protocol::DefaultPort, quint16(9384));
 }
 
 void ServiceSdkTest::authenticatesAndDiscoversModels()
 {
     FakeSdkService service; QVERIFY2(service.start(), qPrintable(service.errorString()));
-    KiraService::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+    Nukleus::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
     QTRY_VERIFY(client.isAuthenticated());
     QTRY_VERIFY(client.modelListAvailable());
-    QCOMPARE(client.models(KiraService::ModelCategory::ImageGeneration).size(), 1);
-    QVERIFY(client.canSubmit(KiraService::ImageOperation::Edit, "image-generation:test.safetensors"));
-    QVERIFY(client.models(KiraService::ModelCategory::ImageGeneration).first().explicitContent);
-    QCOMPARE(client.models(KiraService::ModelCategory::LlmChat).first().companionRole, QStringLiteral("mmproj"));
-    QCOMPARE(client.models(KiraService::ModelCategory::ImageGeneration).first().modelType, QString("diffusion"));
-    QVERIFY(client.models(KiraService::ModelCategory::ImageGeneration).first().styles.isEmpty());
-    QCOMPARE(client.models(KiraService::ModelCategory::ImageGeneration).first().companionFiles.value("clip-l").toString(), QString("companions/test.safetensors/clip-l/clip_l.safetensors"));
-    QCOMPARE(client.models(KiraService::ModelCategory::ImageGeneration).first().companionFileName, QStringLiteral("companions/test.safetensors/vae.safetensors"));
-    QCOMPARE(client.models(KiraService::ModelCategory::Upscaler).size(), 1);
-    QCOMPARE(client.models(KiraService::ModelCategory::LlmChat).size(), 1);
+    QCOMPARE(client.models(Nukleus::ModelCategory::ImageGeneration).size(), 1);
+    QVERIFY(client.canSubmit(Nukleus::ImageOperation::Edit, "image-generation:test.safetensors"));
+    QVERIFY(client.models(Nukleus::ModelCategory::ImageGeneration).first().explicitContent);
+    QCOMPARE(client.models(Nukleus::ModelCategory::LlmChat).first().companionRole, QStringLiteral("mmproj"));
+    QCOMPARE(client.models(Nukleus::ModelCategory::ImageGeneration).first().modelType, QString("diffusion"));
+    QVERIFY(client.models(Nukleus::ModelCategory::ImageGeneration).first().styles.isEmpty());
+    QCOMPARE(client.models(Nukleus::ModelCategory::ImageGeneration).first().companionFiles.value("clip-l").toString(), QString("companions/test.safetensors/clip-l/clip_l.safetensors"));
+    QCOMPARE(client.models(Nukleus::ModelCategory::ImageGeneration).first().companionFileName, QStringLiteral("companions/test.safetensors/vae.safetensors"));
+    QCOMPARE(client.models(Nukleus::ModelCategory::Upscaler).size(), 1);
+    QCOMPARE(client.models(Nukleus::ModelCategory::LlmChat).size(), 1);
 }
 
 void ServiceSdkTest::submitsTextChat()
 {
     FakeSdkService service; QVERIFY2(service.start(), qPrintable(service.errorString()));
-    KiraService::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+    Nukleus::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
     QTRY_VERIFY(client.canChat("llm-chat:test.gguf"));
     QCOMPARE(client.capabilities().textChatEngines, QStringList({"server", "completion"}));
     QVERIFY(!client.canChat("image-generation:test.safetensors"));
-    QSignalSpy finished(&client, &KiraService::ServiceClient::chatFinished);
+    QSignalSpy finished(&client, &Nukleus::ServiceClient::chatFinished);
     const QJsonObject parameters{{"engine", "server"}, {"kvCacheLocation", "ram"}};
     const auto id = client.submitChat({"llm-chat:test.gguf", {{"system", "You are Mia."}, {"user", "Hi."}}, parameters});
     QVERIFY(!id.isEmpty());
@@ -313,7 +313,7 @@ void ServiceSdkTest::submitsTextChat()
     QCOMPARE(options.value("messages").toArray(), QJsonArray({QJsonObject{{"role", "system"}, {"content", "You are Mia."}},
         QJsonObject{{"role", "user"}, {"content", "Hi."}}}));
     QCOMPARE(options.value("parameters").toObject(), parameters);
-    const auto result = qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0));
+    const auto result = qvariant_cast<Nukleus::TextChatResult>(finished.takeFirst().at(0));
     QVERIFY(result.succeeded); QCOMPARE(result.jobId, id);
     QCOMPARE(result.text, QString("*smiles* Hello")); QCOMPARE(result.engine, QString("server"));
     QCOMPARE(result.finishReason, QString("length"));
@@ -323,13 +323,13 @@ void ServiceSdkTest::submitsTextChat()
 
     QVERIFY(!client.submitChat({"llm-chat:test.gguf", {{"user", "fail"}}, {}}).isEmpty());
     QTRY_COMPARE(finished.count(), 1);
-    const auto failure = qvariant_cast<KiraService::TextChatResult>(finished.takeFirst().at(0));
+    const auto failure = qvariant_cast<Nukleus::TextChatResult>(finished.takeFirst().at(0));
     QVERIFY(!failure.succeeded); QCOMPARE(failure.errorCode, QString("chat-context-exceeded"));
     QCOMPARE(failure.message, QString("too long")); QVERIFY(failure.text.isEmpty());
     QVERIFY(!service.messages().last().value("options").toObject().contains("parameters"));
 
     QVERIFY(client.capabilities().chatModelControl);
-    QSignalSpy modelFinished(&client, &KiraService::ServiceClient::chatModelFinished);
+    QSignalSpy modelFinished(&client, &Nukleus::ServiceClient::chatModelFinished);
     QVERIFY(client.loadChatModel("missing", parameters).isEmpty());
     const auto loadId = client.loadChatModel("llm-chat:test.gguf", parameters);
     QVERIFY(!loadId.isEmpty());
@@ -337,29 +337,29 @@ void ServiceSdkTest::submitsTextChat()
     const auto load = service.messages().last();
     QCOMPARE(load.value("operation").toString(), QString("text.chat.load"));
     QCOMPARE(load.value("options").toObject(), QJsonObject({{"modelId", "llm-chat:test.gguf"}, {"parameters", parameters}}));
-    auto model = qvariant_cast<KiraService::ChatModelResult>(modelFinished.takeFirst().at(0));
+    auto model = qvariant_cast<Nukleus::ChatModelResult>(modelFinished.takeFirst().at(0));
     QVERIFY(model.succeeded); QVERIFY(model.load); QVERIFY(model.coldStart); QCOMPARE(model.jobId, loadId);
     QCOMPARE(model.durationMs, 50);
     QVERIFY(!client.unloadChatModel().isEmpty());
     QTRY_COMPARE(modelFinished.count(), 1);
     QCOMPARE(service.messages().last().value("operation").toString(), QString("text.chat.unload"));
     QVERIFY(!service.messages().last().contains("options"));
-    model = qvariant_cast<KiraService::ChatModelResult>(modelFinished.takeFirst().at(0));
+    model = qvariant_cast<Nukleus::ChatModelResult>(modelFinished.takeFirst().at(0));
     QVERIFY(model.succeeded); QVERIFY(!model.load); QVERIFY(model.unloaded);
 }
 
 void ServiceSdkTest::submitsBinaryInputAndReturnsBinaryOutput()
 {
     FakeSdkService service; QVERIFY2(service.start(), qPrintable(service.errorString()));
-    KiraService::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+    Nukleus::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
     QTRY_VERIFY(client.modelListAvailable());
-    QSignalSpy finished(&client, &KiraService::ServiceClient::imageJobFinished);
-    KiraService::ImageUpscaleRequest request{QByteArray("source-bytes"), QStringLiteral("upscaler:test.gguf")};
-    QTRY_VERIFY(client.canSubmit(KiraService::ImageOperation::Upscale, request.modelId));
+    QSignalSpy finished(&client, &Nukleus::ServiceClient::imageJobFinished);
+    Nukleus::ImageUpscaleRequest request{QByteArray("source-bytes"), QStringLiteral("upscaler:test.gguf")};
+    QTRY_VERIFY(client.canSubmit(Nukleus::ImageOperation::Upscale, request.modelId));
     const QString jobId = client.submitUpscale(request);
     QVERIFY(!jobId.isEmpty());
     QTRY_COMPARE(finished.count(), 1);
-    const auto result = finished.takeFirst().at(0).value<KiraService::ImageJobResult>();
+    const auto result = finished.takeFirst().at(0).value<Nukleus::ImageJobResult>();
     QVERIFY(result.succeeded);
     QCOMPARE(result.imageData, QByteArray("sdk-result"));
     for (const QJsonObject &message : service.messages()) QVERIFY(!QJsonDocument(message).toJson().contains("source-bytes"));
@@ -368,10 +368,10 @@ void ServiceSdkTest::submitsBinaryInputAndReturnsBinaryOutput()
 void ServiceSdkTest::installsModelWithCompanion()
 {
     FakeSdkService service; QVERIFY(service.start());
-    KiraService::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+    Nukleus::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
     QTRY_VERIFY(client.modelListAvailable());
     const QUrl companion(QStringLiteral("https://example.test/vae.safetensors"));
-    QVERIFY(!client.installModel(KiraService::ModelCategory::ImageGeneration, QUrl(QStringLiteral("https://example.test/model.gguf")), companion, {}, {}, "checkpoint", {}, {}, QString("Generator")).isEmpty());
+    QVERIFY(!client.installModel(Nukleus::ModelCategory::ImageGeneration, QUrl(QStringLiteral("https://example.test/model.gguf")), companion, {}, {}, "checkpoint", {}, {}, QString("Generator")).isEmpty());
     QTRY_VERIFY(std::any_of(service.messages().cbegin(), service.messages().cend(), [](const QJsonObject &message) {
         return message.value(QStringLiteral("type")).toString() == QStringLiteral("models.install");
     }));
@@ -385,13 +385,13 @@ void ServiceSdkTest::installsModularCompanionsForExistingModel()
 {
     FakeSdkService service;
     QVERIFY(service.start());
-    KiraService::ServiceClient client;
+    Nukleus::ServiceClient client;
     client.setConfiguration(service.endpoint(), {});
     client.connectToService();
     QTRY_VERIFY(client.modelListAvailable());
     const QJsonObject files{{"clip-l", "https://example.test/clip_l.safetensors"},
         {"clip-g", "https://example.test/clip_g.safetensors"}};
-    const auto installId = client.installModel(KiraService::ModelCategory::ImageGeneration, {}, {}, {}, files,
+    const auto installId = client.installModel(Nukleus::ModelCategory::ImageGeneration, {}, {}, {}, files,
         "diffusion", "image-generation:test.safetensors");
     QVERIFY(!installId.isEmpty());
     QTRY_VERIFY(std::any_of(service.messages().cbegin(), service.messages().cend(), [&](const auto &message) {
@@ -407,12 +407,12 @@ void ServiceSdkTest::installsModularCompanionsForExistingModel()
 void ServiceSdkTest::supportsMultipleJobs()
 {
     FakeSdkService service; QVERIFY2(service.start(), qPrintable(service.errorString()));
-    KiraService::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+    Nukleus::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
     QTRY_VERIFY(client.modelListAvailable());
-    QSignalSpy finished(&client, &KiraService::ServiceClient::imageJobFinished);
-    KiraService::ImageGenerationRequest first; first.prompt = QStringLiteral("one"); first.modelId = QStringLiteral("image-generation:test.safetensors"); first.clipSkip = 2;
-    KiraService::ImageGenerationRequest second = first; second.prompt = QStringLiteral("two");
-    QTRY_VERIFY(client.canSubmit(KiraService::ImageOperation::Generate, first.modelId));
+    QSignalSpy finished(&client, &Nukleus::ServiceClient::imageJobFinished);
+    Nukleus::ImageGenerationRequest first; first.prompt = QStringLiteral("one"); first.modelId = QStringLiteral("image-generation:test.safetensors"); first.clipSkip = 2;
+    Nukleus::ImageGenerationRequest second = first; second.prompt = QStringLiteral("two");
+    QTRY_VERIFY(client.canSubmit(Nukleus::ImageOperation::Generate, first.modelId));
     QVERIFY(!client.submitGeneration(first).isEmpty());
     QVERIFY(!client.submitGeneration(second).isEmpty());
     QTRY_COMPARE(finished.count(), 2);
@@ -426,11 +426,11 @@ void ServiceSdkTest::supportsMultipleJobs()
 
 void ServiceSdkTest::reportsConnectionFailure()
 {
-    KiraService::ServiceClient client; QSignalSpy states(&client, &KiraService::ServiceClient::serviceStateChanged);
+    Nukleus::ServiceClient client; QSignalSpy states(&client, &Nukleus::ServiceClient::serviceStateChanged);
     client.setConfiguration(QUrl(QStringLiteral("ws://127.0.0.1:1")), {}); client.connectToService();
     QTRY_VERIFY_WITH_TIMEOUT(states.count() >= 2, 2000);
-    QVERIFY(states.last().at(0).value<KiraService::ServiceConnectionState>() == KiraService::ServiceConnectionState::Disconnected
-            || states.last().at(0).value<KiraService::ServiceConnectionState>() == KiraService::ServiceConnectionState::Error);
+    QVERIFY(states.last().at(0).value<Nukleus::ServiceConnectionState>() == Nukleus::ServiceConnectionState::Disconnected
+            || states.last().at(0).value<Nukleus::ServiceConnectionState>() == Nukleus::ServiceConnectionState::Error);
 }
 
 QTEST_MAIN(ServiceSdkTest)

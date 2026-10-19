@@ -21,7 +21,7 @@
 #include <QStandardItemModel>
 #include <QUuid>
 #include <QVBoxLayout>
-#include <kira/service/ModelOptions.h>
+#include <nukleus/ModelOptions.h>
 
 namespace
 {
@@ -98,14 +98,14 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
     m_editing = entry(tr("Editing"), Editing);
     m_model->appendRow(m_generation);
     m_model->appendRow(m_editing);
-    const auto routing = client->modelRouting().value_or(KiraService::Protocol::starterModelRouting());
-    const auto setAssignment = [this](QStandardItem *item, const KiraService::ModelAssignment &assignment) {
+    const auto routing = client->modelRouting().value_or(Nukleus::Protocol::starterModelRouting());
+    const auto setAssignment = [this](QStandardItem *item, const Nukleus::ModelAssignment &assignment) {
         item->setData(assignment.modelId, ModelRole);
         auto steps = assignment.steps;
         auto cfg = assignment.cfgScale;
         if (!assignment.modelId.isEmpty())
         {
-            const auto defaults = KiraService::Protocol::defaultModelOptions("image-generation");
+            const auto defaults = Nukleus::Protocol::defaultModelOptions("image-generation");
             QJsonObject options;
             for (const auto &model : m_client->models("image-generation"))
                 if (model.id == assignment.modelId)
@@ -242,7 +242,7 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
             item->setData(text, NameFrRole);
     });
     connect(m_addPreset, &QAbstractButton::clicked, this, [this] {
-        KiraService::GenerationPreset preset{"preset-" + QUuid::createUuid().toString(QUuid::Id128).left(12),
+        Nukleus::GenerationPreset preset{"preset-" + QUuid::createUuid().toString(QUuid::Id128).left(12),
                                              tr("New preset"), {}, {}, {}};
         preset.nameFr = QStringLiteral("Nouveau préréglage");
         auto *item = addPresetItem(preset);
@@ -280,7 +280,7 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
             return;
         const auto id = m_assignment->currentData().toString();
         item->setData(id, ModelRole);
-        const auto defaults = KiraService::Protocol::defaultModelOptions("image-generation");
+        const auto defaults = Nukleus::Protocol::defaultModelOptions("image-generation");
         QJsonObject options;
         for (const auto &model : m_client->models("image-generation"))
             if (model.id == id)
@@ -366,7 +366,7 @@ void ModelRoutingDialog::showSelection()
         qMax(0, m_identityViews->findData(kind == Preset ? item->data(IdentityViewsRole).toInt() : 1)));
     refreshModels();
     m_showing = true;
-    const auto defaults = KiraService::Protocol::defaultModelOptions("image-generation");
+    const auto defaults = Nukleus::Protocol::defaultModelOptions("image-generation");
     m_steps->setValue(model && item->data(StepsRole).isValid() ? item->data(StepsRole).toInt()
                                                                : defaults.value("steps").toInt());
     m_cfg->setValue(model && item->data(CfgRole).isValid() ? item->data(CfgRole).toDouble()
@@ -402,7 +402,7 @@ void ModelRoutingDialog::refreshModels()
     m_showing = false;
 }
 
-QStandardItem *ModelRoutingDialog::addPresetItem(const KiraService::GenerationPreset &preset)
+QStandardItem *ModelRoutingDialog::addPresetItem(const Nukleus::GenerationPreset &preset)
 {
     auto *item = entry(preset.name, Preset, preset.id);
     item->setData(preset.nameFr, NameFrRole);
@@ -414,10 +414,10 @@ QStandardItem *ModelRoutingDialog::addPresetItem(const KiraService::GenerationPr
     return item;
 }
 
-KiraService::ModelRouting ModelRoutingDialog::configuration() const
+Nukleus::ModelRouting ModelRoutingDialog::configuration() const
 {
-    KiraService::ModelRouting routing;
-    const auto assignment = [](KiraService::ModelAssignment &a, const QStandardItem *item) {
+    Nukleus::ModelRouting routing;
+    const auto assignment = [](Nukleus::ModelAssignment &a, const QStandardItem *item) {
         a.modelId = item->data(ModelRole).toString();
         if (item->data(StepsRole).isValid())
             a.steps = item->data(StepsRole).toInt();
@@ -454,11 +454,11 @@ KiraService::ModelRouting ModelRoutingDialog::configuration() const
 void ModelRoutingDialog::updateActions()
 {
     QString error;
-    const bool valid = KiraService::Protocol::validateModelRouting(configuration(), &error);
+    const bool valid = Nukleus::Protocol::validateModelRouting(configuration(), &error);
     m_save->setEnabled(!m_saving && m_client->isAuthenticated() && m_client->supportsModelRouting() && valid);
     m_tree->setEnabled(!m_saving);
     m_addPreset->setEnabled(!m_saving &&
-                            m_generation->rowCount() < KiraService::Protocol::MaximumGenerationPresets);
+                            m_generation->rowCount() < Nukleus::Protocol::MaximumGenerationPresets);
     m_removePreset->setEnabled(!m_saving && selectedPreset(selectedItem()) && m_generation->rowCount() > 1);
     m_editor->setEnabled(!m_saving);
     m_cancel->setEnabled(!m_saving);

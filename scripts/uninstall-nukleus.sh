@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-readonly SERVICE_NAME="kira-service"
+readonly SERVICE_NAME="nukleus"
 install_root=""
 user_bin_path=""
 desktop_dir_override=""
@@ -12,19 +12,19 @@ yes=false
 
 usage() {
     cat <<'EOF'
-Usage: sudo scripts/uninstall-kira-service.sh [options]
+Usage: sudo scripts/uninstall-nukleus.sh [options]
 
-Remove the installed Kira Service program, model manager, and systemd unit.
+Remove the installed Nukleus program, model manager, and systemd unit.
 Configuration and downloaded model data are retained unless --purge is confirmed.
 
 Options:
   --root PATH  Remove files staged under PATH instead of the live filesystem
   --user-bin PATH
-               User-local bin directory containing kira-service-manager
+               User-local bin directory containing nukleus-manager
   --desktop-dir PATH
                Directory holding the manager desktop shortcut
                (default: the user's XDG desktop directory)
-  --purge      Also remove /etc/kira-service and /var/lib/kira-service
+  --purge      Also remove /etc/nukleus and /var/lib/nukleus
   --yes        Confirm --purge without prompting
   --dry-run    Print actions without modifying the filesystem
   -h, --help   Show this help
@@ -81,19 +81,19 @@ if [[ -z "$install_root" ]]; then
 fi
 run rm -f "$(destination "/usr/lib/systemd/system/$SERVICE_NAME.service")"
 run rm -rf "$(destination "/usr/local/libexec/$SERVICE_NAME")"
-run rm -f "$(destination "$user_bin_path/kira-service-manager")"
+run rm -f "$(destination "$user_bin_path/nukleus-manager")"
 user_data_path="$(dirname -- "$user_bin_path")/share"
-run rm -f "$(destination "$user_data_path/applications/kira-service-manager.desktop")"
+run rm -f "$(destination "$user_data_path/applications/nukleus-manager.desktop")"
 for size in 16 32 48 64 128 256 512; do
-    run rm -f "$(destination "$user_data_path/icons/hicolor/${size}x${size}/apps/kira-service-manager.png")"
+    run rm -f "$(destination "$user_data_path/icons/hicolor/${size}x${size}/apps/nukleus-manager.png")"
 done
 desktop_dir="$desktop_dir_override"
 if [[ -z "$desktop_dir" && -z "$install_root" && -n "$manager_user" ]]; then
     desktop_dir="$(runuser -u "$manager_user" -- xdg-user-dir DESKTOP 2>/dev/null || true)"
 fi
-shortcut="$(destination "$desktop_dir")/kira-service-manager.desktop"
+shortcut="$(destination "$desktop_dir")/nukleus-manager.desktop"
 # Only remove a shortcut that this installer created.
-if [[ -n "$desktop_dir" && -f "$shortcut" ]] && grep -qx 'StartupWMClass=kira-service-manager' "$shortcut"; then
+if [[ -n "$desktop_dir" && -f "$shortcut" ]] && grep -qx 'StartupWMClass=nukleus-manager' "$shortcut"; then
     run rm -f "$shortcut"
 fi
 if [[ -z "$install_root" ]]; then
@@ -108,7 +108,7 @@ if "$purge"; then
     run rm -rf "$(destination "/etc/$SERVICE_NAME")" "$(destination "/var/lib/$SERVICE_NAME")"
 fi
 
-printf 'Kira Service program and systemd unit removed.\n'
+printf 'Nukleus program and systemd unit removed.\n'
 if ! "$purge"; then
     printf 'Configuration and model data were retained. Re-run with --purge to remove them.\n'
 fi

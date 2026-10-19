@@ -1,4 +1,4 @@
-#include "kira/service/Identity.h"
+#include "nukleus/Identity.h"
 #include <archive.h>
 #include <archive_entry.h>
 #include <QJsonDocument>
@@ -22,7 +22,7 @@ QString archiveError(archive *handle)
 }
 }
 
-QByteArray KiraService::packIdentity(const IdentityPackage& identity, QString* error)
+QByteArray Nukleus::packIdentity(const IdentityPackage& identity, QString* error)
 {
     if (error) error->clear();
     qsizetype inputSize = 0;
@@ -78,7 +78,7 @@ QByteArray KiraService::packIdentity(const IdentityPackage& identity, QString* e
     return output;
 }
 
-bool KiraService::unpackIdentity(const QByteArray& package, IdentityPackage& identity, QString* error)
+bool Nukleus::unpackIdentity(const QByteArray& package, IdentityPackage& identity, QString* error)
 {
     identity = {};
     if (error) error->clear();

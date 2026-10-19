@@ -1,6 +1,6 @@
-# Kira Service
+# Nukleus
 
-Kira Service is the standalone backend for Kira applications. It owns installed models and their recommended options, single HTTPS model installations, the `sd-cli` image queue, and the versioned WebSocket API. Client applications select opaque installed-model IDs and submit jobs; they do not manage service files.
+Nukleus is the standalone backend for Kira applications. It owns installed models and their recommended options, single HTTPS model installations, the `sd-cli` image queue, and the versioned WebSocket API. Client applications select opaque installed-model IDs and submit jobs; they do not manage service files.
 
 Editing reuses **Image generation** models directly. image.edit accepts their
 original opaque IDs and resolves the same primary weights, model type and companions.
@@ -23,7 +23,7 @@ prompt is a per-job override. Model settings are unchanged by individual request
 
 Install llama.cpp's `llama-server` (or `llama-completion`) executable on the
 service host to enable this capability. It must be on the daemon's PATH;
-alternatively set `KIRA_LLAMA_SERVER` or `KIRA_LLAMA_COMPLETION` to its
+alternatively set `NUKLEUS_LLAMA_SERVER` or `NUKLEUS_LLAMA_COMPLETION` to its
 absolute path in the service environment.
 
 text.chat sends a client-built conversation (system, user and assistant
@@ -35,9 +35,9 @@ the model on every turn. Clients choose the engine, sampling, GPU layer count
 and KV-cache placement per request. `llama-server` starts on the first chat
 that needs it, or earlier through `text.chat.load`; `text.chat.unload` stops
 it. The service also unloads it before any other job and after ten minutes
-without a chat. Set `KIRA_LLAMA_SERVER` to
-override the executable and `KIRA_LLAMA_SERVER_IDLE_SECONDS` to change the
-idle period, for example in `/etc/kira-service/kira-service.conf`. See
+without a chat. Set `NUKLEUS_LLAMA_SERVER` to
+override the executable and `NUKLEUS_LLAMA_SERVER_IDLE_SECONDS` to change the
+idle period, for example in `/etc/nukleus/nukleus.conf`. See
 [`docs/protocol-v3.md`](docs/protocol-v3.md).
 
 Model installation preserves existing files: filename collisions receive a
@@ -74,8 +74,8 @@ For a standard CMake prefix installation of the executables:
 cmake --install build --prefix "$HOME/.local"
 ```
 
-This installs the daemon under `libexec/kira-service/` and the manager under
-`bin/`. Use `scripts/install-kira-service.sh` for the complete Linux systemd
+This installs the daemon under `libexec/nukleus/` and the manager under
+`bin/`. Use `scripts/install-nukleus.sh` for the complete Linux systemd
 installation, including configuration, service-account setup, model storage,
 and the user-local manager installation.
 
@@ -83,13 +83,13 @@ Sources are organized under `src/daemon/`, `src/manager/`, and
 `src/sdk/`. The executable targets remain declared by
 `src/CMakeLists.txt`, so built binaries continue to appear under `build/src/`.
 
-The reusable image client is exported as `KiraService::SDK`; the namespaced
-wire implementation is `KiraService::Protocol`. Install the static SDK and
+The reusable image client is exported as `Nukleus::SDK`; the namespaced
+wire implementation is `Nukleus::Protocol`. Install the static SDK and
 headers with `cmake --install build --prefix "$HOME/.local"`, then consume it
-with `find_package(KiraServiceSdk CONFIG REQUIRED)`. The SDK supports image
+with `find_package(NukleusSdk CONFIG REQUIRED)`. The SDK supports image
 generation, fixed 2× upscaling, model discovery, progress, and binary results.
 
-`kira-service` is the daemon. `kira-service-manager --gui` opens the
+`nukleusd` is the daemon. `nukleus-manager --gui` opens the
 administrator UI with the shared dark Kira theme: a category/model tree on the
 left and editable recommended options on the right. Its window content has a fixed,
 non-resizable size of 1100 × 640 logical pixels, excluding the native title bar.
@@ -177,13 +177,13 @@ assignment supplies `--llm_vision` when present. Standalone models use `--diffus
 The manager also provides local CLI operations:
 
 ```sh
-kira-service-manager list
-kira-service-manager add https://huggingface.co/owner/repo/resolve/main/model.gguf --category upscaler --display-name "Upscaler"
-kira-service-manager add https://example.com/projector.gguf --category companion --companion-type mmproj --display-name "Vision projector"
-kira-service-manager add https://example.com/model.gguf --category llm-chat --display-name "Chat" --mmproj-model companion:projector.gguf
-kira-service-manager add https://example.com/edit.safetensors --category image-generation --display-name "Image model" --vae https://example.com/vae.safetensors
-kira-service-manager attach image-generation:existing.gguf --model-type diffusion --clip-l https://example.com/clip_l.safetensors --clip-g https://example.com/clip_g.safetensors --vae https://example.com/vae.safetensors
-kira-service-manager delete upscaler:model.gguf
+nukleus-manager list
+nukleus-manager add https://huggingface.co/owner/repo/resolve/main/model.gguf --category upscaler --display-name "Upscaler"
+nukleus-manager add https://example.com/projector.gguf --category companion --companion-type mmproj --display-name "Vision projector"
+nukleus-manager add https://example.com/model.gguf --category llm-chat --display-name "Chat" --mmproj-model companion:projector.gguf
+nukleus-manager add https://example.com/edit.safetensors --category image-generation --display-name "Image model" --vae https://example.com/vae.safetensors
+nukleus-manager attach image-generation:existing.gguf --model-type diffusion --clip-l https://example.com/clip_l.safetensors --clip-g https://example.com/clip_g.safetensors --vae https://example.com/vae.safetensors
+nukleus-manager delete upscaler:model.gguf
 ```
 
 Use `--help` for all options. CLI and GUI manager connections are local-only and do not require manual host or token configuration.
@@ -192,9 +192,9 @@ Use `--help` for all options. CLI and GUI manager connections are local-only and
 
 Image-generation models support generation and image.edit with uploaded reference images.
 
-Service models live in `$XDG_DATA_HOME/kira-service/models/`: image-generation files in `models/`, upscalers in `models/upscale/`, LLM files in `models/llm/`, and shared VAE/MMPROJ companions in `models/companion/`. Assignments use opaque IDs and never expose service paths or delete shared files with a primary. The manager accepts HTTPS sources and local imports, never overwriting installed weights. VAE accepts `.safetensors`, `.ckpt`, or `.gguf`; MMPROJ requires `.gguf`. Hugging Face `blob` links normalize to `resolve` URLs. SHA-256 verification is not supported. Legacy category-local attachments remain stored under `companions/<primary filename>/`; legacy VAE/LLM weights remain usable as fallbacks. modelType defaults to checkpoint when absent.
+Service models live in `$XDG_DATA_HOME/nukleus/models/`: image-generation files in `models/`, upscalers in `models/upscale/`, LLM files in `models/llm/`, and shared VAE/MMPROJ companions in `models/companion/`. Assignments use opaque IDs and never expose service paths or delete shared files with a primary. The manager accepts HTTPS sources and local imports, never overwriting installed weights. VAE accepts `.safetensors`, `.ckpt`, or `.gguf`; MMPROJ requires `.gguf`. Hugging Face `blob` links normalize to `resolve` URLs. SHA-256 verification is not supported. Legacy category-local attachments remain stored under `companions/<primary filename>/`; legacy VAE/LLM weights remain usable as fallbacks. modelType defaults to checkpoint when absent.
 
-`kira-service --models-dir DIR --config-dir DIR` selects a split layout instead: weights in `models-dir/{generation,upscale,llm,companion}/` and the catalogue (`generation.json`, `upscale.json`, `llm.json`, `companion.json`, each in the former category `metadata.json` format, plus `model-routing.json`) in `config-dir/catalog/`. Both options are required together; the daemon creates the directories at startup. See `docs/plans/storage-layout.md`.
+`nukleusd --models-dir DIR --config-dir DIR` selects a split layout instead: weights in `models-dir/{generation,upscale,llm,companion}/` and the catalogue (`generation.json`, `upscale.json`, `llm.json`, `companion.json`, each in the former category `metadata.json` format, plus `model-routing.json`) in `config-dir/catalog/`. Both options are required together; the daemon creates the directories at startup. See `docs/plans/storage-layout.md`.
 
 The Linux installer moves legacy models from `$XDG_DATA_HOME/kira-canvas/models/` during an upgrade. It aborts without changing either directory if both model roots already exist.
 
@@ -217,30 +217,50 @@ updating them, then check that the journal no longer reports a missing
 `sd-cli`:
 
 ```sh
-sudo systemctl restart kira-service
-journalctl -u kira-service -n 20
+sudo systemctl restart nukleus
+journalctl -u nukleus -n 20
 ```
 
 The unit sets `ProtectHome=true`, so the service cannot run executables from a
 home directory: install manually built tools outside `/home` (for example
-`/usr/local/bin`) or point `KIRA_LLAMA_SERVER`/`KIRA_LLAMA_COMPLETION` at such a
+`/usr/local/bin`) or point `NUKLEUS_LLAMA_SERVER`/`NUKLEUS_LLAMA_COMPLETION` at such a
 path. Manual Vulkan builds of llama.cpp also need the `spirv-headers` package.
 
 ### Installing the service
 
 ```sh
-sudo scripts/install-kira-service.sh --binary build/src/kira-service --manager-binary build/src/kira-service-manager
+sudo scripts/install-nukleus.sh --binary build/src/nukleusd --manager-binary build/src/nukleus-manager
 ```
 
-The installer uses port `9384`, preserves a valid existing bind/token configuration, installs the manager into the invoking user's `~/.local/bin` with an application-menu entry (`~/.local/share/applications`, icons under `~/.local/share/icons/hicolor` referenced by absolute path); `--desktop-shortcut` also adds a shortcut to the user's XDG desktop directory, or `--desktop-dir PATH` to another directory, and restarts updated installations. A LAN binding listens on both `127.0.0.1` and the selected IPv4 address. Loopback manager clients authenticate without a token; non-loopback clients require the shared LAN token. Configuration remains under `/etc/kira-service/`; system-service model data resolves to `/var/lib/kira-service/data/kira-service/models/`.
+The installer uses port `9384`, preserves a valid existing bind/token configuration, installs the manager into the invoking user's `~/.local/bin` with an application-menu entry (`~/.local/share/applications`, icons under `~/.local/share/icons/hicolor` referenced by absolute path); `--desktop-shortcut` also adds a shortcut to the user's XDG desktop directory, or `--desktop-dir PATH` to another directory, and restarts updated installations. A LAN binding listens on both `127.0.0.1` and the selected IPv4 address. Loopback manager clients authenticate without a token; non-loopback clients require the shared LAN token. Configuration remains under `/etc/nukleus/`; system-service model data resolves to `/var/lib/nukleus/data/nukleus/models/`.
 
-To use the split layout, pass `--models-dir DIR --config-dir DIR` to the installer (or after `--` to the updater). The installer stores both in `kira-service.conf`, keeps them on later updates, creates the category and `catalog/` directories, and restricts the unit's `ReadWritePaths=` to them. When a storage directory belongs to a non-root group (for example a shared `/srv/lab` owned by `users`), the service joins that group instead of taking ownership. Copy an existing model tree first with:
+To use the split layout, pass `--models-dir DIR --config-dir DIR` to the installer (or after `--` to the updater). The installer stores both in `nukleus.conf`, keeps them on later updates, creates the category and `catalog/` directories, and restricts the unit's `ReadWritePaths=` to them. When a storage directory belongs to a non-root group (for example a shared `/srv/lab` owned by `users`), the service joins that group instead of taking ownership. Copy an existing model tree first with:
 
 ```bash
-scripts/migrate-kira-service-storage.sh --source OLD_MODELS --models-dir /srv/lab/models --config-dir /srv/lab/config/kira-service --dry-run
+scripts/migrate-nukleus-storage.sh --source OLD_MODELS --models-dir /srv/lab/models --config-dir /srv/lab/config/nukleus --dry-run
 ```
 
 Uninstalling, even with `--purge`, never removes the split storage directories.
+
+### Upgrading from Kira Service
+
+Nukleus was previously named Kira Service. The installer migrates such a
+deployment in place: it stops and disables `kira-service.service`, renames the
+`kira-service` account and group to `nukleus` (keeping their IDs, so file
+ownership and supplementary groups are unchanged), moves `/etc/kira-service` to
+`/etc/nukleus` with `KIRA_SERVICE_*` settings rewritten as `NUKLEUS_*`, moves
+`/var/lib/kira-service` (including `data/kira-service/`) to
+`/var/lib/nukleus` (`data/nukleus/`), removes the old unit and program, and
+enables `nukleus.service`. Split storage directories keep their paths. If both
+deployments exist, the installer stops without changing either.
+
+Outside systemd, the daemon renames `$XDG_DATA_HOME/kira-service/` to
+`$XDG_DATA_HOME/nukleus/` at startup and refuses to start if both exist. The
+manager copies its saved connection and window settings from the former
+`Kira Service Manager` settings when it has none of its own; the old file is
+kept. Clients built against the SDK switch from `KiraServiceSdk`,
+`KiraService::SDK` and `<kira/service/…>` to `NukleusSdk`, `Nukleus::SDK` and
+`<nukleus/…>`. The protocol and port `9384` are unchanged.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/protocol-v3.md](docs/protocol-v3.md).
 
@@ -328,7 +348,7 @@ the Vulkan pinned-memory limit. Per-model configuration is deferred.
 From another machine, run the updater over SSH on the service host:
 
 ```sh
-ssh user@service-host '/path/to/kira-service/scripts/update-kira-service.sh'
+ssh user@service-host '/path/to/nukleus/scripts/update-nukleus.sh'
 ```
 
 Run as the checkout owner with cached or passwordless sudo credentials. The script

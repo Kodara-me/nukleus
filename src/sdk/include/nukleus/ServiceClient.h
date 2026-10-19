@@ -9,7 +9,7 @@
 #include <QUrl>
 class QJsonObject;
 class QWebSocket;
-namespace KiraService
+namespace Nukleus
 {
 class ServiceClient final : public QObject
 {
@@ -57,25 +57,25 @@ public:
     QString loadChatModel(const QString& modelId, const QJsonObject& parameters = {});
     QString unloadChatModel();
 signals:
-    void serviceStateChanged(KiraService::ServiceConnectionState state, const QString &code, const QString &detail);
-    void capabilitiesChanged(const KiraService::ServiceCapabilities &capabilities);
+    void serviceStateChanged(Nukleus::ServiceConnectionState state, const QString &code, const QString &detail);
+    void capabilitiesChanged(const Nukleus::ServiceCapabilities &capabilities);
     void modelsChanged();
     void modelRoutingChanged();
     void modelRoutingConfigured();
     void modelRoutingFailed(const QString &message);
     void installsChanged();
     void modelConfigured(const QString &id, const QJsonObject &options);
-    void modelStylesConfigured(const QString &id, const QList<KiraService::PromptStyle> &styles);
+    void modelStylesConfigured(const QString &id, const QList<Nukleus::PromptStyle> &styles);
     void modelDeleted(const QString &id);
     void companionDeleted(const QString& id, const QString& role);
     void modelOperationFailed(const QString &id, const QString &message);
-    void jobStateChanged(const QString &jobId, KiraService::JobState state, int queuePosition);
+    void jobStateChanged(const QString &jobId, Nukleus::JobState state, int queuePosition);
     void jobOutput(const QString &jobId, const QString &stream, const QString &text);
-    void generationProgressChanged(const QString &jobId, const KiraService::GenerationProgress &progress);
-    void imageJobFinished(const KiraService::ImageJobResult &result);
-    void promptEnhancementFinished(const KiraService::PromptEnhancementResult& result);
-    void chatFinished(const KiraService::TextChatResult& result);
-    void chatModelFinished(const KiraService::ChatModelResult& result);
+    void generationProgressChanged(const QString &jobId, const Nukleus::GenerationProgress &progress);
+    void imageJobFinished(const Nukleus::ImageJobResult &result);
+    void promptEnhancementFinished(const Nukleus::PromptEnhancementResult& result);
+    void chatFinished(const Nukleus::TextChatResult& result);
+    void chatModelFinished(const Nukleus::ChatModelResult& result);
 private:
     QString defaultLlmModelId(const QString &role) const;
     struct PendingJob

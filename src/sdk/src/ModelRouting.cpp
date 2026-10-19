@@ -2,9 +2,9 @@
 #include <QSet>
 #include <algorithm>
 #include <cmath>
-#include <kira/service/ModelRouting.h>
+#include <nukleus/ModelRouting.h>
 
-namespace KiraService::Protocol
+namespace Nukleus::Protocol
 {
 ModelRouting starterModelRouting()
 {
@@ -242,4 +242,4 @@ std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QStr
         return std::nullopt;
     return routing;
 }
-} // namespace KiraService::Protocol
+} // namespace Nukleus::Protocol

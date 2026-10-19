@@ -1,6 +1,6 @@
 #pragma once
 #include <Ardoise/Dialog.h>
-#include <kira/service/ModelRouting.h>
+#include <nukleus/ModelRouting.h>
 
 class ManagerServiceClient;
 class QStandardItem;
@@ -33,9 +33,9 @@ private:
     void showSelection();
     void updateActions();
     void refreshModels();
-    QStandardItem *addPresetItem(const KiraService::GenerationPreset &preset);
+    QStandardItem *addPresetItem(const Nukleus::GenerationPreset &preset);
     QStandardItem *selectedItem() const;
-    KiraService::ModelRouting configuration() const;
+    Nukleus::ModelRouting configuration() const;
     ManagerServiceClient *m_client;
     Ardoise::TreeView *m_tree;
     QStandardItemModel *m_model;

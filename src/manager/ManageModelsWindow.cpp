@@ -34,7 +34,7 @@ QString sizeText(qint64 bytes) { return QObject::tr("%1 MiB").arg(bytes / (1024.
 ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *client)
     : Ardoise::MainWindow(parent), m_client(client ? client : new ManagerServiceClient(this))
 {
-    setWindowTitle(tr("Kira Service Manager"));
+    setWindowTitle(tr("Nukleus Manager"));
     setWindowIcon(QApplication::windowIcon().isNull()
                       ? QIcon(QStringLiteral(":/manager/icons/manager-32.png"))
                       : QApplication::windowIcon());
@@ -47,7 +47,7 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     auto *body = new QWidget(this);
     setContentWidget(body);
     auto *layout = new QVBoxLayout(body);
-    m_status = new QLabel(tr("Connecting to the local Kira Service…"), body);
+    m_status = new QLabel(tr("Connecting to the local Nukleus…"), body);
     m_status->setWordWrap(true);
     layout->addWidget(m_status);
     m_splitter = new QSplitter(Qt::Horizontal, body);
@@ -371,7 +371,7 @@ bool ManageModelsWindow::guardChanges(std::function<void()> continuation)
 void ManageModelsWindow::updateActions()
 {
     m_presets->setEnabled(m_client->isAuthenticated() && m_client->modelRouting().has_value() && !m_saving);
-    m_presets->setToolTip(m_client->supportsModelRouting() ? QString() : tr("Upgrade Kira Service to configure presets."));
+    m_presets->setToolTip(m_client->supportsModelRouting() ? QString() : tr("Upgrade Nukleus to configure presets."));
     m_tree->setEnabled(!m_saving);
     m_options->setEnabled(m_client->isAuthenticated() && !m_saving);
     m_displayName->setEnabled(m_client->isAuthenticated() && !m_saving && !m_selectedId.isEmpty());

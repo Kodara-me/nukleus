@@ -1,6 +1,6 @@
 #include "ManagerServiceClient.h"
 
-#include <kira/service/ServiceProtocol.h>
+#include <nukleus/ServiceProtocol.h>
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -17,7 +17,7 @@
 ManagerServiceClient::ManagerServiceClient(QObject *parent, quint16 localPort)
     : QObject(parent)
     , m_localPort(localPort)
-    , m_socket(new QWebSocket(QStringLiteral("Kira Service Manager"), QWebSocketProtocol::VersionLatest, this))
+    , m_socket(new QWebSocket(QStringLiteral("Nukleus Manager"), QWebSocketProtocol::VersionLatest, this))
     , m_retryTimer(new QTimer(this))
 {
     connect(&m_localSourcesServer, &QTcpServer::newConnection, this, [this] {
@@ -85,7 +85,7 @@ ManagerServiceClient::ManagerServiceClient(QObject *parent, quint16 localPort)
     });
     connect(m_socket, &QWebSocket::errorOccurred, this, [this](QAbstractSocket::SocketError) {
         m_connectionTimeout.stop();
-        emit serviceStateChanged(QStringLiteral("connection-error"), tr("Could not connect to Kira Service: %1").arg(m_socket->errorString()));
+        emit serviceStateChanged(QStringLiteral("connection-error"), tr("Could not connect to Nukleus: %1").arg(m_socket->errorString()));
         if (m_automaticReconnect) m_retryTimer->start();
     });
     connect(m_retryTimer, &QTimer::timeout, this, &ManagerServiceClient::connectToService);
@@ -98,7 +98,7 @@ void ManagerServiceClient::connectToService()
     m_openingConnection = true;
     if (m_socket->state() != QAbstractSocket::UnconnectedState) m_socket->abort();
     m_openingConnection = false;
-    emit serviceStateChanged(QStringLiteral("connecting"), tr("Connecting to Kira Service…"));
+    emit serviceStateChanged(QStringLiteral("connecting"), tr("Connecting to Nukleus…"));
     QUrl endpoint;
     endpoint.setScheme("ws"); endpoint.setHost(m_host); endpoint.setPort(m_localPort);
     m_connectionTimeout.start();
@@ -163,11 +163,11 @@ QString ManagerServiceClient::installModel(const QString &category, const QUrl &
     return installId;
 }
 
-bool ManagerServiceClient::configureModelStyles(const QString &id, const QList<KiraService::PromptStyle> &styles)
+bool ManagerServiceClient::configureModelStyles(const QString &id, const QList<Nukleus::PromptStyle> &styles)
 {
-    if (!m_authenticated || id.isEmpty() || !KiraService::Protocol::validatePromptStyles(styles)) return false;
+    if (!m_authenticated || id.isEmpty() || !Nukleus::Protocol::validatePromptStyles(styles)) return false;
     const QJsonObject message{{"type", "models.styles.configure"}, {"id", id},
-        {"styles", KiraService::Protocol::promptStylesToJson(styles)}};
+        {"styles", Nukleus::Protocol::promptStylesToJson(styles)}};
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
     return true;
 }
@@ -205,18 +205,18 @@ void ManagerServiceClient::requestModelRouting()
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "model-routing.get"}}).toJson(QJsonDocument::Compact)));
 }
 
-bool ManagerServiceClient::configureModelRouting(const KiraService::ModelRouting &routing)
+bool ManagerServiceClient::configureModelRouting(const Nukleus::ModelRouting &routing)
 {
-    if (!m_authenticated || !m_supportsRouting || !KiraService::Protocol::validateModelRouting(routing)) return false;
+    if (!m_authenticated || !m_supportsRouting || !Nukleus::Protocol::validateModelRouting(routing)) return false;
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "model-routing.configure"},
-        {"routing", KiraService::Protocol::modelRoutingToJson(routing)}}).toJson(QJsonDocument::Compact)));
+        {"routing", Nukleus::Protocol::modelRoutingToJson(routing)}}).toJson(QJsonDocument::Compact)));
     return true;
 }
 
 void ManagerServiceClient::authenticate()
 {
     m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument({{QStringLiteral("type"), QStringLiteral("authenticate")},
-        {QStringLiteral("version"), KiraService::Protocol::Version}, {QStringLiteral("token"), m_token}}).toJson(QJsonDocument::Compact)));
+        {QStringLiteral("version"), Nukleus::Protocol::Version}, {QStringLiteral("token"), m_token}}).toJson(QJsonDocument::Compact)));
 }
 
 void ManagerServiceClient::handleTextMessage(const QString &message)
@@ -232,7 +232,7 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
     if (type == "model-routing.changed") { requestModelRouting(); return; }
     if (type == "model-routing.get.completed" || type == "model-routing.configure.completed") {
         QString error;
-        m_routing = KiraService::Protocol::modelRoutingFromJson(object.value("routing").toObject(), &error);
+        m_routing = Nukleus::Protocol::modelRoutingFromJson(object.value("routing").toObject(), &error);
         emit modelRoutingChanged();
         if (!m_routing) emit modelRoutingFailed(error);
         else if (type == "model-routing.configure.completed") emit modelRoutingConfigured();
@@ -256,7 +256,7 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
                     model.value(QStringLiteral("companionFileName")).toString(),
                                  model.value(QStringLiteral("companionRole")).toString(), model.value("recommendedOptions").toObject(),
                     model.value("companionFiles").toObject(), model.value("modelType").toString("checkpoint"), model.value("explicitContent").toBool(false),
-                    KiraService::Protocol::promptStylesFromJson(model.value("styles")).value_or(QList<KiraService::PromptStyle>{}), model.value("displayName").toString().trimmed(), model.value("mmprojModelId").toString()});
+                    Nukleus::Protocol::promptStylesFromJson(model.value("styles")).value_or(QList<Nukleus::PromptStyle>{}), model.value("displayName").toString().trimmed(), model.value("mmprojModelId").toString()});
             }
         }
         m_modelListAvailable = true; emit modelsChanged(); return;
@@ -280,7 +280,7 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
         return;
     }
     if (type == "models.styles.configure.completed") {
-        const auto styles = KiraService::Protocol::promptStylesFromJson(object.value("styles"));
+        const auto styles = Nukleus::Protocol::promptStylesFromJson(object.value("styles"));
         if (styles) emit modelStylesConfigured(object.value("id").toString(), *styles);
         return;
     }

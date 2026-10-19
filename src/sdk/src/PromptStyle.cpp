@@ -1,9 +1,9 @@
-#include <kira/service/PromptStyle.h>
+#include <nukleus/PromptStyle.h>
 #include <QJsonObject>
 #include <QSet>
 #include <QStringList>
 
-namespace KiraService::Protocol
+namespace Nukleus::Protocol
 {
 bool validatePromptStyles(const QList<PromptStyle> &styles, QString *error)
 {

@@ -7,7 +7,7 @@
 #include <QString>
 #include <optional>
 
-namespace KiraService
+namespace Nukleus
 {
 // A model with its saved Steps/CFG snapshot, assigned to a preset or to editing.
 struct ModelAssignment
@@ -80,5 +80,5 @@ bool validateModelRouting(const ModelRouting &routing, QString *error = nullptr)
 QJsonObject modelRoutingToJson(const ModelRouting &routing);
 std::optional<ModelRouting> modelRoutingFromJson(const QJsonObject &object, QString *error = nullptr);
 } // namespace Protocol
-} // namespace KiraService
-Q_DECLARE_METATYPE(KiraService::ModelRouting)
+} // namespace Nukleus
+Q_DECLARE_METATYPE(Nukleus::ModelRouting)

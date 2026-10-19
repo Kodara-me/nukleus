@@ -1,4 +1,4 @@
-# Contributing to Kira Service
+# Contributing to Nukleus
 
 Every new install and explicit rename requires nonblank server-saved displayName
 (1–256 trimmed characters). Missing new names and empty renames are rejected. New installations choose an unused filename (numeric
@@ -6,20 +6,20 @@ suffix on collision), keeping atomic no-overwrite publication and separate
 companion directories. Changing displayName never changes the model ID or files.
 
 Prompt enhancement executes an installed LLM GGUF model through the optional
-llama-completion executable; set KIRA_LLAMA_COMPLETION to override its path.
+llama-completion executable; set NUKLEUS_LLAMA_COMPLETION to override its path.
 It uses standard LLM recommendations (temperature, topP, contextLength, maxTokens)
 and permits a per-job systemPrompt. Tests cover overrides, failures, timeouts and
 disconnect recovery with a subprocess fixture, without model weights or a GPU.
 No Python worker or optional Python dependency is required.
 
 text.chat runs through two engines: a managed `llama-server` (default; set
-KIRA_LLAMA_SERVER to override, KIRA_LLAMA_SERVER_IDLE_SECONDS for the idle
+NUKLEUS_LLAMA_SERVER to override, NUKLEUS_LLAMA_SERVER_IDLE_SECONDS for the idle
 unload) and the llama-completion path above. `LlamaServerRunner` owns the
-server process. Tests never start the real server: `kira-service-fake-llama-server`
+server process. Tests never start the real server: `nukleus-fake-llama-server`
 (tests/FakeLlamaServer.cpp) records launches and requests and simulates slow
 loads, load failures, context overflow, crashes and hangs through marker files.
 
-Kira Service is a C++20 Qt 6 project. Build dependencies are CMake 3.24+, Ninja, a C++20 compiler, and Qt 6.2+ Network, WebSockets, and Widgets, SVG, and LinguistTools development packages, plus Ardoise 0.1 (installed, or cloned by CMake). `sd-cli` is required on a machine that performs image work; README's "Runtime tools on Arch Linux" lists the Vulkan AUR packages for `sd-cli` and llama.cpp. Tests never need them.
+Nukleus is a C++20 Qt 6 project. Build dependencies are CMake 3.24+, Ninja, a C++20 compiler, and Qt 6.2+ Network, WebSockets, and Widgets, SVG, and LinguistTools development packages, plus Ardoise 0.1 (installed, or cloned by CMake). `sd-cli` is required on a machine that performs image work; README's "Runtime tools on Arch Linux" lists the Vulkan AUR packages for `sd-cli` and llama.cpp. Tests never need them.
 
 ```sh
 cmake -S . -B build -G Ninja
@@ -27,7 +27,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Run the daemon with `./build/src/kira-service`. Run the administrator UI with `./build/src/kira-service-manager --gui`, or exercise the manager CLI with `./build/src/kira-service-manager --help`. Use the root installer only for Linux systemd deployments.
+Run the daemon with `./build/src/nukleusd`. Run the administrator UI with `./build/src/nukleus-manager --gui`, or exercise the manager CLI with `./build/src/nukleus-manager --help`. Use the root installer only for Linux systemd deployments.
 
 Manager GUI connection settings are local QSettings keys `Service/Host` and
 `Service/Token`. On startup it tries those settings (loopback/empty key by default)
@@ -47,12 +47,12 @@ build paths remain under `build/src/`.
 
 To install only the built executables into a CMake prefix, run
 `cmake --install build --prefix "$HOME/.local"`. Use
-`scripts/install-kira-service.sh` when a complete Linux systemd installation
+`scripts/install-nukleus.sh` when a complete Linux systemd installation
 is required.
 
-The SDK targets are `KiraService::Protocol` and `KiraService::SDK`. A source
+The SDK targets are `Nukleus::Protocol` and `Nukleus::SDK`. A source
 checkout can add `src/sdk` directly, while installed consumers use
-`find_package(KiraServiceSdk CONFIG REQUIRED)`. The SDK owns WebSocket and
+`find_package(NukleusSdk CONFIG REQUIRED)`. The SDK owns WebSocket and
 protocol behavior; applications own settings, files, and UI messages. Keep
 protocol v3 compatible. Model management preserves optional companion metadata
 for Image-generation VAE. LLM MMPROJ files are separately installed Companion entries.
@@ -144,16 +144,16 @@ They cover modular execution flags, companion attachment/persistence/deletion,
 download rollback, old metadata, SDK requests and the manager’s optional-file dialog.
 The systemd installer test requires Linux (GNU stat/script); on macOS run the full
 suite to identify platform limits, then use
-`ctest --test-dir build --output-on-failure -E '^kira-service-installer-test$'`
+`ctest --test-dir build --output-on-failure -E '^nukleus-installer-test$'`
 for the portable checks.
 Run them with local networking permitted. The unavailable-manager CLI check is
 skipped if a real service already responds on port 9384. UI tests isolate
 QSettings and use the offscreen platform. For visual review:
 
 ```sh
-mkdir -p /tmp/kira-manager-review
-QT_QPA_PLATFORM=offscreen KIRA_MANAGER_SCREENSHOT_DIR=/tmp/kira-manager-review ./build/tests/kira-service-manager-ui-test
-QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR=2 KIRA_MANAGER_SCREENSHOT_DIR=/tmp/kira-manager-review ./build/tests/kira-service-manager-ui-test
+mkdir -p /tmp/nukleus-manager-review
+QT_QPA_PLATFORM=offscreen NUKLEUS_MANAGER_SCREENSHOT_DIR=/tmp/nukleus-manager-review ./build/tests/nukleus-manager-ui-test
+QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR=2 NUKLEUS_MANAGER_SCREENSHOT_DIR=/tmp/nukleus-manager-review ./build/tests/nukleus-manager-ui-test
 ```
 
 Validate the fixed 1100 × 640 content size (excluding the native title bar),
@@ -172,7 +172,9 @@ and explicit sampler/scheduler, CFG precision, malformed/out-of-range options,
 prompt-only requests with default dimensions/steps/CFG and no companions,
 VAE arguments for direct and uploaded-input jobs, and result
 bytes. Rebuild and rerun the Linux installer to update a systemd-installed daemon;
-a workspace build alone does not update the running service.
+a workspace build alone does not update the running service. The installer
+also migrates a deployment made under the former Kira Service name (see README,
+"Upgrading from Kira Service"); `nukleus-installer-test` covers it in a staging root.
 
 Model classification uses a top-level `explicitContent` boolean, separate from
 recommendations. SDK and Manager install/configure methods accept an optional
@@ -246,7 +248,7 @@ Image generation and reference-image editing both pass `--offload-to-cpu` to sd-
 
 ## Updating a remote Linux installation
 
-Use `scripts/update-kira-service.sh` on the service host as the checkout owner.
+Use `scripts/update-nukleus.sh` on the service host as the checkout owner.
 It runs `git fetch --prune`, `git pull --ff-only`, CMake configure/build, CTest,
 and the existing systemd installer through `sudo -n`. Configure the branch's
 upstream first and commit or stash tracked changes. Untracked files are retained;
@@ -255,9 +257,9 @@ installed; Ardoise is used from its installed package or cloned by CMake at the
 pinned tag. Sibling repositories and `sd-cli` are not updated.
 
 ```sh
-ssh user@service-host '/path/to/kira-service/scripts/update-kira-service.sh'
+ssh user@service-host '/path/to/nukleus/scripts/update-nukleus.sh'
 # Custom build directory and Ardoise checkout:
-scripts/update-kira-service.sh --build-dir build-release \
+scripts/update-nukleus.sh --build-dir build-release \
   --cmake-arg -DFETCHCONTENT_SOURCE_DIR_ARDOISE=/path/to/ardoise
 ```
 
@@ -272,7 +274,7 @@ For password-based sudo, allocate a terminal and cache credentials in the same
 SSH session before running the updater:
 
 ```sh
-ssh -t user@service-host 'sudo -v && /path/to/kira-service/scripts/update-kira-service.sh'
+ssh -t user@service-host 'sudo -v && /path/to/nukleus/scripts/update-nukleus.sh'
 ```
 
 Unattended runs require suitable passwordless sudo access. Do not run the entire

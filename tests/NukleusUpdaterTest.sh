@@ -5,7 +5,7 @@ set -euo pipefail
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "$fixture"' EXIT
 mkdir -p "$fixture/repo/scripts" "$fixture/bin"
-cp "$1/scripts/update-kira-service.sh" "$fixture/repo/scripts/"
+cp "$1/scripts/update-nukleus.sh" "$fixture/repo/scripts/"
 export UPDATE_TEST_ROOT="$fixture/repo" UPDATE_TEST_LOG="$fixture/log"
 cat > "$fixture/bin/git" <<'MOCK'
 #!/usr/bin/env bash
@@ -32,14 +32,14 @@ MOCK
 chmod +x "$fixture/bin/"*
 for tool in cmake ctest sudo; do ln -s command-mock "$fixture/bin/$tool"; done
 export PATH="$fixture/bin:$PATH"
-updater="$fixture/repo/scripts/update-kira-service.sh"
+updater="$fixture/repo/scripts/update-nukleus.sh"
 
 bash "$updater" --build-dir 'build space' --cmake-arg '-DFETCHCONTENT_SOURCE_DIR_ARDOISE=/ui space' -- --no-enable
 [[ "$(wc -l < "$UPDATE_TEST_LOG")" == 6 ]]
 grep -F 'git fetch --prune' "$UPDATE_TEST_LOG"
 grep -F 'git pull --ff-only' "$UPDATE_TEST_LOG"
 grep -F '<-G> <Ninja> <-DCMAKE_BUILD_TYPE=Release> <-DFETCHCONTENT_SOURCE_DIR_ARDOISE=/ui space>' "$UPDATE_TEST_LOG"
-grep -F "sudo <-n> <$UPDATE_TEST_ROOT/scripts/install-kira-service.sh> <--no-enable> <--binary> <$UPDATE_TEST_ROOT/build space/src/kira-service> <--manager-binary> <$UPDATE_TEST_ROOT/build space/src/kira-service-manager>" "$UPDATE_TEST_LOG"
+grep -F "sudo <-n> <$UPDATE_TEST_ROOT/scripts/install-nukleus.sh> <--no-enable> <--binary> <$UPDATE_TEST_ROOT/build space/src/nukleusd> <--manager-binary> <$UPDATE_TEST_ROOT/build space/src/nukleus-manager>" "$UPDATE_TEST_LOG"
 
 for failure in dirty fetch pull cmake ctest; do
     : > "$UPDATE_TEST_LOG"

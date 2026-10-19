@@ -1,5 +1,5 @@
-#include "kira/service/ServiceClient.h"
-#include "kira/service/ServiceProtocol.h"
+#include "nukleus/ServiceClient.h"
+#include "nukleus/ServiceProtocol.h"
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -10,36 +10,36 @@
 
 namespace
 {
-KiraService::ModelCategory categoryFromName(const QString &name)
+Nukleus::ModelCategory categoryFromName(const QString &name)
 {
-    if (name == QStringLiteral("image-generation")) return KiraService::ModelCategory::ImageGeneration;
-    if (name == QStringLiteral("upscaler")) return KiraService::ModelCategory::Upscaler;
-    if (name == "companion") return KiraService::ModelCategory::Companion;
-    if (name == QStringLiteral("llm-chat")) return KiraService::ModelCategory::LlmChat;
-    return KiraService::ModelCategory::Unknown;
+    if (name == QStringLiteral("image-generation")) return Nukleus::ModelCategory::ImageGeneration;
+    if (name == QStringLiteral("upscaler")) return Nukleus::ModelCategory::Upscaler;
+    if (name == "companion") return Nukleus::ModelCategory::Companion;
+    if (name == QStringLiteral("llm-chat")) return Nukleus::ModelCategory::LlmChat;
+    return Nukleus::ModelCategory::Unknown;
 }
 
-QString categoryName(KiraService::ModelCategory category)
+QString categoryName(Nukleus::ModelCategory category)
 {
-    if (category == KiraService::ModelCategory::ImageGeneration) return QStringLiteral("image-generation");
-    if (category == KiraService::ModelCategory::Upscaler) return QStringLiteral("upscaler");
-    if (category == KiraService::ModelCategory::Companion) return QStringLiteral("companion");
-    if (category == KiraService::ModelCategory::LlmChat) return QStringLiteral("llm-chat");
+    if (category == Nukleus::ModelCategory::ImageGeneration) return QStringLiteral("image-generation");
+    if (category == Nukleus::ModelCategory::Upscaler) return QStringLiteral("upscaler");
+    if (category == Nukleus::ModelCategory::Companion) return QStringLiteral("companion");
+    if (category == Nukleus::ModelCategory::LlmChat) return QStringLiteral("llm-chat");
     return {};
 }
 
-QString operationName(KiraService::ImageOperation operation)
+QString operationName(Nukleus::ImageOperation operation)
 {
-    if (operation == KiraService::ImageOperation::Edit) return QStringLiteral("image.edit");
-    return operation == KiraService::ImageOperation::Generate ? QStringLiteral("image.generate") : QStringLiteral("image.upscale");
+    if (operation == Nukleus::ImageOperation::Edit) return QStringLiteral("image.edit");
+    return operation == Nukleus::ImageOperation::Generate ? QStringLiteral("image.generate") : QStringLiteral("image.upscale");
 }
 }
 
-namespace KiraService
+namespace Nukleus
 {
 ServiceClient::ServiceClient(QObject *parent)
     : QObject(parent)
-    , m_socket(new QWebSocket(QStringLiteral("Kira Service SDK"), QWebSocketProtocol::VersionLatest, this))
+    , m_socket(new QWebSocket(QStringLiteral("Nukleus SDK"), QWebSocketProtocol::VersionLatest, this))
 {
     connect(m_socket, &QWebSocket::connected, this, &ServiceClient::authenticate);
     connect(m_socket, &QWebSocket::textMessageReceived, this, &ServiceClient::handleTextMessage);
@@ -685,7 +685,7 @@ bool ServiceClient::containsModel(const QString &modelId, ModelCategory category
 }
 }
 
-bool KiraService::ServiceClient::deleteCompanion(const QString& id, const QString& role)
+bool Nukleus::ServiceClient::deleteCompanion(const QString& id, const QString& role)
 {
     if (!m_authenticated || id.isEmpty() || role.isEmpty()) return false;
     const QJsonObject message{{"type", "models.companion.delete"}, {"id", id}, {"role", role}};

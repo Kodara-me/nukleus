@@ -27,7 +27,7 @@ SdCliRunner::SdCliRunner(const QString &executablePath, QObject *parent)
     m_process->setProcessChannelMode(QProcess::SeparateChannels);
     qRegisterMetaType<SdCliGenerationResult>();
     qRegisterMetaType<SdCliUpscaleResult>();
-    qRegisterMetaType<KiraService::GenerationProgress>();
+    qRegisterMetaType<Nukleus::GenerationProgress>();
     connect(m_process, &QProcess::started, this, [this] {
         if (m_requestType != RequestType::Generation) {
             return;
@@ -76,7 +76,7 @@ SdCliRunner::SdCliRunner(const QString &executablePath, QObject *parent)
         if (failedRequest == RequestType::Help) {
             emit helpFinished(false);
         } else if (failedRequest == RequestType::Generation) {
-            qInfo().noquote() << QStringLiteral("[Kira Canvas][sd-cli] Process error: %1").arg(m_process->errorString());
+            qInfo().noquote() << QStringLiteral("[Nukleus][sd-cli] Process error: %1").arg(m_process->errorString());
             m_standardError += m_process->errorString();
             emitGenerationFinished(false, -1);
         } else if (failedRequest == RequestType::Upscale) {
@@ -182,7 +182,7 @@ void SdCliRunner::emitGenerationFinished(bool succeeded, int exitCode)
 {
     flushGenerationOutput(false);
     flushGenerationOutput(true);
-    const std::optional<KiraService::GenerationProgress> progress = succeeded ? m_progressParser.complete() : m_progressParser.failed();
+    const std::optional<Nukleus::GenerationProgress> progress = succeeded ? m_progressParser.complete() : m_progressParser.failed();
     if (progress.has_value()) {
         emit generationProgressChanged(*progress);
     }
@@ -270,40 +270,40 @@ void SdCliRunner::processGenerationLine(const QString &line)
             m_process->kill();
     }
 
-    if (const std::optional<KiraService::GenerationProgress> progress = m_progressParser.processLine(line)) {
+    if (const std::optional<Nukleus::GenerationProgress> progress = m_progressParser.processLine(line)) {
         emit generationProgressChanged(*progress);
     }
 }
 
 void SdCliRunner::logGenerationStart(const GenerationRequest &request, const QStringList &arguments) const
 {
-    qInfo().noquote() << QStringLiteral("[Kira Canvas][sd-cli] Starting text-to-image generation");
-    qInfo().noquote() << QStringLiteral("[Kira Canvas][sd-cli] Executable: %1").arg(m_executablePath);
-    qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] Resolution: %1x%2").arg(request.width).arg(request.height);
-    qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] Steps: %1").arg(request.steps);
-    qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] CFG: %1").arg(request.cfgScale, 0, 'g', 17);
-    qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] Clip skip: %1").arg(request.clipSkip);
-    qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] Sampler: %1").arg(request.sampler);
-    qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] Scheduler: %1").arg(request.scheduler);
-    qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] Seed: %1").arg(request.seed);
+    qInfo().noquote() << QStringLiteral("[Nukleus][sd-cli] Starting text-to-image generation");
+    qInfo().noquote() << QStringLiteral("[Nukleus][sd-cli] Executable: %1").arg(m_executablePath);
+    qInfo().noquote() << QStringLiteral("[Nukleus][generation] Resolution: %1x%2").arg(request.width).arg(request.height);
+    qInfo().noquote() << QStringLiteral("[Nukleus][generation] Steps: %1").arg(request.steps);
+    qInfo().noquote() << QStringLiteral("[Nukleus][generation] CFG: %1").arg(request.cfgScale, 0, 'g', 17);
+    qInfo().noquote() << QStringLiteral("[Nukleus][generation] Clip skip: %1").arg(request.clipSkip);
+    qInfo().noquote() << QStringLiteral("[Nukleus][generation] Sampler: %1").arg(request.sampler);
+    qInfo().noquote() << QStringLiteral("[Nukleus][generation] Scheduler: %1").arg(request.scheduler);
+    qInfo().noquote() << QStringLiteral("[Nukleus][generation] Seed: %1").arg(request.seed);
     if (!request.baseImagePath.isEmpty()) {
-        qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] Base image: %1").arg(request.baseImagePath);
-        qInfo().noquote() << QStringLiteral("[Kira Canvas][generation] Base image strength: %1")
+        qInfo().noquote() << QStringLiteral("[Nukleus][generation] Base image: %1").arg(request.baseImagePath);
+        qInfo().noquote() << QStringLiteral("[Nukleus][generation] Base image strength: %1")
                                  .arg(request.baseImageStrength, 0, 'f', 2);
     }
-    qInfo().noquote() << QStringLiteral("[Kira Canvas][sd-cli] Command:\n%1")
+    qInfo().noquote() << QStringLiteral("[Nukleus][sd-cli] Command:\n%1")
                              .arg(commandLine(arguments));
 }
 
 void SdCliRunner::logGenerationFinish(bool succeeded, int exitCode) const
 {
     const double elapsedSeconds = m_generationElapsed.isValid() ? m_generationElapsed.elapsed() / 1000.0 : 0.0;
-    qInfo().noquote() << QStringLiteral("[Kira Canvas][sd-cli] Finished");
-    qInfo().noquote() << QStringLiteral("[Kira Canvas][sd-cli] Exit code: %1").arg(exitCode);
-    qInfo().noquote() << QStringLiteral("[Kira Canvas][sd-cli] Output: %1").arg(m_outputPath);
-    qInfo().noquote() << QStringLiteral("[Kira Canvas][sd-cli] Elapsed: %1 s").arg(elapsedSeconds, 0, 'f', 1);
+    qInfo().noquote() << QStringLiteral("[Nukleus][sd-cli] Finished");
+    qInfo().noquote() << QStringLiteral("[Nukleus][sd-cli] Exit code: %1").arg(exitCode);
+    qInfo().noquote() << QStringLiteral("[Nukleus][sd-cli] Output: %1").arg(m_outputPath);
+    qInfo().noquote() << QStringLiteral("[Nukleus][sd-cli] Elapsed: %1 s").arg(elapsedSeconds, 0, 'f', 1);
     if (!succeeded && !m_standardError.isEmpty()) {
-        qInfo().noquote() << QStringLiteral("[Kira Canvas][sd-cli] Generation failed; stderr was captured above.");
+        qInfo().noquote() << QStringLiteral("[Nukleus][sd-cli] Generation failed; stderr was captured above.");
     }
 }
 

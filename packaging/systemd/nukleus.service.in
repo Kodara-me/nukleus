@@ -1,0 +1,31 @@
+[Unit]
+Description=Nukleus model and job service
+Wants=network-online.target
+After=network-online.target
+@NUKLEUS_STORAGE_MOUNTS@
+
+[Service]
+Type=simple
+User=nukleus
+Group=nukleus
+@NUKLEUS_GPU_GROUPS@
+Environment=XDG_DATA_HOME=/var/lib/nukleus/data
+Environment=TMPDIR=/run/nukleus
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-/etc/nukleus/nukleus.conf
+ExecStart=/usr/local/libexec/nukleus/nukleusd --listen ${NUKLEUS_LISTEN} --port ${NUKLEUS_PORT} --token-file ${NUKLEUS_TOKEN_FILE}@NUKLEUS_STORAGE_ARGS@
+StateDirectory=nukleus
+StateDirectoryMode=0750
+RuntimeDirectory=nukleus
+RuntimeDirectoryMode=0750
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/nukleus /run/nukleus@NUKLEUS_STORAGE_PATHS@
+
+[Install]
+WantedBy=multi-user.target

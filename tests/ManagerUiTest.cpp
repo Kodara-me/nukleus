@@ -6,6 +6,7 @@
 #include <QAction>
 #include "../src/manager/ServiceConnectionDialog.h"
 #include "../src/manager/ManagerServiceClient.h"
+#include "../src/manager/ManagerSettings.h"
 #include "../src/manager/ModelOptionsWidget.h"
 #include <Ardoise/Theme.h>
 #include <Ardoise/TreeView.h>
@@ -33,7 +34,7 @@
 #include <QWebSocketServer>
 #include <QUuid>
 #include <QtTest>
-#include <kira/service/ModelOptions.h>
+#include <nukleus/ModelOptions.h>
 #include <algorithm>
 
 class ManagerUiTest final : public QObject
@@ -102,7 +103,7 @@ class ManagerUiTest final : public QObject
             QVERIFY(roleCheck && !roleCheck->isChecked()); roleCheck->setChecked(true);
             QVERIFY(form.options().value(role).toBool());
         }
-        QVERIFY(KiraService::Protocol::validateModelOptions("llm-chat", form.options()));
+        QVERIFY(Nukleus::Protocol::validateModelOptions("llm-chat", form.options()));
     }
     void savesConnectionOnlyAfterAuthentication()
     {
@@ -171,8 +172,8 @@ class ManagerUiTest final : public QObject
         client.setAutomaticReconnect(false); client.connectToService();
         QTRY_VERIFY(client.modelListAvailable());
         send({{"type", "capabilities"}, {"operations", QJsonArray{"model-routing"}}});
-        auto routing = KiraService::Protocol::starterModelRouting();
-        send({{"type", "model-routing.get.completed"}, {"routing", KiraService::Protocol::modelRoutingToJson(routing)}});
+        auto routing = Nukleus::Protocol::starterModelRouting();
+        send({{"type", "model-routing.get.completed"}, {"routing", Nukleus::Protocol::modelRoutingToJson(routing)}});
         QTRY_VERIFY(client.modelRouting().has_value());
         const auto originalLocale = QLocale();
         const auto restoreLocale = qScopeGuard([&] { QLocale::setDefault(originalLocale); });
@@ -257,8 +258,8 @@ class ManagerUiTest final : public QObject
         tree->setCurrentIndex(editing->child(1)->index());
         QVERIFY(!defaultQuality->isChecked());
         QVERIFY(!dialog.findChild<QWidget *>("promptFlowPage"));
-        if (qEnvironmentVariableIsSet("KIRA_MANAGER_SCREENSHOT_DIR")) {
-            const QDir directory(qEnvironmentVariable("KIRA_MANAGER_SCREENSHOT_DIR"));
+        if (qEnvironmentVariableIsSet("NUKLEUS_MANAGER_SCREENSHOT_DIR")) {
+            const QDir directory(qEnvironmentVariable("NUKLEUS_MANAGER_SCREENSHOT_DIR"));
             QVERIFY(directory.mkpath("."));
             tree->setCurrentIndex(editing->index());
             QCoreApplication::processEvents();
@@ -278,7 +279,7 @@ class ManagerUiTest final : public QObject
         QCOMPARE(savedPreset.value("nameFr").toString(), QString("Photoréalisme"));
         QCOMPARE(savedPreset.value("positivePrefix").toString(), QString("line one\nline two"));
         QVERIFY(!savedPreset.contains("qualities"));
-        const auto parsed = KiraService::Protocol::modelRoutingFromJson(sent);
+        const auto parsed = Nukleus::Protocol::modelRoutingFromJson(sent);
         QVERIFY(parsed);
         QVERIFY(!savedPreset.contains("promptFlow"));
         QCOMPARE(parsed->presets[0].identityViews, 4);
@@ -320,8 +321,8 @@ class ManagerUiTest final : public QObject
         client.setAutomaticReconnect(false); client.connectToService();
         QTRY_VERIFY(client.modelListAvailable());
         send({{"type", "capabilities"}, {"operations", QJsonArray{"model-routing"}}});
-        const auto routing = KiraService::Protocol::starterModelRouting();
-        send({{"type", "model-routing.get.completed"}, {"routing", KiraService::Protocol::modelRoutingToJson(routing)}});
+        const auto routing = Nukleus::Protocol::starterModelRouting();
+        send({{"type", "model-routing.get.completed"}, {"routing", Nukleus::Protocol::modelRoutingToJson(routing)}});
         QTRY_VERIFY(client.modelRouting().has_value());
         ModelRoutingDialog dialog(&client); dialog.show();
         auto *tree = dialog.findChild<Ardoise::TreeView *>("routingTree");
@@ -357,15 +358,15 @@ class ManagerUiTest final : public QObject
         remove->click();
         QCOMPARE(generation->rowCount(), 1);
         QVERIFY(!remove->isEnabled()); // Generation keeps at least one preset.
-        for (int i = 1; i < KiraService::Protocol::MaximumGenerationPresets; ++i) add->click();
+        for (int i = 1; i < Nukleus::Protocol::MaximumGenerationPresets; ++i) add->click();
         QVERIFY(!add->isEnabled());
-        for (int i = 1; i < KiraService::Protocol::MaximumGenerationPresets; ++i) {
+        for (int i = 1; i < Nukleus::Protocol::MaximumGenerationPresets; ++i) {
             tree->setCurrentIndex(generation->child(1)->index());
             remove->click();
         }
         save->click();
         QTRY_VERIFY(m_messages.last().value("type") == "model-routing.configure");
-        const auto parsed = KiraService::Protocol::modelRoutingFromJson(m_messages.last().value("routing").toObject());
+        const auto parsed = Nukleus::Protocol::modelRoutingFromJson(m_messages.last().value("routing").toObject());
         QVERIFY(parsed);
         QCOMPARE(parsed->presets.size(), 1);
         QVERIFY(parsed->presets[0].id.startsWith("preset-"));
@@ -373,9 +374,28 @@ class ManagerUiTest final : public QObject
         QCOMPARE(parsed->presets[0].nameFr, QString("Portrait FR"));
         QCOMPARE(parsed->presets[0].identityViews, 1);
     }
+    void migratesLegacySettings()
+    {
+        {
+            QSettings legacy(QSettings::defaultFormat(), QSettings::UserScope, "LegacyManagerTests", "LegacyManager");
+            legacy.clear();
+            legacy.setValue("Service/Host", "192.168.1.20");
+            legacy.setValue("Service/Token", "legacy-key");
+        }
+        QVERIFY(ManagerSettings::migrateLegacySettings("LegacyManagerTests", "LegacyManager"));
+        QCOMPARE(QSettings().value("Service/Host").toString(), QString("192.168.1.20"));
+        QCOMPARE(QSettings().value("Service/Token").toString(), QString("legacy-key"));
+
+        QSettings().setValue("Service/Host", "localhost");
+        QVERIFY(!ManagerSettings::migrateLegacySettings("LegacyManagerTests", "LegacyManager"));
+        QCOMPARE(QSettings().value("Service/Host").toString(), QString("localhost"));
+        QSettings legacy(QSettings::defaultFormat(), QSettings::UserScope, "LegacyManagerTests", "LegacyManager");
+        QCOMPARE(legacy.value("Service/Token").toString(), QString("legacy-key"));
+        legacy.clear();
+    }
     void initTestCase()
     {
-        QCoreApplication::setOrganizationName("KiraManagerTests");
+        QCoreApplication::setOrganizationName("NukleusManagerTests");
         QCoreApplication::setApplicationName("ManagerUiTests");
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settings.path());
@@ -412,7 +432,7 @@ class ManagerUiTest final : public QObject
     {
         m_messages.clear();
         m_requiredToken.clear();
-        m_saved = KiraService::Protocol::defaultModelOptions("image-generation");
+        m_saved = Nukleus::Protocol::defaultModelOptions("image-generation");
         QSettings().clear();
     }
     void browsesLocalModel()
@@ -465,7 +485,7 @@ class ManagerUiTest final : public QObject
         for (const auto &category : {"image-generation", "llm-chat", "upscaler", "companion"})
         {
             widget.setOptions(category);
-            QCOMPARE(widget.options(), KiraService::Protocol::defaultModelOptions(category));
+            QCOMPARE(widget.options(), Nukleus::Protocol::defaultModelOptions(category));
             QVERIFY(widget.isValid());
         QVERIFY(!widget.explicitContent());
         }
@@ -489,7 +509,7 @@ class ManagerUiTest final : public QObject
         client.connectToService();
         QTRY_VERIFY(client.modelListAvailable());
         const QJsonObject llm{{"id", "llm-chat:chat.gguf"}, {"fileName", "chat.gguf"}, {"displayName", "Chat"},
-            {"recommendedOptions", KiraService::Protocol::defaultModelOptions("llm-chat")}};
+            {"recommendedOptions", Nukleus::Protocol::defaultModelOptions("llm-chat")}};
         const QJsonObject vae{{"id", "companion:vae.safetensors"}, {"displayName", "VAE"},
             {"recommendedOptions", QJsonObject{{"subtype", "vae"}}}};
         const QJsonObject projector{{"id", "companion:vision.gguf"}, {"displayName", "Vision projector"},
@@ -576,8 +596,8 @@ class ManagerUiTest final : public QObject
         QVERIFY(!dialog.findChild<QLineEdit*>("mmprojUrl"));
         dialog.findChild<QLineEdit*>("companionUrl")->setText("https://example.test/replacement.safetensors");
         dialog.findChild<QComboBox*>("modelType")->setCurrentIndex(1);
-        if (qEnvironmentVariableIsSet("KIRA_MANAGER_SCREENSHOT_DIR")) {
-            const QDir directory(qEnvironmentVariable("KIRA_MANAGER_SCREENSHOT_DIR"));
+        if (qEnvironmentVariableIsSet("NUKLEUS_MANAGER_SCREENSHOT_DIR")) {
+            const QDir directory(qEnvironmentVariable("NUKLEUS_MANAGER_SCREENSHOT_DIR"));
             QVERIFY(QDir().mkpath(directory.path()));
             QVERIFY(dialog.grab().save(directory.filePath("optional-model-files.png")));
         }
@@ -657,9 +677,9 @@ class ManagerUiTest final : public QObject
         QVERIFY(!save->isEnabled());
         client.requestModels();
         QTRY_VERIFY(tree->currentIndex().data(Qt::UserRole + 1).toString() == "image-generation:test.gguf");
-        if (qEnvironmentVariableIsSet("KIRA_MANAGER_SCREENSHOT_DIR"))
+        if (qEnvironmentVariableIsSet("NUKLEUS_MANAGER_SCREENSHOT_DIR"))
         {
-            const QString dir = qEnvironmentVariable("KIRA_MANAGER_SCREENSHOT_DIR");
+            const QString dir = qEnvironmentVariable("NUKLEUS_MANAGER_SCREENSHOT_DIR");
             QVERIFY(window.grab().save(dir + "/manager-1100.png"));
         }
         window.close();
@@ -822,13 +842,13 @@ class ManagerUiTest final : public QObject
               {"model", QJsonObject{{"id", "image-generation:new.gguf"}}}});
         QTRY_VERIFY(!completed.isVisible());
         QCOMPARE(completed.result(), int(QDialog::Accepted));
-        if (qEnvironmentVariableIsSet("KIRA_MANAGER_SCREENSHOT_DIR"))
+        if (qEnvironmentVariableIsSet("NUKLEUS_MANAGER_SCREENSHOT_DIR"))
         {
             AddModelDialog preview(&client);
             preview.show();
             QTest::qWait(20);
             QVERIFY(
-                preview.grab().save(qEnvironmentVariable("KIRA_MANAGER_SCREENSHOT_DIR") + "/add-model.png"));
+                preview.grab().save(qEnvironmentVariable("NUKLEUS_MANAGER_SCREENSHOT_DIR") + "/add-model.png"));
         }
     }
 };

@@ -9,7 +9,7 @@ installer_args=()
 
 usage() {
     cat <<'HELP'
-Usage: scripts/update-kira-service.sh [options] [-- installer-options...]
+Usage: scripts/update-nukleus.sh [options] [-- installer-options...]
 
 Run on the Linux service host as the checkout owner (also suitable over SSH).
 Fetch and fast-forward the current branch from its configured upstream,
@@ -20,7 +20,7 @@ Options:
   --cmake-arg ARG     Extra CMake configure argument; may be repeated
   -h, --help          Show this help
 
-Installer options after -- are passed to install-kira-service.sh.
+Installer options after -- are passed to install-nukleus.sh.
 Existing CMake cache settings are retained. New builds use Ninja and Release.
 Requires a clean tracked working tree, an upstream branch, build dependencies,
 and cached or passwordless sudo credentials. Does not update sibling checkouts.
@@ -48,12 +48,12 @@ cd -- "$project_root"
 for tool in git cmake ctest sudo; do
     command -v "$tool" >/dev/null || fail "Required command is missing: $tool"
 done
-[[ "$(git rev-parse --show-toplevel)" == "$project_root" ]] || fail 'The script must be in the Kira Service checkout.'
+[[ "$(git rev-parse --show-toplevel)" == "$project_root" ]] || fail 'The script must be in the Nukleus checkout.'
 git symbolic-ref --quiet HEAD >/dev/null || fail 'Check out a branch before updating.'
 git rev-parse --verify '@{upstream}' >/dev/null 2>&1 || fail 'The current branch needs a configured upstream.'
 [[ -z "$(git status --porcelain --untracked-files=no)" ]] || fail 'Commit or stash tracked changes before updating.'
 
-printf 'Fetching and updating Kira Service…\n'
+printf 'Fetching and updating Nukleus…\n'
 git fetch --prune
 git pull --ff-only
 
@@ -66,7 +66,7 @@ cmake -S "$project_root" -B "$build_dir" "${configure_args[@]}" "${cmake_args[@]
 cmake --build "$build_dir" --parallel
 ctest --test-dir "$build_dir" --output-on-failure
 
-printf 'Installing and restarting Kira Service…\n'
-sudo -n "$project_root/scripts/install-kira-service.sh" "${installer_args[@]}" \
-    --binary "$build_dir/src/kira-service" \
-    --manager-binary "$build_dir/src/kira-service-manager"
+printf 'Installing and restarting Nukleus…\n'
+sudo -n "$project_root/scripts/install-nukleus.sh" "${installer_args[@]}" \
+    --binary "$build_dir/src/nukleusd" \
+    --manager-binary "$build_dir/src/nukleus-manager"

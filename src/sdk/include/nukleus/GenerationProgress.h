@@ -5,7 +5,7 @@
 
 #include <optional>
 
-namespace KiraService
+namespace Nukleus
 {
 enum class GenerationProgressStage
 {
@@ -30,4 +30,4 @@ struct GenerationProgress
 };
 }
 
-Q_DECLARE_METATYPE(KiraService::GenerationProgress)
+Q_DECLARE_METATYPE(Nukleus::GenerationProgress)

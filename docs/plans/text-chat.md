@@ -1,6 +1,6 @@
 ---
 status: implemented
-projects: [kira-service]
+projects: [nukleus]
 ---
 
 # Generic multi-turn text chat
@@ -158,7 +158,7 @@ A new `LlamaServerRunner` in `src/daemon/` owns one `llama-server` child:
 - Launched on demand with `--model`, `--ctx-size`, the memory-placement
   arguments, `--host 127.0.0.1`, a free ephemeral `--port`, a random
   per-launch `--api-key`, `--no-webui`, `--parallel 1`, `--jinja` and
-  `--reasoning off`. `KIRA_LLAMA_SERVER` selects the executable (default
+  `--reasoning off`. `NUKLEUS_LLAMA_SERVER` selects the executable (default
   `llama-server`).
 - Ready when `/health` answers 200; loading counts toward the job timeout.
 - Each job posts to `/v1/chat/completions` (non-streaming) with the messages,

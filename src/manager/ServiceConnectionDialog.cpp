@@ -11,7 +11,7 @@
 ServiceConnectionDialog::ServiceConnectionDialog(ManagerServiceClient *client, QWidget *parent)
     : Ardoise::Dialog(parent), m_client(client), m_originalHost(client->host()), m_originalToken(client->token())
 {
-    setWindowTitle(tr("Connect to Kira Service"));
+    setWindowTitle(tr("Connect to Nukleus"));
     setModal(true);
     auto *body = new QWidget(this);
     setContentWidget(body);

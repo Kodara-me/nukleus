@@ -3,7 +3,7 @@
 set -euo pipefail
 
 project_root="$1"
-migrate="$project_root/scripts/migrate-kira-service-storage.sh"
+migrate="$project_root/scripts/migrate-nukleus-storage.sh"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
@@ -22,8 +22,8 @@ printf 'mmproj' > "$source_dir/companion/vision.gguf"
 printf '{"vision.gguf":{}}' > "$source_dir/companion/metadata.json"
 before="$(cd "$source_dir" && find . -printf '%p %s %T@\n' | sort)"
 
-models="$work/srv/models/kira-service"
-config="$work/srv/config/kira-service"
+models="$work/srv/models/nukleus"
+config="$work/srv/config/nukleus"
 
 # A dry run only reports the plan.
 "$migrate" --source "$source_dir" --models-dir "$models" --config-dir "$config" --dry-run > "$work/dry-run"
@@ -45,7 +45,7 @@ cmp "$source_dir/llm/metadata.json" "$config/catalog/llm.json"
 cmp "$source_dir/companion/metadata.json" "$config/catalog/companion.json"
 cmp "$source_dir/model-routing.json" "$config/catalog/model-routing.json"
 [[ -z "$(find "$models" -name metadata.json -o -name model-routing.json)" ]]
-[[ ! -e "$models/edition" && ! -e "$models/.kira-migration" && ! -e "$config/.kira-migration-catalog" ]]
+[[ ! -e "$models/edition" && ! -e "$models/.nukleus-migration" && ! -e "$config/.nukleus-migration-catalog" ]]
 [[ "$(cd "$source_dir" && find . -printf '%p %s %T@\n' | sort)" == "$before" ]]
 
 # A second run never merges into the populated destinations.

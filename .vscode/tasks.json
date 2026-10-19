@@ -2,16 +2,16 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Build Kira Service",
+            "label": "Build Nukleus",
             "type": "shell",
-            "command": "cmake --build build --target kira-service",
+            "command": "cmake --build build --target nukleusd",
             "options": { "cwd": "${workspaceFolder}" },
             "problemMatcher": ["$gcc"]
         },
         {
-            "label": "Build Kira Service Manager",
+            "label": "Build Nukleus Manager",
             "type": "shell",
-            "command": "cmake --build build --target kira-service-manager",
+            "command": "cmake --build build --target nukleus-manager",
             "options": { "cwd": "${workspaceFolder}" },
             "problemMatcher": ["$gcc"]
         }

@@ -1,7 +1,7 @@
 #pragma once
 
-#include <kira/service/ModelRouting.h>
-#include <kira/service/ServiceProtocol.h>
+#include <nukleus/ModelRouting.h>
+#include <nukleus/ServiceProtocol.h>
 
 #include "LlamaServerRunner.h"
 
@@ -24,36 +24,36 @@ class SdCliRunner;
 struct SdCliGenerationResult;
 struct SdCliUpscaleResult;
 
-// KIRA_LLAMA_SERVER_IDLE_SECONDS overrides the ten-minute idle period before llama-server unloads.
+// NUKLEUS_LLAMA_SERVER_IDLE_SECONDS overrides the ten-minute idle period before llama-server unloads.
 inline int defaultLlamaServerIdleMs()
 {
     bool ok = false;
-    const int seconds = qEnvironmentVariableIntValue("KIRA_LLAMA_SERVER_IDLE_SECONDS", &ok);
+    const int seconds = qEnvironmentVariableIntValue("NUKLEUS_LLAMA_SERVER_IDLE_SECONDS", &ok);
     return ok && seconds > 0 ? seconds * 1000 : 10 * 60 * 1000;
 }
 
-struct KiraServiceConfiguration
+struct NukleusConfiguration
 {
     QHostAddress listenAddress = QHostAddress::LocalHost;
-    quint16 port = KiraService::Protocol::DefaultPort;
+    quint16 port = Nukleus::Protocol::DefaultPort;
     QString token;
     qint64 maximumImageBytes = 64LL * 1024 * 1024;
     QString modelRootPath;
     // With modelRootPath, selects the split layout: catalogue JSON files here, weights under modelRootPath/<category>/.
     QString catalogRootPath;
-    QString llamaCompletion = qEnvironmentVariable("KIRA_LLAMA_COMPLETION", "llama-completion");
+    QString llamaCompletion = qEnvironmentVariable("NUKLEUS_LLAMA_COMPLETION", "llama-completion");
     int promptEnhancementTimeoutMs = 10 * 60 * 1000; // Also bounds each text.chat turn, model loading included.
-    QString llamaServer = qEnvironmentVariable("KIRA_LLAMA_SERVER", "llama-server");
+    QString llamaServer = qEnvironmentVariable("NUKLEUS_LLAMA_SERVER", "llama-server");
     int llamaServerIdleMs = defaultLlamaServerIdleMs();
 };
 
-class KiraServiceDaemon final : public QObject
+class NukleusDaemon final : public QObject
 {
     Q_OBJECT
 
 public:
-    explicit KiraServiceDaemon(KiraServiceConfiguration configuration, QObject *parent = nullptr);
-    ~KiraServiceDaemon() override;
+    explicit NukleusDaemon(NukleusConfiguration configuration, QObject *parent = nullptr);
+    ~NukleusDaemon() override;
     bool start(QString *errorMessage = nullptr);
     quint16 serverPort() const;
 
@@ -112,7 +112,7 @@ private:
     bool modelInUse(const QString &path) const;
     std::shared_ptr<Job> jobForId(const QString &id) const;
 
-    KiraServiceConfiguration m_configuration;
+    NukleusConfiguration m_configuration;
     std::vector<std::unique_ptr<QWebSocketServer>> m_servers;
     std::unique_ptr<ModelCatalog> m_models;
     std::unique_ptr<SdCliRunner> m_sdRunner;

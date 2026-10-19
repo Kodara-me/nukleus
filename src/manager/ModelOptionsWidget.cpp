@@ -6,7 +6,7 @@
 #include <QLabel>
 #include <QSignalBlocker>
 #include <QSpinBox>
-#include <kira/service/ModelOptions.h>
+#include <nukleus/ModelOptions.h>
 
 ModelOptionsWidget::ModelOptionsWidget(QWidget *parent) : QWidget(parent), m_form(new QFormLayout(this))
 {
@@ -28,7 +28,7 @@ void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &
         m_form->addRow(m_explicitContent);
         connect(m_explicitContent, &QCheckBox::toggled, this, &ModelOptionsWidget::optionsChanged);
     }
-    const auto values = saved.isEmpty() ? KiraService::Protocol::defaultModelOptions(category) : saved;
+    const auto values = saved.isEmpty() ? Nukleus::Protocol::defaultModelOptions(category) : saved;
     const auto add = [this](const QString &key, const QString &label, QWidget *field)
     {
         field->setObjectName(key);
@@ -91,8 +91,8 @@ void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &
         add("resolution", tr("Resolution:"), resolution);
         integer("steps", tr("Steps:"), 1, 200);
         decimal("cfgScale", tr("CFG scale:"), 0, 100, 1);
-        choices("sampler", tr("Sampler:"), KiraService::Protocol::modelSamplers());
-        choices("scheduler", tr("Scheduler:"), KiraService::Protocol::modelSchedulers());
+        choices("sampler", tr("Sampler:"), Nukleus::Protocol::modelSamplers());
+        choices("scheduler", tr("Scheduler:"), Nukleus::Protocol::modelSchedulers());
         auto *format = new QComboBox(this);
         format->addItem(tr("Natural sentences (Flux)"), "natural");
         format->addItem(tr("Short phrases (SDXL)"), "phrases");
@@ -175,7 +175,7 @@ QJsonObject ModelOptionsWidget::options() const
 }
 bool ModelOptionsWidget::isValid() const
 {
-    return KiraService::Protocol::validateModelOptions(m_category, options());
+    return Nukleus::Protocol::validateModelOptions(m_category, options());
 }
 
 bool ModelOptionsWidget::explicitContent() const

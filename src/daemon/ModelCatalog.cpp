@@ -1,7 +1,7 @@
 #include "ModelCatalog.h"
 
 #include "ServicePaths.h"
-#include <kira/service/ModelOptions.h>
+#include <nukleus/ModelOptions.h>
 
 #include <QDebug>
 #include <QDir>
@@ -68,7 +68,7 @@ QUrl normalizedModelUrl(const QUrl &url)
 // Keeps each exclusive LLM role on at most one entry: the one being saved wins.
 void releaseExclusiveLlmRoles(QJsonObject &metadata, const QString &fileName, const QJsonObject &options)
 {
-    for (const auto &role : KiraService::Protocol::exclusiveLlmRoles()) {
+    for (const auto &role : Nukleus::Protocol::exclusiveLlmRoles()) {
         if (!options.value(role).toBool()) continue;
         for (auto it = metadata.begin(); it != metadata.end(); ++it) {
             if (it.key() == fileName || !it.value().isObject()) continue;
@@ -189,11 +189,11 @@ QList<ModelInfo> ModelCatalog::models(ModelCategory category) const
         }
         const auto type = entry.toObject().value("modelType").toString("checkpoint");
         if (!valid || (type != "checkpoint" && type != "diffusion")) continue;
-        QList<KiraService::PromptStyle> styles;
+        QList<Nukleus::PromptStyle> styles;
         if (category == ModelCategory::ImageGeneration) {
             styles = entry.toObject().contains("styles")
-                ? KiraService::Protocol::promptStylesFromJson(entry.toObject().value("styles")).value_or(QList<KiraService::PromptStyle>{})
-                : KiraService::Protocol::starterPromptStyles();
+                ? Nukleus::Protocol::promptStylesFromJson(entry.toObject().value("styles")).value_or(QList<Nukleus::PromptStyle>{})
+                : Nukleus::Protocol::starterPromptStyles();
         }
         const auto displayName = entry.toObject().value("displayName").toString().trimmed();
         models.append({categoryName(category) + QLatin1Char(':') + fileName,
@@ -290,7 +290,7 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
     if (!image && ((request.modelType != "checkpoint" && !(request.modelType.isEmpty() && !request.existingModelId.isEmpty()))
         || !request.companionUrls.isEmpty()))
         return fail(tr("CLIP/VAE files and diffusion models require an image model category"));
-    if (request.recommendedOptions && !KiraService::Protocol::validateModelOptions(categoryName(request.category), *request.recommendedOptions, errorMessage)) return false;
+    if (request.recommendedOptions && !Nukleus::Protocol::validateModelOptions(categoryName(request.category), *request.recommendedOptions, errorMessage)) return false;
     const auto acceptsSource = [&](const QUrl& url) {
         if (url.isLocalFile()) {
             const QFileInfo file(url.toLocalFile());
@@ -319,7 +319,7 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
         const auto url = normalizedModelUrl(request.url);
         if (!acceptsSource(url)) return fail(tr("Choose a readable local model file or an HTTPS model URL"));
         job->fileName = fileNameForUrl(url);
-        if (request.category == ModelCategory::Companion && request.recommendedOptions.value_or(KiraService::Protocol::defaultModelOptions("companion")).value("subtype") == "mmproj"
+        if (request.category == ModelCategory::Companion && request.recommendedOptions.value_or(Nukleus::Protocol::defaultModelOptions("companion")).value("subtype") == "mmproj"
             && QFileInfo(job->fileName).suffix().toLower() != "gguf") return fail(tr("MMPROJ companions require GGUF files"));
         if (!acceptsFileName(request.category, job->fileName)) return fail(tr("The URL filename is not supported for this model category"));
         job->finalPath = QDir(directoryPath(request.category)).filePath(job->fileName);
@@ -381,7 +381,7 @@ bool ModelCatalog::configure(const QString &id, const QJsonObject &options, QStr
     const auto info = modelById(id);
     if (!info) { if (error) *error = tr("The requested model is not installed"); return false; }
     const auto category = *categoryFromName(id.section(':', 0, 0));
-    if (!KiraService::Protocol::validateModelOptions(categoryName(category), options, error)) return false;
+    if (!Nukleus::Protocol::validateModelOptions(categoryName(category), options, error)) return false;
     if (!validateImageReferences(category, options, error)) return false;
     if (isImageReference(id) && ((category == ModelCategory::Companion && options.value("subtype") != "vae")
         || (category == ModelCategory::LlmChat && !options.value("canBeTextEncoder").toBool()))) {
@@ -459,26 +459,26 @@ bool ModelCatalog::isImageReference(const QString& id) const
     return false;
 }
 
-bool ModelCatalog::configureStyles(const QString &id, const QList<KiraService::PromptStyle> &styles, QString *error)
+bool ModelCatalog::configureStyles(const QString &id, const QList<Nukleus::PromptStyle> &styles, QString *error)
 {
     const auto fail = [error](const QString &message) { if (error) *error = message; return false; };
     const auto info = model(ModelCategory::ImageGeneration, id);
     if (!info) return fail(tr("Styles require an installed image-generation model"));
-    if (!KiraService::Protocol::validatePromptStyles(styles, error)) return false;
+    if (!Nukleus::Protocol::validatePromptStyles(styles, error)) return false;
     auto metadata = readMetadata(ModelCategory::ImageGeneration);
     if (!metadata) return fail(tr("Could not read model metadata"));
     auto entry = metadata->value(info->fileName).toObject();
     if (!info->companionFileName.isEmpty()) entry.insert("companionFileName", info->companionFileName);
-    entry.insert("styles", KiraService::Protocol::promptStylesToJson(styles));
+    entry.insert("styles", Nukleus::Protocol::promptStylesToJson(styles));
     metadata->insert(info->fileName, entry);
     if (!writeMetadata(ModelCategory::ImageGeneration, *metadata)) return fail(tr("Could not save model metadata"));
     return true;
 }
 
-std::optional<KiraService::ModelRouting> ModelCatalog::routing(QString *error) const
+std::optional<Nukleus::ModelRouting> ModelCatalog::routing(QString *error) const
 {
     const QString path = QDir(configurationPath()).filePath("model-routing.json");
-    if (!QFileInfo::exists(path)) return KiraService::Protocol::starterModelRouting();
+    if (!QFileInfo::exists(path)) return Nukleus::Protocol::starterModelRouting();
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
         if (error) *error = tr("Could not read model routing configuration");
@@ -490,15 +490,15 @@ std::optional<KiraService::ModelRouting> ModelCatalog::routing(QString *error) c
         if (error) *error = tr("Malformed model routing configuration");
         return std::nullopt;
     }
-    auto value = KiraService::Protocol::modelRoutingFromJson(document.object(), error);
+    auto value = Nukleus::Protocol::modelRoutingFromJson(document.object(), error);
     if (value) initializeRoutingOptions(*value);
     return value;
 }
 
-void ModelCatalog::initializeRoutingOptions(KiraService::ModelRouting &routing) const
+void ModelCatalog::initializeRoutingOptions(Nukleus::ModelRouting &routing) const
 {
-    const auto defaults = KiraService::Protocol::defaultModelOptions("image-generation");
-    const auto initialize = [&](KiraService::ModelAssignment &a) {
+    const auto defaults = Nukleus::Protocol::defaultModelOptions("image-generation");
+    const auto initialize = [&](Nukleus::ModelAssignment &a) {
         if (a.modelId.isEmpty()) return;
         const auto info = model(ModelCategory::ImageGeneration, a.modelId);
         const auto options = info ? info->recommendedOptions : QJsonObject{};
@@ -509,9 +509,9 @@ void ModelCatalog::initializeRoutingOptions(KiraService::ModelRouting &routing) 
     for (auto &quality : routing.editingQualities) initialize(quality.model);
 }
 
-bool ModelCatalog::validateRoutingReferences(const KiraService::ModelRouting &routing, QString *error) const
+bool ModelCatalog::validateRoutingReferences(const Nukleus::ModelRouting &routing, QString *error) const
 {
-    const auto validate = [&](const KiraService::ModelAssignment &a, const QString &name, const QString &capability) {
+    const auto validate = [&](const Nukleus::ModelAssignment &a, const QString &name, const QString &capability) {
         if (a.modelId.isEmpty()) return true;
         const auto info = model(ModelCategory::ImageGeneration, a.modelId);
         if (!info || !info->recommendedOptions.value(capability).toBool(true)) {
@@ -527,9 +527,9 @@ bool ModelCatalog::validateRoutingReferences(const KiraService::ModelRouting &ro
     return true;
 }
 
-bool ModelCatalog::configureRouting(const KiraService::ModelRouting &value, QString *error)
+bool ModelCatalog::configureRouting(const Nukleus::ModelRouting &value, QString *error)
 {
-    if (!routing(error) || !KiraService::Protocol::validateModelRouting(value, error)
+    if (!routing(error) || !Nukleus::Protocol::validateModelRouting(value, error)
         || !validateRoutingReferences(value, error)) return false;
     if (!QDir().mkpath(configurationPath())) {
         if (error) *error = tr("Could not create the model configuration directory");
@@ -538,8 +538,8 @@ bool ModelCatalog::configureRouting(const KiraService::ModelRouting &value, QStr
     QSaveFile file(QDir(configurationPath()).filePath("model-routing.json"));
     auto saved = value;
     initializeRoutingOptions(saved);
-    if (!KiraService::Protocol::validateModelRouting(saved, error)) return false;
-    const auto bytes = QJsonDocument(KiraService::Protocol::modelRoutingToJson(saved)).toJson();
+    if (!Nukleus::Protocol::validateModelRouting(saved, error)) return false;
+    const auto bytes = QJsonDocument(Nukleus::Protocol::modelRoutingToJson(saved)).toJson();
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit()) {
         if (error) *error = tr("Could not save model routing configuration");
         return false;
@@ -552,7 +552,7 @@ bool ModelCatalog::protectRouting(const QString &id, const QJsonObject *options,
     if (!id.startsWith("image-generation:")) return true;
     const auto value = routing(error);
     if (!value) return false;
-    const auto permitted = [&](const KiraService::ModelAssignment &a, const QString &capability) {
+    const auto permitted = [&](const Nukleus::ModelAssignment &a, const QString &capability) {
         if (a.modelId == id && (!options || !options->value(capability).toBool(true))) {
             if (error) *error = tr("This model is assigned to a preset or to an editing quality; clear its assignment first");
             return false;
@@ -746,7 +746,7 @@ void ModelCatalog::finishNetworkRequest()
         const QString reason = statusCode > 0
             ? tr("HTTP %1: %2").arg(statusCode).arg(reply->errorString()) : reply->errorString();
         const QString error = tr("Could not download %1 %2: %3").arg(role, fileName, reason);
-        qWarning().noquote() << QStringLiteral("[Kira Service]") << error;
+        qWarning().noquote() << QStringLiteral("[Nukleus]") << error;
         failActiveInstall(error);
         return;
     }
@@ -800,7 +800,7 @@ void ModelCatalog::completeInstall()
     if (m_activeInstall->request.explicitContent && category != ModelCategory::Upscaler && category != ModelCategory::Companion) entry.insert("explicitContent", *m_activeInstall->request.explicitContent);
     if (m_activeInstall->request.displayName) entry.insert("displayName", m_activeInstall->request.displayName->trimmed());
     if (m_activeInstall->request.mmprojModelId) entry.insert("mmprojModelId", *m_activeInstall->request.mmprojModelId);
-    if (category == ModelCategory::Companion) entry.insert("recommendedOptions", m_activeInstall->request.recommendedOptions.value_or(KiraService::Protocol::defaultModelOptions("companion")));
+    if (category == ModelCategory::Companion) entry.insert("recommendedOptions", m_activeInstall->request.recommendedOptions.value_or(Nukleus::Protocol::defaultModelOptions("companion")));
     metadata->insert(m_activeInstall->fileName, entry);
     if (category == ModelCategory::LlmChat && m_activeInstall->request.recommendedOptions)
         releaseExclusiveLlmRoles(*metadata, m_activeInstall->fileName, *m_activeInstall->request.recommendedOptions);

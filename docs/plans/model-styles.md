@@ -1,6 +1,6 @@
 ---
 status: implemented
-projects: [kira-service, kira-canvas]
+projects: [nukleus, kira-canvas]
 ---
 
 # Per-model generation styles
@@ -229,7 +229,7 @@ uncommitted unless the user requests a commit.
 
 ## Validation Commands
 
-Run from the `kira-service` repository, using the existing configured dependency
+Run from the `nukleus` repository, using the existing configured dependency
 prefixes:
 
 ```sh
