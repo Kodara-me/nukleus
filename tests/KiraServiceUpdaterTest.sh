@@ -34,11 +34,11 @@ for tool in cmake ctest sudo; do ln -s command-mock "$fixture/bin/$tool"; done
 export PATH="$fixture/bin:$PATH"
 updater="$fixture/repo/scripts/update-kira-service.sh"
 
-bash "$updater" --build-dir 'build space' --cmake-arg '-DKIRA_UI_SOURCE_DIR=/ui space' -- --no-enable
+bash "$updater" --build-dir 'build space' --cmake-arg '-DFETCHCONTENT_SOURCE_DIR_ARDOISE=/ui space' -- --no-enable
 [[ "$(wc -l < "$UPDATE_TEST_LOG")" == 6 ]]
 grep -F 'git fetch --prune' "$UPDATE_TEST_LOG"
 grep -F 'git pull --ff-only' "$UPDATE_TEST_LOG"
-grep -F '<-G> <Ninja> <-DCMAKE_BUILD_TYPE=Release> <-DKIRA_UI_SOURCE_DIR=/ui space>' "$UPDATE_TEST_LOG"
+grep -F '<-G> <Ninja> <-DCMAKE_BUILD_TYPE=Release> <-DFETCHCONTENT_SOURCE_DIR_ARDOISE=/ui space>' "$UPDATE_TEST_LOG"
 grep -F "sudo <-n> <$UPDATE_TEST_ROOT/scripts/install-kira-service.sh> <--no-enable> <--binary> <$UPDATE_TEST_ROOT/build space/src/kira-service> <--manager-binary> <$UPDATE_TEST_ROOT/build space/src/kira-service-manager>" "$UPDATE_TEST_LOG"
 
 for failure in dirty fetch pull cmake ctest; do

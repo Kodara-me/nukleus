@@ -30,7 +30,7 @@ import/export and automatic style selection.
 - The daemon, SDK and Manager have separate model representations and existing
   catalogue-refresh paths.
 - Canvas's `GenerationParametersWidget` already displays a disabled Style selector.
-- Manager has a fixed-size window, shared KiraUi dialogs and acknowledged Save
+- Manager has a fixed-size window, shared Ardoise dialogs and acknowledged Save
   workflows.
 
 ## Vertical Slices
@@ -81,7 +81,7 @@ name, positive prefix and negative prefix in an in-memory draft. Prefix editors
 support multiline text. Add appends a new style; Remove deletes the selected
 draft entry. Save replaces the complete list in its displayed order. Disable
 editing while saving, wait for acknowledgment before closing, and retain the
-draft on failure. Use shared KiraUi components without changing the main window's
+draft on failure. Use shared Ardoise components without changing the main window's
 fixed geometry.
 
 **Verification/completion:** Manager UI and service tests pass using the service

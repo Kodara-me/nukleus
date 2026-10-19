@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.21)
+cmake_minimum_required(VERSION 3.24)
 
 project(KiraService VERSION 0.1.0 LANGUAGES CXX)
 
@@ -9,12 +9,12 @@ set(CMAKE_AUTOMOC ON)
 
 find_package(Qt6 6.2 REQUIRED COMPONENTS Network WebSockets Widgets)
 
-set(KIRA_UI_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../kira-ui-framework" CACHE PATH "Path to a Kira UI Framework checkout")
-if(EXISTS "${KIRA_UI_SOURCE_DIR}/CMakeLists.txt" AND EXISTS "${KIRA_UI_SOURCE_DIR}/include/KiraUi/Version.h")
-    add_subdirectory("${KIRA_UI_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/kira-ui-framework" EXCLUDE_FROM_ALL)
-else()
-    find_package(KiraUi 0.2 CONFIG REQUIRED)
-endif()
+include(FetchContent)
+FetchContent_Declare(Ardoise
+    GIT_REPOSITORY https://github.com/jstmichel/ardoise.git
+    GIT_TAG v0.1.0
+    FIND_PACKAGE_ARGS 0.1 CONFIG)
+FetchContent_MakeAvailable(Ardoise)
 
 include(CTest)
 

@@ -1,9 +1,9 @@
 #include "ModelRoutingDialog.h"
 #include "ManagerServiceClient.h"
-#include <KiraUi/IconButton.h>
-#include <KiraUi/PlainTextEdit.h>
-#include <KiraUi/PrimaryButton.h>
-#include <KiraUi/TreeView.h>
+#include <Ardoise/IconButton.h>
+#include <Ardoise/PlainTextEdit.h>
+#include <Ardoise/PrimaryButton.h>
+#include <Ardoise/TreeView.h>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -66,7 +66,7 @@ QStandardItem *selectedPreset(QStandardItem *item)
 } // namespace
 
 ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *parent)
-    : KiraUi::Dialog(parent), m_client(client)
+    : Ardoise::Dialog(parent), m_client(client)
 {
     setWindowTitle(tr("Presets"));
     setObjectName("modelRoutingDialog");
@@ -76,12 +76,12 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
     auto *treePane = new QWidget(splitter);
     auto *treeLayout = new QVBoxLayout(treePane);
     treeLayout->setContentsMargins(0, 0, 0, 0);
-    m_tree = new KiraUi::TreeView(treePane);
+    m_tree = new Ardoise::TreeView(treePane);
     treeLayout->addWidget(m_tree, 1);
     auto *presetActions = new QHBoxLayout;
-    m_addPreset = new KiraUi::IconButton(KiraUi::Icon::Plus, tr("Add preset"), treePane);
+    m_addPreset = new Ardoise::IconButton(Ardoise::Icon::Plus, tr("Add preset"), treePane);
     m_addPreset->setObjectName("addPreset");
-    m_removePreset = new KiraUi::IconButton(KiraUi::Icon::Close, tr("Remove preset"), treePane);
+    m_removePreset = new Ardoise::IconButton(Ardoise::Icon::Close, tr("Remove preset"), treePane);
     m_removePreset->setObjectName("removePreset");
     presetActions->addWidget(m_addPreset);
     presetActions->addWidget(m_removePreset);
@@ -190,9 +190,9 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
     presetForm->addRow(tr("Name (French):"), m_presetNameFr);
     presetForm->addRow(tr("Identity portraits:"), m_identityViews);
     prefixLayout->addWidget(m_presetFields);
-    m_positive = new KiraUi::PlainTextEdit(m_prefixes);
+    m_positive = new Ardoise::PlainTextEdit(m_prefixes);
     m_positive->setObjectName("presetPositive");
-    m_negative = new KiraUi::PlainTextEdit(m_prefixes);
+    m_negative = new Ardoise::PlainTextEdit(m_prefixes);
     m_negative->setObjectName("presetNegative");
     prefixLayout->addWidget(new QLabel(tr("Positive prefix"), m_prefixes));
     prefixLayout->addWidget(m_positive, 1);
@@ -210,7 +210,7 @@ ModelRoutingDialog::ModelRoutingDialog(ManagerServiceClient *client, QWidget *pa
     layout->addWidget(m_status);
     auto *actions = new QHBoxLayout;
     actions->addStretch();
-    m_save = new KiraUi::PrimaryButton(tr("Save"), body);
+    m_save = new Ardoise::PrimaryButton(tr("Save"), body);
     m_save->setObjectName("saveRouting");
     m_cancel = new QPushButton(tr("Cancel"), body);
     actions->addWidget(m_save);
@@ -469,5 +469,5 @@ void ModelRoutingDialog::updateActions()
 void ModelRoutingDialog::reject()
 {
     if (!m_saving)
-        KiraUi::Dialog::reject();
+        Ardoise::Dialog::reject();
 }

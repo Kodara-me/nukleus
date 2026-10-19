@@ -1,5 +1,5 @@
 #pragma once
-#include <KiraUi/Dialog.h>
+#include <Ardoise/Dialog.h>
 #include <kira/service/ModelRouting.h>
 
 class ManagerServiceClient;
@@ -15,12 +15,12 @@ class QSpinBox;
 class QDoubleSpinBox;
 class QLineEdit;
 class QAbstractButton;
-namespace KiraUi
+namespace Ardoise
 {
 class TreeView;
 }
 
-class ModelRoutingDialog final : public KiraUi::Dialog
+class ModelRoutingDialog final : public Ardoise::Dialog
 {
     Q_OBJECT
 public:
@@ -37,7 +37,7 @@ private:
     QStandardItem *selectedItem() const;
     KiraService::ModelRouting configuration() const;
     ManagerServiceClient *m_client;
-    KiraUi::TreeView *m_tree;
+    Ardoise::TreeView *m_tree;
     QStandardItemModel *m_model;
     QStandardItem *m_generation;
     QStandardItem *m_editing;

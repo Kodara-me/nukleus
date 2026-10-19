@@ -76,7 +76,7 @@ add_executable(kira-service-manager-ui-test
     ../src/manager/ManagerServiceClient.h
 )
 set_target_properties(kira-service-manager-ui-test PROPERTIES AUTORCC ON)
-target_link_libraries(kira-service-manager-ui-test PRIVATE KiraService::Protocol KiraUi::Widgets Qt6::Widgets Qt6::Test Qt6::WebSockets)
+target_link_libraries(kira-service-manager-ui-test PRIVATE KiraService::Protocol Ardoise::Widgets Qt6::Widgets Qt6::Test Qt6::WebSockets)
 add_test(NAME kira-service-manager-ui-test COMMAND kira-service-manager-ui-test)
 set_tests_properties(kira-service-manager-ui-test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 

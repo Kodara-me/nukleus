@@ -1,6 +1,6 @@
 #include "ServiceConnectionDialog.h"
 #include "ManagerServiceClient.h"
-#include <KiraUi/PrimaryButton.h>
+#include <Ardoise/PrimaryButton.h>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -9,7 +9,7 @@
 #include <QSettings>
 
 ServiceConnectionDialog::ServiceConnectionDialog(ManagerServiceClient *client, QWidget *parent)
-    : KiraUi::Dialog(parent), m_client(client), m_originalHost(client->host()), m_originalToken(client->token())
+    : Ardoise::Dialog(parent), m_client(client), m_originalHost(client->host()), m_originalToken(client->token())
 {
     setWindowTitle(tr("Connect to Kira Service"));
     setModal(true);
@@ -30,7 +30,7 @@ ServiceConnectionDialog::ServiceConnectionDialog(ManagerServiceClient *client, Q
     m_status->setWordWrap(true);
     form->addRow(m_status);
     auto *buttons = new QHBoxLayout;
-    m_connect = new KiraUi::PrimaryButton(tr("Connect"), body);
+    m_connect = new Ardoise::PrimaryButton(tr("Connect"), body);
     m_connect->setObjectName("connectService");
     m_connect->setDefault(true);
     auto *cancel = new QPushButton(tr("Cancel"), body);
@@ -71,5 +71,5 @@ void ServiceConnectionDialog::reject()
 {
     m_connecting = false;
     m_client->setConnection(m_originalHost, m_originalToken);
-    KiraUi::Dialog::reject();
+    Ardoise::Dialog::reject();
 }

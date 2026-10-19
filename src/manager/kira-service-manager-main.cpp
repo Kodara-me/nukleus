@@ -3,7 +3,7 @@
 #include "ManagerServiceClient.h"
 
 #include <QApplication>
-#include <KiraUi/Theme.h>
+#include <Ardoise/Theme.h>
 #include <QIcon>
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -260,7 +260,7 @@ int main(int argc, char *argv[])
             QTextStream(stderr) << "--gui cannot be combined with a CLI command.\n";
             return 2;
         }
-        KiraUi::Theme::apply(*static_cast<QApplication *>(application.get()));
+        Ardoise::Theme::apply(*static_cast<QApplication *>(application.get()));
         QIcon icon;
         for (const int size : {16, 32, 48, 64, 128, 256, 512, 1024}) icon.addFile(QStringLiteral(":/manager/icons/manager-%1.png").arg(size));
         QApplication::setWindowIcon(icon);

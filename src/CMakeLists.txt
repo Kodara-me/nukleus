@@ -48,7 +48,7 @@ set_target_properties(kira-service-manager PROPERTIES AUTORCC ON)
 target_include_directories(kira-service-manager PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/manager
 )
-target_link_libraries(kira-service-manager PRIVATE KiraService::Protocol KiraUi::Widgets Qt6::Network Qt6::WebSockets Qt6::Widgets)
+target_link_libraries(kira-service-manager PRIVATE KiraService::Protocol Ardoise::Widgets Qt6::Network Qt6::WebSockets Qt6::Widgets)
 
 install(TARGETS kira-service
     RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/kira-service

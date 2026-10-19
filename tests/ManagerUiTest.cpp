@@ -7,8 +7,8 @@
 #include "../src/manager/ServiceConnectionDialog.h"
 #include "../src/manager/ManagerServiceClient.h"
 #include "../src/manager/ModelOptionsWidget.h"
-#include <KiraUi/Theme.h>
-#include <KiraUi/TreeView.h>
+#include <Ardoise/Theme.h>
+#include <Ardoise/TreeView.h>
 #include <QApplication>
 #include <QComboBox>
 #include <QCheckBox>
@@ -178,7 +178,7 @@ class ManagerUiTest final : public QObject
         const auto restoreLocale = qScopeGuard([&] { QLocale::setDefault(originalLocale); });
         QLocale::setDefault(QLocale("fr_CA"));
         ModelRoutingDialog dialog(&client); dialog.show();
-        auto *tree = dialog.findChild<KiraUi::TreeView *>("routingTree");
+        auto *tree = dialog.findChild<Ardoise::TreeView *>("routingTree");
         QVERIFY(tree);
         QCOMPARE(tree->dragDropMode(), QAbstractItemView::NoDragDrop);
         QCOMPARE(tree->editTriggers(), QAbstractItemView::EditTriggers(QAbstractItemView::NoEditTriggers));
@@ -324,7 +324,7 @@ class ManagerUiTest final : public QObject
         send({{"type", "model-routing.get.completed"}, {"routing", KiraService::Protocol::modelRoutingToJson(routing)}});
         QTRY_VERIFY(client.modelRouting().has_value());
         ModelRoutingDialog dialog(&client); dialog.show();
-        auto *tree = dialog.findChild<KiraUi::TreeView *>("routingTree");
+        auto *tree = dialog.findChild<Ardoise::TreeView *>("routingTree");
         auto *generation = qobject_cast<QStandardItemModel *>(tree->model())->item(0);
         auto *editing = qobject_cast<QStandardItemModel *>(tree->model())->item(1);
         auto *add = dialog.findChild<QAbstractButton *>("addPreset");
@@ -379,7 +379,7 @@ class ManagerUiTest final : public QObject
         QCoreApplication::setApplicationName("ManagerUiTests");
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settings.path());
-        KiraUi::Theme::apply(*qApp);
+        Ardoise::Theme::apply(*qApp);
         QVERIFY(m_server.listen(QHostAddress::LocalHost));
         connect(&m_server, &QWebSocketServer::newConnection, this,
                 [this]
@@ -506,7 +506,7 @@ class ManagerUiTest final : public QObject
         QTRY_VERIFY(client.modelListAvailable());
         send({{"type", "models.list.result"}, {"categories", catalogue}});
         QTRY_COMPARE(client.models("companion").size(), 2);
-        auto* tree = window.findChild<KiraUi::TreeView*>("installedModelsTree");
+        auto* tree = window.findChild<Ardoise::TreeView*>("installedModelsTree");
         auto* body = window.findChild<QWidget*>("modelConfigurationBody");
         QVERIFY(body->isHidden());
         const auto select = [&](const QString& id) {
@@ -611,7 +611,7 @@ class ManagerUiTest final : public QObject
         QCOMPARE(window.size(), QSize(1100, 640));
         window.resize(1500, 800);
         QCOMPARE(window.size(), QSize(1100, 640));
-        auto *tree = window.findChild<KiraUi::TreeView *>("installedModelsTree");
+        auto *tree = window.findChild<Ardoise::TreeView *>("installedModelsTree");
         QVERIFY(tree);
         QCOMPARE(tree->model()->rowCount(), 1);
         auto root = tree->model()->index(0, 0);
@@ -672,7 +672,7 @@ class ManagerUiTest final : public QObject
         ManageModelsWindow window(nullptr, &client);
         window.show();
         QTRY_VERIFY(client.modelListAvailable());
-        auto *tree = window.findChild<KiraUi::TreeView *>();
+        auto *tree = window.findChild<Ardoise::TreeView *>();
         auto root = tree->model()->index(0, 0);
         auto category = tree->model()->index(1, 0, root);
         tree->setCurrentIndex(tree->model()->index(0, 0, category));
@@ -704,7 +704,7 @@ class ManagerUiTest final : public QObject
         ManageModelsWindow window(nullptr, &client);
         window.show();
         QTRY_VERIFY(client.modelListAvailable());
-        auto *tree = window.findChild<KiraUi::TreeView *>();
+        auto *tree = window.findChild<Ardoise::TreeView *>();
         auto root = tree->model()->index(0, 0);
         auto category = tree->model()->index(1, 0, root);
         tree->setCurrentIndex(tree->model()->index(0, 0, category));
@@ -729,7 +729,7 @@ class ManagerUiTest final : public QObject
         ManageModelsWindow window(nullptr, &client);
         window.show();
         QTRY_VERIFY(client.modelListAvailable());
-        auto *tree = window.findChild<KiraUi::TreeView *>();
+        auto *tree = window.findChild<Ardoise::TreeView *>();
         auto root = tree->model()->index(0, 0);
         auto category = tree->model()->index(1, 0, root);
         tree->setCurrentIndex(tree->model()->index(0, 0, category));
@@ -761,7 +761,7 @@ class ManagerUiTest final : public QObject
         ManageModelsWindow window(nullptr, &client);
         window.show();
         QTRY_VERIFY(client.modelListAvailable());
-        auto *tree = window.findChild<KiraUi::TreeView *>();
+        auto *tree = window.findChild<Ardoise::TreeView *>();
         auto root = tree->model()->index(0, 0);
         auto category = tree->model()->index(1, 0, root);
         tree->setCurrentIndex(tree->model()->index(0, 0, category));

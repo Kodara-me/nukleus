@@ -78,11 +78,12 @@ never overwrite weights and keep companions scoped to the final primary name.
   lazy load; unload relies on the rule that every job not using llama-server
   stops it. Tests use the fake server and must never start a real one.
 
-- Link only the manager/UI tests to KiraUi::Widgets 0.2. Default to the sibling
-  checkout, allow KIRA_UI_SOURCE_DIR, and fall back to an installed package.
+- Link only the manager/UI tests to Ardoise::Widgets 0.1. FetchContent uses the
+  installed Ardoise package, otherwise clones tag v0.1.0; a local checkout is
+  selected with FETCHCONTENT_SOURCE_DIR_ARDOISE.
   Keep daemon and SDK independent of the visual framework.
 - Use native OS title bars and window/dialog buttons; keep the Kira content theme.
-- Apply KiraUi::Theme only in GUI mode. Use the shared MainWindow/Dialog, panels,
+- Apply Ardoise::Theme only in GUI mode. Use the shared MainWindow/Dialog, panels,
   tree and controls. Preserve the local CLI; GUI may connect to an authenticated LAN service.
 - Use a landscape model tree/details splitter with a fixed, non-resizable window
   content size of 1100×640 logical pixels, excluding the native title bar. Restore
@@ -210,7 +211,7 @@ Sibling checkouts and sd-cli are not updated by this script.
 
 ## Service-owned presets
 
-Manager Presets… uses a shared KiraUi tree with fixed Generation and Editing roots.
+Manager Presets… uses a shared Ardoise tree with fixed Generation and Editing roots.
 Generation starts with Photorealism / Photoréalisme and Illustration. Add preset
 and Remove preset icon buttons under the tree add a preset (generated unique
 `preset-…` ID, default bilingual names, unassigned, one identity portrait, empty

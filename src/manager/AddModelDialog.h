@@ -1,5 +1,5 @@
 #pragma once
-#include <KiraUi/Dialog.h>
+#include <Ardoise/Dialog.h>
 #include <QJsonObject>
 class ManagerServiceClient;
 class ModelOptionsWidget;
@@ -10,7 +10,7 @@ class QPushButton;
 class QProgressBar;
 class QCloseEvent;
 
-class AddModelDialog final : public KiraUi::Dialog
+class AddModelDialog final : public Ardoise::Dialog
 {
     Q_OBJECT
   public:

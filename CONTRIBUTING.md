@@ -19,7 +19,7 @@ server process. Tests never start the real server: `kira-service-fake-llama-serv
 (tests/FakeLlamaServer.cpp) records launches and requests and simulates slow
 loads, load failures, context overflow, crashes and hangs through marker files.
 
-Kira Service is a C++20 Qt 6 project. Build dependencies are CMake, Ninja, a C++20 compiler, and Qt 6.2+ Network, WebSockets, and Widgets, SVG, and LinguistTools development packages, plus Kira UI Framework 0.2. `sd-cli` is required on a machine that performs image work; README's "Runtime tools on Arch Linux" lists the Vulkan AUR packages for `sd-cli` and llama.cpp. Tests never need them.
+Kira Service is a C++20 Qt 6 project. Build dependencies are CMake 3.24+, Ninja, a C++20 compiler, and Qt 6.2+ Network, WebSockets, and Widgets, SVG, and LinguistTools development packages, plus Ardoise 0.1 (installed, or cloned by CMake). `sd-cli` is required on a machine that performs image work; README's "Runtime tools on Arch Linux" lists the Vulkan AUR packages for `sd-cli` and llama.cpp. Tests never need them.
 
 ```sh
 cmake -S . -B build -G Ninja
@@ -67,7 +67,7 @@ The legacy VAE GUI exposes this via Optional files; the compatibility CLI expose
 
 ModelRouting Protocol types carry English/French labels, preset prefixes
 and one ModelAssignment (model plus optional Steps/CFG snapshot) per preset and
-per fixed editing quality (Fast/Balanced/Quality, exactly one the default). Use the shared KiraUi TreeView with fixed Generation/Editing
+per fixed editing quality (Fast/Balanced/Quality, exactly one the default). Use the shared Ardoise TreeView with fixed Generation/Editing
 branches: 1–16 presets under Generation (starting with Photorealism and
 Illustration); the three editing qualities under
 Editing, each with its own prefixes. Add/Remove
@@ -110,10 +110,12 @@ and consumer tests compile consistently on Windows.
 Preserve legacy per-model style APIs/metadata without their management UI.
 Deploy service first.
 
-CMake defaults `KIRA_UI_SOURCE_DIR` to `../kira-ui-framework`. Override it with
-`-DKIRA_UI_SOURCE_DIR=/path/to/kira-ui-framework`. Without a source checkout,
-provide the installed `KiraUi` package through `CMAKE_PREFIX_PATH`. Only the
-manager and its UI tests link `KiraUi::Widgets`; embedded SDK consumers do not
+CMake obtains Ardoise 0.1 through `FetchContent`: an installed `Ardoise` package
+is used when found (for example in `~/.local`, or through `CMAKE_PREFIX_PATH`);
+otherwise tag `v0.1.0` is cloned from https://github.com/jstmichel/ardoise.
+Develop against a local checkout with
+`-DFETCHCONTENT_SOURCE_DIR_ARDOISE=/path/to/ardoise`. Only the
+manager and its UI tests link `Ardoise::Widgets`; embedded SDK consumers do not
 acquire GUI dependencies. Theme and window icons are initialized only in GUI
 mode. Original icon artwork and prebuilt PNG sizes are committed under
 `assets/icons/`; no image conversion tools are required to build or run.
@@ -248,15 +250,15 @@ Use `scripts/update-kira-service.sh` on the service host as the checkout owner.
 It runs `git fetch --prune`, `git pull --ff-only`, CMake configure/build, CTest,
 and the existing systemd installer through `sudo -n`. Configure the branch's
 upstream first and commit or stash tracked changes. Untracked files are retained;
-Git refuses a pull that would overwrite them. Dependencies, including Kira UI
-Framework, must already be installed or checked out; sibling repositories and
-`sd-cli` are not updated.
+Git refuses a pull that would overwrite them. Dependencies must already be
+installed; Ardoise is used from its installed package or cloned by CMake at the
+pinned tag. Sibling repositories and `sd-cli` are not updated.
 
 ```sh
 ssh user@service-host '/path/to/kira-service/scripts/update-kira-service.sh'
-# Custom build directory and framework checkout:
+# Custom build directory and Ardoise checkout:
 scripts/update-kira-service.sh --build-dir build-release \
-  --cmake-arg -DKIRA_UI_SOURCE_DIR=/path/to/kira-ui-framework
+  --cmake-arg -DFETCHCONTENT_SOURCE_DIR_ARDOISE=/path/to/ardoise
 ```
 
 New build directories use Ninja and Release; existing CMake cache settings remain

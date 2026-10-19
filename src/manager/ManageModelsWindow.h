@@ -1,5 +1,5 @@
 #pragma once
-#include <KiraUi/MainWindow.h>
+#include <Ardoise/MainWindow.h>
 #include <QJsonObject>
 #include <functional>
 class ManagerServiceClient;
@@ -12,12 +12,12 @@ class QStandardItemModel;
 class QSplitter;
 class QCloseEvent;
 class ServiceConnectionDialog;
-namespace KiraUi
+namespace Ardoise
 {
 class TreeView;
 }
 
-class ManageModelsWindow final : public KiraUi::MainWindow
+class ManageModelsWindow final : public Ardoise::MainWindow
 {
     Q_OBJECT
   public:
@@ -51,7 +51,7 @@ class ManageModelsWindow final : public KiraUi::MainWindow
     void refreshCompanions();
     QLineEdit *m_displayName;
     QString m_originalDisplayName;
-    KiraUi::TreeView *m_tree;
+    Ardoise::TreeView *m_tree;
     QStandardItemModel *m_treeModel;
     QSplitter *m_splitter;
     ModelOptionsWidget *m_options;

@@ -5,10 +5,10 @@
 #include "ModelOptionsWidget.h"
 #include "ModelRoutingDialog.h"
 #include "ServiceConnectionDialog.h"
-#include <KiraUi/IconProvider.h>
-#include <KiraUi/Panel.h>
-#include <KiraUi/PrimaryButton.h>
-#include <KiraUi/TreeView.h>
+#include <Ardoise/IconProvider.h>
+#include <Ardoise/Panel.h>
+#include <Ardoise/PrimaryButton.h>
+#include <Ardoise/TreeView.h>
 #include <QApplication>
 #include <QCloseEvent>
 #include <QFileInfo>
@@ -32,7 +32,7 @@ const QList<QPair<QString, QString>> categories{{"llm-chat", "LLM"},
 QString sizeText(qint64 bytes) { return QObject::tr("%1 MiB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1); }
 } // namespace
 ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *client)
-    : KiraUi::MainWindow(parent), m_client(client ? client : new ManagerServiceClient(this))
+    : Ardoise::MainWindow(parent), m_client(client ? client : new ManagerServiceClient(this))
 {
     setWindowTitle(tr("Kira Service Manager"));
     setWindowIcon(QApplication::windowIcon().isNull()
@@ -53,10 +53,10 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     m_splitter = new QSplitter(Qt::Horizontal, body);
     m_splitter->setChildrenCollapsible(false);
     layout->addWidget(m_splitter, 1);
-    auto *library = new KiraUi::Panel(m_splitter);
+    auto *library = new Ardoise::Panel(m_splitter);
     auto *left = new QVBoxLayout(library);
     left->addWidget(new QLabel(tr("Installed models"), library));
-    m_tree = new KiraUi::TreeView(library);
+    m_tree = new Ardoise::TreeView(library);
     m_tree->setObjectName("installedModelsTree");
     m_tree->setHeaderHidden(true);
     m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -64,9 +64,9 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     m_tree->setModel(m_treeModel);
     left->addWidget(m_tree, 1);
     auto *actions = new QHBoxLayout;
-    m_add = new KiraUi::PrimaryButton(tr("Add model"), library);
+    m_add = new Ardoise::PrimaryButton(tr("Add model"), library);
     m_add->setObjectName("addModel");
-    m_add->setIcon(KiraUi::IconProvider::icon(KiraUi::Icon::Plus));
+    m_add->setIcon(Ardoise::IconProvider::icon(Ardoise::Icon::Plus));
     m_delete = new QPushButton(tr("Delete"), library);
     m_delete->setObjectName("deleteModel");
     actions->addWidget(m_add);
@@ -78,7 +78,7 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     m_presets = new QPushButton(tr("Presets…"), library);
     m_presets->setObjectName("modelPresets");
     left->addWidget(m_presets);
-    auto *configuration = new KiraUi::Panel(m_splitter);
+    auto *configuration = new Ardoise::Panel(m_splitter);
     auto* panelLayout = new QVBoxLayout(configuration);
     m_configurationBody = new QWidget(configuration);
     m_configurationBody->setObjectName("modelConfigurationBody");
@@ -123,9 +123,9 @@ ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *cl
     contentLayout->addStretch();
     scroll->setWidget(content);
     right->addWidget(scroll, 1);
-    m_save = new KiraUi::PrimaryButton(tr("Save"), configuration);
+    m_save = new Ardoise::PrimaryButton(tr("Save"), configuration);
     m_save->setObjectName("saveOptions");
-    m_save->setIcon(KiraUi::IconProvider::icon(KiraUi::Icon::Save));
+    m_save->setIcon(Ardoise::IconProvider::icon(Ardoise::Icon::Save));
     right->addWidget(m_save);
     m_splitter->setSizes({390, 850});
     m_splitter->restoreState(settings.value("MainWindow/ModelsSplitter").toByteArray());
@@ -231,7 +231,7 @@ void ManageModelsWindow::populateModels()
     {
         auto *branch = new QStandardItem(tr(qPrintable(category.second)));
         branch->setEditable(false);
-        branch->setIcon(KiraUi::IconProvider::icon(KiraUi::Icon::Folder));
+        branch->setIcon(Ardoise::IconProvider::icon(Ardoise::Icon::Folder));
         branch->setData(category.first, Qt::UserRole + 2);
         root->appendRow(branch);
         QHash<QString, QStandardItem*> subtypeBranches;
@@ -239,7 +239,7 @@ void ManageModelsWindow::populateModels()
             for (const auto& subtype : {QString("vae"), QString("mmproj")}) {
                 auto* group = new QStandardItem(subtype == "vae" ? tr("VAE") : tr("MMPROJ (vision projector)"));
                 group->setEditable(false);
-                group->setIcon(KiraUi::IconProvider::icon(KiraUi::Icon::Folder));
+                group->setIcon(Ardoise::IconProvider::icon(Ardoise::Icon::Folder));
                 group->setData(category.first, Qt::UserRole + 2);
                 group->setData(subtype, Qt::UserRole + 3);
                 branch->appendRow(group);
@@ -250,7 +250,7 @@ void ManageModelsWindow::populateModels()
         {
             auto *item = new QStandardItem(model.displayLabel());
             item->setEditable(false);
-            item->setIcon(KiraUi::IconProvider::icon(KiraUi::Icon::File));
+            item->setIcon(Ardoise::IconProvider::icon(Ardoise::Icon::File));
             item->setData(model.id, Qt::UserRole + 1);
             item->setData(category.first, Qt::UserRole + 2);
             item->setToolTip(model.fileName);
@@ -469,7 +469,7 @@ void ManageModelsWindow::closeEvent(QCloseEvent *event)
     QSettings settings;
     settings.setValue("MainWindow/Geometry", saveGeometry());
     settings.setValue("MainWindow/ModelsSplitter", m_splitter->saveState());
-    KiraUi::MainWindow::closeEvent(event);
+    Ardoise::MainWindow::closeEvent(event);
 }
 
 void ManageModelsWindow::refreshCompanions()

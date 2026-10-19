@@ -1,8 +1,8 @@
 #include "AddModelDialog.h"
 #include "ManagerServiceClient.h"
 #include "ModelOptionsWidget.h"
-#include <KiraUi/IconProvider.h>
-#include <KiraUi/PrimaryButton.h>
+#include <Ardoise/IconProvider.h>
+#include <Ardoise/PrimaryButton.h>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QSignalBlocker>
@@ -32,7 +32,7 @@ bool validUrl(const QString &text)
 QString bytesText(qint64 bytes) { return QObject::tr("%1 MiB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1); }
 } // namespace
 AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &category, QWidget *parent, const QString &existingModelId)
-    : KiraUi::Dialog(parent), m_client(client), m_existingModelId(existingModelId)
+    : Ardoise::Dialog(parent), m_client(client), m_existingModelId(existingModelId)
 {
     setWindowTitle(existingModelId.isEmpty() ? tr("Add model") : tr("Optional model files"));
     setWindowIcon(QIcon(QStringLiteral(":/manager/icons/manager-32.png")));
@@ -141,9 +141,9 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     auto *buttons = new QHBoxLayout;
     buttons->addStretch();
     m_cancel = new QPushButton(tr("Cancel"), body);
-    m_start = new KiraUi::PrimaryButton(existingModelId.isEmpty() ? tr("Start download") : tr("Apply optional files"), body);
+    m_start = new Ardoise::PrimaryButton(existingModelId.isEmpty() ? tr("Start download") : tr("Apply optional files"), body);
     m_start->setObjectName("startDownload");
-    m_start->setIcon(KiraUi::IconProvider::icon(KiraUi::Icon::Plus));
+    m_start->setIcon(Ardoise::IconProvider::icon(Ardoise::Icon::Plus));
     buttons->addWidget(m_cancel);
     buttons->addWidget(m_start);
     layout->addLayout(buttons);
@@ -275,7 +275,7 @@ void AddModelDialog::updateProgress()
         {
             m_busy = false;
             m_canceling = false;
-            KiraUi::Dialog::reject();
+            Ardoise::Dialog::reject();
             return;
         }
         if (install.state == ManagedInstallState::Failed)
@@ -314,7 +314,7 @@ void AddModelDialog::reject()
 {
     if (!m_busy)
     {
-        KiraUi::Dialog::reject();
+        Ardoise::Dialog::reject();
         return;
     }
     if (!m_canceling && m_client->cancelInstall(m_installId))
@@ -332,7 +332,7 @@ void AddModelDialog::closeEvent(QCloseEvent *event)
         reject();
     }
     else
-        KiraUi::Dialog::closeEvent(event);
+        Ardoise::Dialog::closeEvent(event);
 }
 
 QString AddModelDialog::roleFor(QLineEdit* field) const

@@ -47,11 +47,19 @@ CLI add requires `--display-name "My model"`; an explicit empty rename is reject
 
 ## Build
 
-The manager requires Kira UI Framework 0.2, Qt SVG, and LinguistTools in
-addition to Qt Network/WebSockets/Widgets. By default CMake uses the sibling
-`../kira-ui-framework`; set `KIRA_UI_SOURCE_DIR` to another checkout. If that
-path is not a checkout, CMake requires the installed `KiraUi` package. The
-daemon and installable SDK do not link the UI framework.
+Building requires CMake 3.24 or newer. The manager requires
+[Ardoise](https://github.com/jstmichel/ardoise) 0.1, Qt SVG, and LinguistTools
+in addition to Qt Network/WebSockets/Widgets. CMake uses an installed Ardoise
+package when found and otherwise clones tag `v0.1.0`. Install Ardoise with one
+command:
+
+```sh
+curl -fsSL https://github.com/jstmichel/ardoise/releases/latest/download/get-ardoise.sh | sh
+```
+
+To build against a local Ardoise checkout, pass
+`-DFETCHCONTENT_SOURCE_DIR_ARDOISE=/path/to/ardoise`. The daemon and installable
+SDK do not link the UI framework.
 
 
 ```sh
@@ -328,8 +336,8 @@ fetches and fast-forwards the current branch's upstream, configures and builds,
 runs CTest, then uses the existing systemd installer to preserve configuration and
 restart the service. Tracked changes, diverged branches, and build/test failures
 stop the update before installation. The restart interrupts active jobs.
-Build dependencies and Kira UI Framework must already be available; sibling
-checkouts and `sd-cli` are not updated. See `--help` for build and installer options.
+Build dependencies must already be available (Ardoise is used from its installed
+package or cloned by CMake at the pinned tag); sibling checkouts and `sd-cli` are not updated. See `--help` for build and installer options.
 
 
 ## Identity portrait packages

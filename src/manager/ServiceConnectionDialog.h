@@ -1,12 +1,12 @@
 #pragma once
-#include <KiraUi/Dialog.h>
+#include <Ardoise/Dialog.h>
 
 class ManagerServiceClient;
 class QLineEdit;
 class QLabel;
 class QPushButton;
 
-class ServiceConnectionDialog final : public KiraUi::Dialog
+class ServiceConnectionDialog final : public Ardoise::Dialog
 {
     Q_OBJECT
 public:
