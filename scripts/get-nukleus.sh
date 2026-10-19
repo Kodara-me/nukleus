@@ -11,7 +11,7 @@
 #                    -- --listen 127.0.0.1   or   -- --desktop-shortcut
 #
 # Requires curl, tar, git, CMake 3.24+, a C++20 compiler, Qt 6.2+ with Network, WebSockets,
-# Widgets, SVG and LinguistTools, and sudo. Ardoise is used when installed, otherwise CMake
+# Widgets, SVG and LinguistTools, LibArchive, and sudo. Ardoise is used when installed, otherwise CMake
 # clones it. The release is installed only after its tests pass. Exit codes: 0 installed,
 # 1 failure.
 

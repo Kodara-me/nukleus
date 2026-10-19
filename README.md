@@ -55,7 +55,7 @@ curl -fsSL https://github.com/jstmichel/nukleus/releases/latest/download/get-nuk
 ```
 
 It needs curl, git, CMake 3.24+, a C++20 compiler, Qt 6.2+ (Network,
-WebSockets, Widgets, SVG, LinguistTools) and sudo; Ardoise is cloned by CMake
+WebSockets, Widgets, SVG, LinguistTools), LibArchive and sudo; Ardoise is cloned by CMake
 when it is not installed. The installer asks where the service listens.
 Installer options follow `--`, for example a loopback-only service with a
 desktop shortcut:
