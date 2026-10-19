@@ -1,0 +1,76 @@
+# On a version tag, checks that the tag matches the CMake project version, builds and tests
+# the tagged source, then attaches the source archive, the get-nukleus.sh installer and their
+# checksums to a draft release, which the maintainer publishes.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release, e.g. v0.1.0'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Test and draft the release
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Check the version
+        run: |
+          version="${TAG#v}"
+          project=$(sed -n 's/^project(Nukleus VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          if [ "$version" != "$project" ]; then
+            echo "::error::tag $TAG does not match project version $project in CMakeLists.txt"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build qt6-base-dev qt6-websockets-dev qt6-svg-dev qt6-tools-dev \
+            qt6-tools-dev-tools qt6-l10n-tools libgl-dev
+
+      - name: Build and test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+
+      - name: Source archive, installer and checksums
+        run: |
+          mkdir -p dist
+          git archive --format=tar.gz --prefix="nukleus-$VERSION/" -o "dist/nukleus-$VERSION.tar.gz" "$TAG"
+          # The one-command installer, served by releases/latest/download/.
+          cp scripts/get-nukleus.sh dist/
+          cd dist
+          sha256sum nukleus-* get-nukleus.sh > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="docs/release-notes/$VERSION.md"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          elif [ -f "$notes" ]; then
+            gh release create "$TAG" dist/* --draft --title "Nukleus $VERSION" --notes-file "$notes" --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* --draft --title "Nukleus $VERSION" --generate-notes --repo "$GITHUB_REPOSITORY"
+          fi

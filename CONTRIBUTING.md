@@ -302,3 +302,20 @@ Deletion/retyping of an assigned companion is rejected; deleting an LLM never
 deletes a shared companion. Tests cover required names, subtype filtering,
 assignment persistence, shared-file preservation and empty category panels.
 Upscalers have no recommended options or explicit-content classification.
+
+## Issues, CI and releases
+
+Report bugs and propose ideas through the GitHub issue forms; blank issues are
+disabled. Keep tokens, LAN addresses, private prompts and model paths out of
+reports.
+
+`.github/workflows/ci.yml` builds and runs CTest on Ubuntu 24.04 for every push to
+`main` and every pull request; Ardoise is cloned by CMake at its pinned tag.
+
+To release, set `project(Nukleus VERSION …)` in `CMakeLists.txt`, optionally add
+`docs/release-notes/<version>.md`, then push a matching `v<version>` tag.
+`.github/workflows/release.yml` checks the version, builds and tests the tag, and
+attaches `nukleus-<version>.tar.gz`, `get-nukleus.sh` and `SHA256SUMS` to a draft
+release that the maintainer publishes. `scripts/get-nukleus.sh` is the
+one-command installer served from `releases/latest/download/`;
+`nukleus-get-test` checks it against a fake release with stubbed tools.

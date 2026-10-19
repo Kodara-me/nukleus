@@ -45,6 +45,31 @@ numeric suffix before the extension. Manager's add and configuration forms
 require a nonblank display name. Model labels use that name; opaque IDs remain unchanged when renaming a label.
 CLI add requires `--display-name "My model"`; an explicit empty rename is rejected.
 
+## Install
+
+On Linux, one command builds the latest release, runs its tests and installs it
+as a systemd service with the manager in `~/.local/bin`:
+
+```sh
+curl -fsSL https://github.com/jstmichel/nukleus/releases/latest/download/get-nukleus.sh | sh
+```
+
+It needs curl, git, CMake 3.24+, a C++20 compiler, Qt 6.2+ (Network,
+WebSockets, Widgets, SVG, LinguistTools) and sudo; Ardoise is cloned by CMake
+when it is not installed. The installer asks where the service listens.
+Installer options follow `--`, for example a loopback-only service with a
+desktop shortcut:
+
+```sh
+curl -fsSL https://github.com/jstmichel/nukleus/releases/latest/download/get-nukleus.sh | sh -s -- -- --listen 127.0.0.1 --desktop-shortcut
+```
+
+`--version v0.1.0` installs a given release and `--dry-run` stops before
+installing. The archive is checked against the release's `SHA256SUMS` and
+nothing is installed when it does not match or a test fails. Image work also
+needs the runtime tools listed under
+[Runtime tools on Arch Linux](#runtime-tools-on-arch-linux).
+
 ## Build
 
 Building requires CMake 3.24 or newer. The manager requires
@@ -388,3 +413,7 @@ Selecting any category or subtype leaves the right panel empty. Selecting a
 model shows its required display name and relevant fields. Upscaler has no model
 options, explicit-content checkbox or recommendations hint. LLM retains its
 sampling/token fields but has no recommendations hint.
+
+## License
+
+Nukleus is released under the [MIT License](LICENSE).

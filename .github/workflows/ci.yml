@@ -1,0 +1,42 @@
+# Builds Nukleus and runs every test for every push to main and every pull request. Ardoise is
+# cloned by CMake at its pinned tag; sd-cli and llama.cpp are not needed, the tests use fakes.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build qt6-base-dev qt6-websockets-dev qt6-svg-dev qt6-tools-dev \
+            qt6-tools-dev-tools qt6-l10n-tools libgl-dev
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build --output-on-failure

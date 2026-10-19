@@ -1,0 +1,29 @@
+name: Idea
+description: A proposal to discuss before any code is written.
+labels: [idea]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Nukleus is a generic backend: features belong here when several client applications
+        can use them, and client-specific logic stays in the client. Protocol changes are
+        additive to protocol v3. See [CONTRIBUTING.md](https://github.com/jstmichel/nukleus/blob/main/CONTRIBUTING.md).
+  - type: textarea
+    id: idea
+    attributes:
+      label: Idea
+      description: What Nukleus would do, from a client's or an administrator's point of view.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: The problem it solves, or what it makes easier today.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: How we would know it works
+      description: Observable results, for example "a text.chat request with … returns …".

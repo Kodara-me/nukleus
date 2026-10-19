@@ -1,0 +1,54 @@
+name: Bug
+description: Something does not work as the README, the protocol or the documentation say.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please leave out personal data: the service token, LAN
+        addresses, private prompts and the paths of your own model files are not needed.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. nukleus-manager add --category llm --display-name "My model" https://…
+        2. …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Service log
+      description: "For a systemd installation: `journalctl -u nukleus -n 100`. Remove anything private."
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Nukleus version
+      description: The release tag, or `git rev-parse --short HEAD` for a source build.
+      placeholder: "v0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System, GPU and runtime tools
+      placeholder: "Arch Linux, Radeon RX 7900 XTX, sd-cli master-123, llama.cpp b6000"
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      options:
+        - Service (daemon)
+        - Manager GUI
+        - Manager command line
+        - SDK or protocol client
+        - Installation or update

@@ -85,4 +85,6 @@ set_tests_properties(nukleus-manager-ui-test PROPERTIES ENVIRONMENT "QT_QPA_PLAT
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME nukleus-updater-test
         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/NukleusUpdaterTest.sh ${CMAKE_SOURCE_DIR})
+    add_test(NAME nukleus-get-test
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/NukleusGetTest.sh ${CMAKE_SOURCE_DIR}/scripts/get-nukleus.sh)
 endif()
