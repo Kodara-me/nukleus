@@ -209,6 +209,11 @@ legacy_state_dir="$(destination "/var/lib/$LEGACY_NAME")"
 legacy_program_dir="$(destination "/usr/local/libexec/$LEGACY_NAME")"
 legacy_unit_path="$(destination "/usr/lib/systemd/system/$LEGACY_NAME.service")"
 migrated_legacy=false
+renamed_user=false
+renamed_group=false
+existing_config_source="$config_path"
+existing_token_source="$token_path"
+dry_run_config=""
 if [[ -e "$legacy_config_dir" || -e "$legacy_state_dir" ]]; then
     [[ ! -e "$config_dir" && ! -e "$state_dir" ]] \
         || fail "Both $LEGACY_NAME and $SERVICE_NAME deployments exist; move them manually before installing Nukleus."
@@ -219,17 +224,27 @@ if [[ -e "$legacy_config_dir" || -e "$legacy_state_dir" ]]; then
         fi
         if id -u "$LEGACY_NAME" >/dev/null 2>&1 && ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
             run usermod --login "$SERVICE_USER" --home "/var/lib/$SERVICE_NAME" "$LEGACY_NAME"
+            renamed_user=true
         fi
         if getent group "$LEGACY_NAME" >/dev/null && ! getent group "$SERVICE_GROUP" >/dev/null; then
             run groupmod --new-name "$SERVICE_GROUP" "$LEGACY_NAME"
+            renamed_group=true
         fi
     fi
     if [[ -e "$legacy_config_dir" ]]; then
         run mv "$legacy_config_dir" "$config_dir"
         legacy_config_path="$config_dir/$LEGACY_NAME.conf"
+        # A dry run moves nothing, so it reads the legacy files where they are.
+        "$dry_run" && legacy_config_path="$legacy_config_dir/$LEGACY_NAME.conf"
         if [[ -f "$legacy_config_path" ]]; then
             if "$dry_run"; then
                 printf '+ rewrite %q as %q\n' "$legacy_config_path" "$config_path"
+                dry_run_config="$(mktemp)"
+                sed -e 's/^KIRA_SERVICE_/NUKLEUS_/' \
+                    -e "s|^NUKLEUS_TOKEN_FILE=/etc/$LEGACY_NAME/token\$|NUKLEUS_TOKEN_FILE=/etc/$SERVICE_NAME/token|" \
+                    "$legacy_config_path" > "$dry_run_config"
+                existing_config_source="$dry_run_config"
+                existing_token_source="$legacy_config_dir/token"
             else
                 (umask 0077; sed -e 's/^KIRA_SERVICE_/NUKLEUS_/' \
                     -e "s|^NUKLEUS_TOKEN_FILE=/etc/$LEGACY_NAME/token\$|NUKLEUS_TOKEN_FILE=/etc/$SERVICE_NAME/token|" \
@@ -259,15 +274,15 @@ existing_token_file=""
 existing_models_dir=""
 existing_storage_config_dir=""
 has_valid_config=false
-if [[ -f "$config_path" ]]; then
-    existing_listen="$(config_value NUKLEUS_LISTEN "$config_path")"
-    existing_port="$(config_value NUKLEUS_PORT "$config_path")"
-    existing_token_file="$(config_value NUKLEUS_TOKEN_FILE "$config_path")"
-    existing_models_dir="$(config_value NUKLEUS_MODELS_DIR "$config_path")"
-    existing_storage_config_dir="$(config_value NUKLEUS_CONFIG_DIR "$config_path")"
+if [[ -f "$existing_config_source" ]]; then
+    existing_listen="$(config_value NUKLEUS_LISTEN "$existing_config_source")"
+    existing_port="$(config_value NUKLEUS_PORT "$existing_config_source")"
+    existing_token_file="$(config_value NUKLEUS_TOKEN_FILE "$existing_config_source")"
+    existing_models_dir="$(config_value NUKLEUS_MODELS_DIR "$existing_config_source")"
+    existing_storage_config_dir="$(config_value NUKLEUS_CONFIG_DIR "$existing_config_source")"
     if valid_address "$existing_listen" && valid_port "$existing_port" \
         && [[ "$existing_token_file" == "/etc/$SERVICE_NAME/token" ]]; then
-        if is_loopback_address "$existing_listen" || { [[ -f "$token_path" ]] && token_has_content "$(<"$token_path")"; }; then
+        if is_loopback_address "$existing_listen" || { [[ -f "$existing_token_source" ]] && token_has_content "$(<"$existing_token_source")"; }; then
             has_valid_config=true
         fi
     fi
@@ -288,8 +303,8 @@ else
     if [[ -n "$existing_port" ]] && valid_port "$existing_port"; then
         port="$existing_port"
     fi
-    if [[ -z "$token" && -f "$token_path" ]]; then
-        token="$(<"$token_path")"
+    if [[ -z "$token" && -f "$existing_token_source" ]]; then
+        token="$(<"$existing_token_source")"
     fi
     if [[ -z "$listen_address" ]]; then
         choose_listen_address
@@ -323,10 +338,11 @@ if [[ "$models_dir" != "$existing_models_dir" || "$storage_config_dir" != "$exis
 fi
 
 if [[ -z "$install_root" ]]; then
-    if ! getent group "$SERVICE_GROUP" >/dev/null; then
+    # A renamed legacy account already exists, although a dry run did not rename it.
+    if ! "$renamed_group" && ! getent group "$SERVICE_GROUP" >/dev/null; then
         run groupadd --system "$SERVICE_GROUP"
     fi
-    if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
+    if ! "$renamed_user" && ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
         run useradd --system --gid "$SERVICE_GROUP" --home-dir "/var/lib/$SERVICE_NAME" \
             --create-home --shell /usr/sbin/nologin "$SERVICE_USER"
     fi
@@ -378,7 +394,7 @@ if [[ -z "$desktop_dir" && -z "$install_root" ]] && "$desktop_shortcut"; then
     [[ -n "$desktop_dir" && "$desktop_dir" != "$(getent passwd "$manager_user" | cut -d: -f6)" ]] || desktop_dir=""
 fi
 desktop_entry="$(mktemp)"
-trap 'rm -f "$desktop_entry"' EXIT
+trap 'rm -f "$desktop_entry" "$dry_run_config"' EXIT
 # An absolute icon path avoids depending on icon-theme caches and inheritance.
 sed -e "s|@NUKLEUS_MANAGER@|$user_bin_path/nukleus-manager|g" \
     -e "s|@NUKLEUS_MANAGER_ICON@|$user_data_path/icons/hicolor/256x256/apps/nukleus-manager.png|g" \
@@ -395,6 +411,20 @@ if "$desktop_shortcut" && [[ -n "$desktop_dir" && -d "$(destination "$desktop_di
     # Desktop shells only launch shortcuts the user trusts through the executable bit.
     desktop_shortcut_path="$(destination "$desktop_dir")/nukleus-manager.desktop"
     install_user_file 0755 "$desktop_entry" "$desktop_shortcut_path"
+fi
+# Remove the manager files installed under the former Kira Service name.
+for legacy_user_file in "$manager_bin_dir/kira-service-manager" \
+    "$applications_dir/kira-service-manager.desktop" "$icon_root"/*/apps/kira-service-manager.png; do
+    if [[ -f "$legacy_user_file" ]]; then run rm -f "$legacy_user_file"; fi
+done
+legacy_desktop_dir="$desktop_dir"
+if [[ -z "$legacy_desktop_dir" && -z "$install_root" ]]; then
+    legacy_desktop_dir="$(runuser -u "$manager_user" -- xdg-user-dir DESKTOP 2>/dev/null || true)"
+fi
+legacy_shortcut="$(destination "$legacy_desktop_dir")/kira-service-manager.desktop"
+if [[ -n "$legacy_desktop_dir" && -f "$legacy_shortcut" ]] \
+    && grep -qx 'StartupWMClass=kira-service-manager' "$legacy_shortcut"; then
+    run rm -f "$legacy_shortcut"
 fi
 if [[ -z "$install_root" ]]; then
     command -v update-desktop-database >/dev/null 2>&1 && as_manager update-desktop-database "$applications_dir" || true

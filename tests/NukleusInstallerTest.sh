@@ -183,8 +183,31 @@ printf 'legacy key\n' > "$legacy_root/etc/kira-service/token"
 printf 'chat' > "$legacy_root/var/lib/kira-service/data/kira-service/models/llm/chat.gguf"
 printf 'old' > "$legacy_root/usr/local/libexec/kira-service/kira-service"
 printf '[Unit]\n' > "$legacy_root/usr/lib/systemd/system/kira-service.service"
+legacy_home="$legacy_root/home/kira-test"
+mkdir -p "$legacy_home/.local/bin" "$legacy_home/.local/share/applications" \
+    "$legacy_home/.local/share/icons/hicolor/48x48/apps" "$legacy_home/Bureau"
+printf 'old' > "$legacy_home/.local/bin/kira-service-manager"
+printf 'old' > "$legacy_home/.local/share/applications/kira-service-manager.desktop"
+printf 'old' > "$legacy_home/.local/share/icons/hicolor/48x48/apps/kira-service-manager.png"
+printf 'StartupWMClass=kira-service-manager\n' > "$legacy_home/Bureau/kira-service-manager.desktop"
+printf 'unrelated\n' > "$legacy_home/Bureau/kira-service-manager-notes.desktop"
+# A dry run reads the legacy configuration in place, asks nothing and moves nothing.
 "$project_root/scripts/install-nukleus.sh" --root "$legacy_root" --binary "$service_binary" \
-    --manager-binary "$manager_binary" --user-bin /home/kira-test/.local/bin --no-enable > "$legacy_root/output"
+    --manager-binary "$manager_binary" --user-bin /home/kira-test/.local/bin --no-enable --dry-run \
+    < /dev/null > "$legacy_root/dry-run"
+grep -q '^+ rewrite .*kira-service.conf' "$legacy_root/dry-run"
+grep -q '^Updated Nukleus\.$' "$legacy_root/dry-run"
+grep -q 'listens on 127.0.0.1:9384 and 10.0.0.93:9384' "$legacy_root/dry-run"
+[[ -f "$legacy_root/etc/kira-service/kira-service.conf" && ! -e "$legacy_root/etc/nukleus" ]]
+[[ -f "$legacy_home/.local/bin/kira-service-manager" ]]
+"$project_root/scripts/install-nukleus.sh" --root "$legacy_root" --binary "$service_binary" \
+    --manager-binary "$manager_binary" --user-bin /home/kira-test/.local/bin --no-enable \
+    --desktop-dir /home/kira-test/Bureau > "$legacy_root/output"
+[[ ! -e "$legacy_home/.local/bin/kira-service-manager" ]]
+[[ ! -e "$legacy_home/.local/share/applications/kira-service-manager.desktop" ]]
+[[ ! -e "$legacy_home/.local/share/icons/hicolor/48x48/apps/kira-service-manager.png" ]]
+[[ ! -e "$legacy_home/Bureau/kira-service-manager.desktop" && -f "$legacy_home/Bureau/kira-service-manager-notes.desktop" ]]
+[[ -x "$legacy_home/.local/bin/nukleus-manager" ]]
 grep -q '^Updated Nukleus\.$' "$legacy_root/output"
 legacy_config="$legacy_root/etc/nukleus/nukleus.conf"
 grep -qx 'NUKLEUS_LISTEN=10.0.0.93' "$legacy_config"
