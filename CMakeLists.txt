@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 6.2 REQUIRED COMPONENTS Network WebSockets Widgets)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Network WebSockets Widgets)
 
 include(FetchContent)
 FetchContent_Declare(Ardoise

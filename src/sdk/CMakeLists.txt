@@ -3,7 +3,7 @@ include(CMakePackageConfigHelpers)
 
 option(NUKLEUS_SDK_INSTALL "Install and export the Nukleus SDK" ON)
 
-find_package(Qt6 6.2 REQUIRED COMPONENTS Core Network WebSockets)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Network WebSockets)
 find_package(LibArchive REQUIRED)
 
 add_library(NukleusProtocol STATIC

@@ -2,7 +2,7 @@ if(NOT BUILD_TESTING)
     return()
 endif()
 
-find_package(Qt6 6.2 REQUIRED COMPONENTS Network Test WebSockets)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Network Test WebSockets)
 
 add_executable(nukleus-test
     ServiceTest.cpp

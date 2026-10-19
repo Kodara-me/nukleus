@@ -19,7 +19,7 @@ server process. Tests never start the real server: `nukleus-fake-llama-server`
 (tests/FakeLlamaServer.cpp) records launches and requests and simulates slow
 loads, load failures, context overflow, crashes and hangs through marker files.
 
-Nukleus is a C++20 Qt 6 project. Build dependencies are CMake 3.24+, Ninja, a C++20 compiler, and Qt 6.2+ Network, WebSockets, and Widgets, SVG, and LinguistTools development packages, LibArchive, plus Ardoise 0.1 (installed, or cloned by CMake). `sd-cli` is required on a machine that performs image work; README's "Runtime tools on Arch Linux" lists the Vulkan AUR packages for `sd-cli` and llama.cpp. Tests never need them.
+Nukleus is a C++20 Qt 6 project. Build dependencies are CMake 3.24+, Ninja, a C++20 compiler, and Qt 6.5+ Network, WebSockets, and Widgets, SVG, and LinguistTools development packages, LibArchive, plus Ardoise 0.1 (installed, or cloned by CMake). `sd-cli` is required on a machine that performs image work; README's "Runtime tools on Arch Linux" lists the Vulkan AUR packages for `sd-cli` and llama.cpp. Tests never need them.
 
 ```sh
 cmake -S . -B build -G Ninja
@@ -309,7 +309,7 @@ Report bugs and propose ideas through the GitHub issue forms; blank issues are
 disabled. Keep tokens, LAN addresses, private prompts and model paths out of
 reports.
 
-`.github/workflows/ci.yml` builds and runs CTest on Ubuntu 24.04 for every push to
+`.github/workflows/ci.yml` builds and runs CTest in an Arch Linux container for every push to
 `main` and every pull request; Ardoise is cloned by CMake at its pinned tag.
 
 To release, set `project(Nukleus VERSION …)` in `CMakeLists.txt`, optionally add

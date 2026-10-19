@@ -1,7 +1,7 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
-find_dependency(Qt6 6.2 COMPONENTS Core Network WebSockets)
+find_dependency(Qt6 6.5 COMPONENTS Core Network WebSockets)
 find_dependency(LibArchive)
 include("${CMAKE_CURRENT_LIST_DIR}/NukleusSdkTargets.cmake")
 check_required_components(NukleusSdk)

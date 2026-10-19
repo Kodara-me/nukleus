@@ -18,10 +18,16 @@ permissions:
 jobs:
   release:
     name: Test and draft the release
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
     steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git cmake ninja qt6-base qt6-websockets qt6-svg qt6-tools libarchive github-cli
+
       - name: Check out
         uses: actions/checkout@v4
         with:
@@ -29,6 +35,7 @@ jobs:
 
       - name: Check the version
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           version="${TAG#v}"
           project=$(sed -n 's/^project(Nukleus VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
           if [ "$version" != "$project" ]; then
@@ -37,20 +44,15 @@ jobs:
           fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            ninja-build qt6-base-dev qt6-websockets-dev qt6-svg-dev qt6-tools-dev \
-            qt6-tools-dev-tools qt6-l10n-tools libgl-dev libarchive-dev
-
       - name: Build and test
-        env:
-          QT_QPA_PLATFORM: offscreen
+        # The installer tests refuse to run as root without SUDO_USER, as on a real system.
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
-          ctest --test-dir build --output-on-failure
+          useradd --create-home tester
+          chown -R tester: "$GITHUB_WORKSPACE"
+          su tester -c "cd '$GITHUB_WORKSPACE' && QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure"
+          chown -R root: "$GITHUB_WORKSPACE"
 
       - name: Source archive, installer and checksums
         run: |

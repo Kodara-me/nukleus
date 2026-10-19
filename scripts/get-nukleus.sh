@@ -10,7 +10,7 @@
 #   -- <options>     passed to scripts/install-nukleus.sh, for example
 #                    -- --listen 127.0.0.1   or   -- --desktop-shortcut
 #
-# Requires curl, tar, git, CMake 3.24+, a C++20 compiler, Qt 6.2+ with Network, WebSockets,
+# Requires curl, tar, git, CMake 3.24+, a C++20 compiler, Qt 6.5+ with Network, WebSockets,
 # Widgets, SVG and LinguistTools, LibArchive, and sudo. Ardoise is used when installed, otherwise CMake
 # clones it. The release is installed only after its tests pass. Exit codes: 0 installed,
 # 1 failure.
@@ -98,7 +98,7 @@ fi
 say "Building Nukleus $version…"
 # shellcheck disable=SC2086 # generator_args is empty or two words.
 cmake -S "$source" -B "$build" -DCMAKE_BUILD_TYPE=Release $generator_args \
-    || fail "CMake could not configure Nukleus; check that Qt 6.2+ and CMake 3.24+ are installed"
+    || fail "CMake could not configure Nukleus; check that Qt 6.5+ and CMake 3.24+ are installed"
 cmake --build "$build" --parallel || fail "Nukleus did not build"
 say "Testing Nukleus $version…"
 QT_QPA_PLATFORM=offscreen ctest --test-dir "$build" --output-on-failure \
