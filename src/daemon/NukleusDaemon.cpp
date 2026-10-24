@@ -1652,9 +1652,11 @@ std::optional<SdCliHelp> NukleusDaemon::sdCliHelp() const
     help.start(m_sdRunner->executablePath(), {"--help"});
     const bool finished = help.waitForFinished(10000);
     if (!finished) help.kill();
-    const auto parsed = finished ? SdCliRunner::parseHelp(QString::fromUtf8(help.readAll())) : SdCliHelp();
-    // An unreadable help text is not cached, so a later request can retry.
-    if (parsed.choices.isEmpty()) return std::nullopt;
+    if (!finished) return std::nullopt;
+    const auto parsed = SdCliRunner::parseHelp(QString::fromUtf8(help.readAll()));
+    // A help text without listed names is not cached, so a later request can retry; its defaults
+    // (steps, fps) are still returned, and callers needing names check that they are present.
+    if (parsed.choices.isEmpty()) return parsed;
     m_sdCliHelp = parsed;
     return m_sdCliHelp;
 }
@@ -1667,7 +1669,7 @@ bool NukleusDaemon::validAnimationNames(const QJsonObject &parameters, QString *
     // Without sd-cli, the names were only checked for safe characters; jobs check them again before running.
     if (!listedNames || !m_sdRunner) return true;
     const auto help = sdCliHelp();
-    if (!help) {
+    if (!help || help->choices.isEmpty()) {
         if (error) *error = tr("Could not read the names accepted by sd-cli");
         return false;
     }
@@ -1765,7 +1767,8 @@ void NukleusDaemon::submitAnimation(QWebSocket *socket, const QJsonObject &messa
                                            std::tuple{QStringLiteral("lora-high-noise"), QStringLiteral("highNoise"), QStringLiteral("|high_noise|")}}) {
         const QString path = attached(role);
         const double weight = loraWeights.value(key).toDouble(1.0);
-        if (path.isEmpty() || weight == 0) continue;
+        // A high-noise LoRA only applies to the high-noise pass, which exists with a high-noise model.
+        if (path.isEmpty() || weight == 0 || (key == QStringLiteral("highNoise") && highNoise.isEmpty())) continue;
         prompt += QStringLiteral(" <lora:%1%2:%3>").arg(stage, QFileInfo(path).completeBaseName(), QString::number(weight, 'g', 15));
         loraDirectory = QFileInfo(path).absolutePath();
         plan.files.append(path);
@@ -1824,7 +1827,11 @@ void NukleusDaemon::submitAnimation(QWebSocket *socket, const QJsonObject &messa
 void NukleusDaemon::sendAnimationResult(const Job &job, const SdCliGenerationResult &result)
 {
     if (!result.succeeded || !QFileInfo(job.outputPath).isFile()) {
-        QString detail = tr("Animation failed (exit code %1)").arg(result.exitCode);
+        QString detail = result.succeeded
+            ? tr("Animation failed: sd-cli exited with code %1 but wrote no video file%2")
+                  .arg(result.exitCode).arg(job.animation && job.animation->frames == 1
+                                                ? tr(" (a single frame, videoFrames 1, is not a video)") : QString())
+            : tr("Animation failed (exit code %1)").arg(result.exitCode);
         detail += tr("\nCommand:\n%1").arg(m_sdRunner->commandLine(result.arguments));
         const QString diagnostic = result.standardError.trimmed().right(4096);
         if (!diagnostic.isEmpty()) detail += tr("\nBackend error:\n%1").arg(diagnostic);

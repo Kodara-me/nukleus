@@ -140,6 +140,9 @@ private slots:
     void animateConfiguresModelDefaults_R5();
     void animateReportsProgressAndFailures_R8_R9_R11();
     void animateThroughSdk_R12();
+    void animateKeepsHelpDefaultsWithoutListedNames_R4();
+    void animateSkipsHighNoiseLoraWithoutHighNoiseModel_R6();
+    void animateNamesAMissingVideoFile_R11();
 };
 
 void ServiceTest::persistsAndProtectsModelRouting()
@@ -3214,6 +3217,7 @@ const QByteArray FakeVideoSdCli =
     "printf '\\r  |==========>| 2/2 - 1.00s/it\\033[K\\n'\n"
     "printf 'sampling completed, taking 2.00s\\ngenerating latent video completed, taking 4.00s\\n'\n"
     "printf '\\r  |#####| 3/3 - 1.00s/it\\033[K\\n'\n"
+    "if [ -f \"$root/nofile\" ]; then exit 0; fi\n"
     "cp \"$root/video.bin\" \"$out\"\n"
     "printf \"save result video to '%s'\\n\" \"$out\"\n";
 
@@ -3799,4 +3803,56 @@ void ServiceTest::animateThroughSdk_R12()
     QTRY_COMPARE_WITH_TIMEOUT(results.size(), 2, 10000);
     QVERIFY(!results.last().succeeded);
     QCOMPARE(results.last().errorCode, QString("generation-failed"));
+}
+
+void ServiceTest::animateKeepsHelpDefaultsWithoutListedNames_R4()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli fixture requires a POSIX shell.");
+#endif
+    AnimationFixture fixture;
+    QVERIFY(fixture.start());
+    // A help text that lists no names still gives the fps default, instead of the built-in fallback.
+    QVERIFY(writeFile(fixture.bin("help.txt"), "  --fps                                    frames per second (default: 12)\n"));
+    const auto result = fixture.run("no-names", fixture.request());
+    QCOMPARE(result.value("type").toString(), QString("result"));
+    QCOMPARE(result.value("fps").toInt(), 12);
+    // Names cannot be checked against it: the request is refused as before.
+    const auto refused = fixture.run("named", fixture.request({{"sampler", "euler"}}));
+    QCOMPARE(refused.value("code").toString(), QString("backend-not-ready"));
+}
+
+void ServiceTest::animateSkipsHighNoiseLoraWithoutHighNoiseModel_R6()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli fixture requires a POSIX shell.");
+#endif
+    AnimationFixture fixture;
+    QVERIFY(fixture.start());
+    fixture.send({{"type", "models.companion.delete"}, {"id", fixture.modelId}, {"role", "high-noise"}});
+    QTRY_VERIFY(!fixture.messages.isEmpty());
+    QCOMPARE(fixture.messages.last().value("type").toString(), QString("models.companion.delete.completed"));
+    const auto result = fixture.run("no-high", fixture.request());
+    QCOMPARE(result.value("type").toString(), QString("result"));
+    QVERIFY(!fixture.arguments().contains("--high-noise-diffusion-model"));
+    QCOMPARE(fixture.argument("-p"), QString("she breathes slowly <lora:low_lightx2v:1>"));
+}
+
+void ServiceTest::animateNamesAMissingVideoFile_R11()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli fixture requires a POSIX shell.");
+#endif
+    AnimationFixture fixture;
+    QVERIFY(fixture.start());
+    QVERIFY(writeFile(fixture.bin("nofile"), "1"));
+    // sd-cli exits cleanly without a video: the failure says so, and explains a single frame.
+    auto result = fixture.run("one-frame", fixture.request({{"videoFrames", 1}}));
+    QCOMPARE(result.value("code").toString(), QString("generation-failed"));
+    QVERIFY2(result.value("message").toString().contains("wrote no video file"), qPrintable(result.value("message").toString()));
+    QVERIFY(result.value("message").toString().contains("videoFrames 1"));
+    result = fixture.run("no-file", fixture.request({{"videoFrames", 41}}));
+    QCOMPARE(result.value("code").toString(), QString("generation-failed"));
+    QVERIFY(result.value("message").toString().contains("wrote no video file"));
+    QVERIFY(!result.value("message").toString().contains("videoFrames 1"));
 }
