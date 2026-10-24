@@ -82,6 +82,7 @@ class ServiceTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void initTestCase();
     void persistsAndProtectsModelRouting();
     void fixedRoutingLabelsAndLegacyMigration();
     void configuresModelRoutingThroughSdk();
@@ -143,7 +144,17 @@ private slots:
     void animateKeepsHelpDefaultsWithoutListedNames_R4();
     void animateSkipsHighNoiseLoraWithoutHighNoiseModel_R6();
     void animateNamesAMissingVideoFile_R11();
+    void animatePingPongsWithFfmpeg_R14();
+    void animateNeedsFfmpegForPingPong_R15();
+    void animatePingPongReportsAndStopsFfmpeg_R14();
 };
+
+void ServiceTest::initTestCase()
+{
+    // Services built from a default configuration must never probe or run the host's ffmpeg;
+    // tests that need one name a fake explicitly.
+    qputenv("NUKLEUS_FFMPEG", "/nonexistent/nukleus-test-ffmpeg");
+}
 
 void ServiceTest::persistsAndProtectsModelRouting()
 {
@@ -3221,6 +3232,24 @@ const QByteArray FakeVideoSdCli =
     "cp \"$root/video.bin\" \"$out\"\n"
     "printf \"save result video to '%s'\\n\" \"$out\"\n";
 
+// Stands in for ffmpeg: answers -version, records its arguments, then writes its input followed by a marker
+// to its output (the last argument). Files beside it switch it to failing or hanging.
+const QByteArray FakeFfmpeg =
+    "#!/bin/sh\n"
+    "root=$(dirname \"$0\")\n"
+    "if [ \"$1\" = -version ]; then\n"
+    " if [ -f \"$root/ffmpeg-broken\" ]; then echo 'error while loading shared libraries' >&2; exit 127; fi\n"
+    " echo 'ffmpeg version fake'; exit 0\n"
+    "fi\n"
+    "printf '%s\\n' \"$@\" > \"$root/ffmpeg-args\"\n"
+    "echo $$ > \"$root/ffmpeg-pid\"\n"
+    "if [ -f \"$root/ffmpeg-fail\" ]; then printf 'Error: the fake encoder failed\\n' >&2; exit 1; fi\n"
+    "if [ -f \"$root/ffmpeg-hang\" ]; then exec sleep 30; fi\n"
+    "in=; out=; previous=\n"
+    "for argument in \"$@\"; do if [ \"$previous\" = -i ]; then in=\"$argument\"; fi; previous=\"$argument\"; out=\"$argument\"; done\n"
+    "cat \"$in\" > \"$out\"\n"
+    "printf 'ping-pong' >> \"$out\"\n";
+
 bool writeFile(const QString &path, const QByteArray &bytes)
 {
     QFile file(path);
@@ -3228,10 +3257,13 @@ bool writeFile(const QString &path, const QByteArray &bytes)
 }
 
 // A service on temporary storage with an installed Wan 2.2 style animation model (high-noise model and
-// both LoRAs) and the fake sd-cli first on PATH; tests never reach the real sd-cli or real models.
+// both LoRAs) and the fake sd-cli first on PATH; tests never reach the real sd-cli, ffmpeg or real models.
 class AnimationFixture
 {
 public:
+    // The service's ffmpeg: none, the fake, or the fake failing to run.
+    enum class Ffmpeg { Missing, Fake, Broken };
+
     QTemporaryDir directory;
     TestHttpServer server{"weights"};
     std::unique_ptr<NukleusDaemon> daemon;
@@ -3246,13 +3278,16 @@ public:
     QString bin(const QString &name) const { return directory.filePath("bin/" + name); }
     QString models() const { return directory.filePath("models"); }
 
-    bool start()
+    bool start(Ffmpeg ffmpeg = Ffmpeg::Missing)
     {
         if (!directory.isValid() || !server.start() || !QDir().mkpath(bin({}))) return false;
         QFile executable(bin("sd-cli"));
+        QFile ffmpegExecutable(bin("ffmpeg"));
         if (!writeFile(bin("sd-cli"), FakeVideoSdCli) || !writeFile(bin("help.txt"), SdCliHelpText)
-            || !writeFile(bin("video.bin"), VideoBytes)
-            || !executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner)) return false;
+            || !writeFile(bin("video.bin"), VideoBytes) || !writeFile(bin("ffmpeg"), FakeFfmpeg)
+            || !executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner)
+            || !ffmpegExecutable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner)) return false;
+        if (ffmpeg == Ffmpeg::Broken && !writeFile(bin("ffmpeg-broken"), "1")) return false;
         qputenv("PATH", bin({}).toUtf8() + ':' + m_path);
         ModelCatalog catalog(models(), true);
         if (!installCompanion(catalog, server.url("wan_vae.safetensors"), "vae")
@@ -3266,6 +3301,8 @@ public:
         NukleusConfiguration configuration;
         configuration.port = 0;
         configuration.modelRootPath = models();
+        // The fake sits on PATH, so a missing ffmpeg is named explicitly.
+        configuration.ffmpeg = ffmpeg == Ffmpeg::Missing ? bin("missing-ffmpeg") : bin("ffmpeg");
         daemon = std::make_unique<NukleusDaemon>(configuration);
         if (!daemon->start()) return false;
         QObject::connect(&socket, &QWebSocket::textMessageReceived, &socket,
@@ -3323,14 +3360,14 @@ public:
         }
         return waitFor(jobId, {"result", "error"});
     }
-    QStringList arguments() const
+    QStringList arguments(const QString &name = QStringLiteral("sd-args")) const
     {
-        QFile file(bin("sd-args"));
+        QFile file(bin(name));
         return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()).split('\n', Qt::SkipEmptyParts) : QStringList();
     }
-    QString argument(const QString &flag) const
+    QString argument(const QString &flag, const QString &name = QStringLiteral("sd-args")) const
     {
-        const auto list = arguments();
+        const auto list = arguments(name);
         const auto index = list.indexOf(flag);
         return index >= 0 && index + 1 < list.size() ? list.at(index + 1) : QString();
     }
@@ -3632,7 +3669,7 @@ void ServiceTest::animateRejectsInvalidRequestsBeforeUpload_R3_R6_R7()
     options = fixture.request();
     options.insert("modelId", "image-generation:wan_low.gguf");
     QVERIFY(rejected(id(), options, "model-unavailable"));
-    // Ping-pong and MP4 need the post-processing tool, which is not available yet.
+    // Ping-pong needs ffmpeg, which this service lacks (R15); MP4 is not available yet.
     QVERIFY(rejected(id(), fixture.request({{"pingPong", true}}), "backend-not-ready"));
     QVERIFY(rejected(id(), fixture.request({{"container", "mp4"}}), "backend-not-ready"));
     // R7: a model with a missing file fails before any upload.
@@ -3760,6 +3797,7 @@ void ServiceTest::animateThroughSdk_R12()
     QTRY_VERIFY(client.modelListAvailable());
     QVERIFY(client.canAnimate());
     QVERIFY(client.capabilities().imageAnimate);
+    QVERIFY(!client.canPingPong()); // This service has no ffmpeg.
     QList<Nukleus::GenerationProgress> progress;
     QList<Nukleus::AnimationResult> results;
     connect(&client, &Nukleus::ServiceClient::generationProgressChanged, this,
@@ -3855,4 +3893,164 @@ void ServiceTest::animateNamesAMissingVideoFile_R11()
     QCOMPARE(result.value("code").toString(), QString("generation-failed"));
     QVERIFY(result.value("message").toString().contains("wrote no video file"));
     QVERIFY(!result.value("message").toString().contains("videoFrames 1"));
+}
+
+void ServiceTest::animatePingPongsWithFfmpeg_R14()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli and ffmpeg fixtures require a POSIX shell.");
+#endif
+    AnimationFixture fixture;
+    QVERIFY(fixture.start(AnimationFixture::Ffmpeg::Fake));
+    // R15: with a running ffmpeg, the service offers ping-pong.
+    fixture.send({{"type", "capabilities"}});
+    QTRY_VERIFY(!fixture.messages.isEmpty());
+    QVERIFY(fixture.messages.last().value("operations").toArray().contains("image.animate.pingPong"));
+    fixture.messages.clear();
+
+    // R14: ffmpeg loops sd-cli's video, and frames counts the loop: 41 forward, 39 backward.
+    auto result = fixture.run("loop", fixture.request({{"pingPong", true}}));
+    QCOMPARE(result.value("type").toString(), QString("result"));
+    QCOMPARE(result.value("mimeType").toString(), QString("video/webm"));
+    QCOMPARE(result.value("frames").toInt(), 80);
+    QCOMPARE(result.value("fps").toInt(), 24);
+    QTRY_COMPARE(fixture.binaries.size(), 1);
+    QCOMPARE(fixture.binaries.last(), VideoBytes + "ping-pong");
+    // ffmpeg reads sd-cli's file and writes the loop in the same container, at the same fps.
+    QCOMPARE(fixture.argument("-i", "ffmpeg-args"), fixture.argument("-o"));
+    QVERIFY(fixture.arguments("ffmpeg-args").last().endsWith("/loop.webm"));
+    QCOMPARE(fixture.argument("-r", "ffmpeg-args"), QString("24"));
+    const QString graph = fixture.argument("-filter_complex", "ffmpeg-args");
+    QVERIFY2(graph.contains("reverse") && graph.contains("concat=n=2"), qPrintable(graph));
+    QVERIFY(!fixture.arguments().contains("pingPong")); // sd-cli has no such option.
+    // The loop is made between decoding and saving, and the percentage never decreases.
+    QStringList statuses;
+    int percentage = 0;
+    for (const auto &message : fixture.of("loop", "progress")) {
+        const auto progress = message.value("progress").toObject();
+        QVERIFY(progress.value("percentage").toInt() >= percentage);
+        percentage = progress.value("percentage").toInt();
+        statuses.append(progress.value("statusText").toString());
+    }
+    const auto loopIndex = statuses.indexOf(QStringLiteral("Creating loop…"));
+    QVERIFY2(loopIndex > statuses.indexOf(QStringLiteral("Decoding video…")), qPrintable(statuses.join(" | ")));
+    QCOMPARE(statuses.mid(loopIndex), (QStringList{"Creating loop…", "Saving video…", "Animation complete"}));
+    QCOMPARE(percentage, 100);
+
+    // R14: the model's default applies, and the request overrides it.
+    auto defaults = AnimationOptions;
+    defaults.insert("pingPong", true);
+    fixture.messages.clear();
+    fixture.send({{"type", "models.configure"}, {"id", fixture.modelId}, {"recommendedOptions", defaults}});
+    QTRY_VERIFY(!fixture.messages.isEmpty());
+    QCOMPARE(fixture.messages.last().value("type").toString(), QString("models.configure.completed"));
+    QVERIFY(QFile::remove(fixture.bin("ffmpeg-args")));
+    result = fixture.run("model-loop", fixture.request({{"container", "webp"}, {"fps", 16}}));
+    QCOMPARE(result.value("frames").toInt(), 80);
+    QCOMPARE(result.value("mimeType").toString(), QString("image/webp"));
+    QCOMPARE(result.value("fps").toInt(), 16);
+    QVERIFY(fixture.arguments("ffmpeg-args").last().endsWith("/loop.webp"));
+    QCOMPARE(fixture.argument("-r", "ffmpeg-args"), QString("16"));
+    QVERIFY(QFile::remove(fixture.bin("ffmpeg-args")));
+    result = fixture.run("no-loop", fixture.request({{"pingPong", false}}));
+    QCOMPARE(result.value("frames").toInt(), 41);
+    QTRY_COMPARE(fixture.binaries.size(), 3);
+    QCOMPARE(fixture.binaries.last(), VideoBytes);
+    QVERIFY(!QFileInfo::exists(fixture.bin("ffmpeg-args")));
+
+    // The SDK reports the capability.
+    Nukleus::ServiceClient client;
+    client.setConfiguration(fixture.endpoint(), {});
+    QVERIFY(!client.canPingPong());
+    client.connectToService();
+    QTRY_VERIFY(client.modelListAvailable());
+    QVERIFY(client.canPingPong());
+    QVERIFY(client.capabilities().imageAnimatePingPong);
+}
+
+void ServiceTest::animateNeedsFfmpegForPingPong_R15()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli and ffmpeg fixtures require a POSIX shell.");
+#endif
+    // Missing, or present but failing to run: no capability, and pingPong fails before any upload.
+    for (const auto ffmpeg : {AnimationFixture::Ffmpeg::Missing, AnimationFixture::Ffmpeg::Broken}) {
+        AnimationFixture fixture;
+        QVERIFY(fixture.start(ffmpeg));
+        fixture.send({{"type", "capabilities"}});
+        QTRY_VERIFY(!fixture.messages.isEmpty());
+        const auto operations = fixture.messages.last().value("operations").toArray();
+        QVERIFY(operations.contains("image.animate"));
+        QVERIFY(!operations.contains("image.animate.pingPong"));
+        fixture.submit("requested", fixture.request({{"pingPong", true}}));
+        auto reply = fixture.waitFor("requested", {"error", "upload-required"});
+        QCOMPARE(reply.value("code").toString(), QString("backend-not-ready"));
+        // A model default asks for it just as well.
+        auto defaults = AnimationOptions;
+        defaults.insert("pingPong", true);
+        fixture.messages.clear();
+        fixture.send({{"type", "models.configure"}, {"id", fixture.modelId}, {"recommendedOptions", defaults}});
+        QTRY_VERIFY(!fixture.messages.isEmpty());
+        QCOMPARE(fixture.messages.last().value("type").toString(), QString("models.configure.completed"));
+        fixture.submit("default", fixture.request());
+        reply = fixture.waitFor("default", {"error", "upload-required"});
+        QCOMPARE(reply.value("code").toString(), QString("backend-not-ready"));
+        QVERIFY(fixture.of("requested", "upload-required").isEmpty() && fixture.of("default", "upload-required").isEmpty());
+        QVERIFY(!QFileInfo::exists(fixture.bin("sd-args")));
+        QVERIFY(!QFileInfo::exists(fixture.bin("ffmpeg-args")));
+    }
+}
+
+void ServiceTest::animatePingPongReportsAndStopsFfmpeg_R14()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli and ffmpeg fixtures require a POSIX shell.");
+#endif
+    AnimationFixture fixture;
+    QVERIFY(fixture.start(AnimationFixture::Ffmpeg::Fake));
+    // A failing ffmpeg returns its command, exit code and stderr tail.
+    QVERIFY(writeFile(fixture.bin("ffmpeg-fail"), "1"));
+    auto result = fixture.run("failing", fixture.request({{"pingPong", true}}));
+    QCOMPARE(result.value("code").toString(), QString("generation-failed"));
+    const auto detail = result.value("message").toString();
+    QVERIFY2(detail.contains("ffmpeg exit code 1"), qPrintable(detail));
+    QVERIFY(detail.contains("'" + fixture.bin("ffmpeg") + "'"));
+    QVERIFY(detail.contains("'-filter_complex'"));
+    QVERIFY(detail.contains("Error: the fake encoder failed"));
+    QCOMPARE(fixture.of("failing", "progress").last().value("progress").toObject().value("stage").toString(), QString("failed"));
+    QVERIFY(fixture.binaries.isEmpty());
+    QVERIFY(QFile::remove(fixture.bin("ffmpeg-fail")));
+
+    // Disconnecting while ffmpeg runs stops it, and the queue moves on.
+    QVERIFY(writeFile(fixture.bin("ffmpeg-hang"), "1"));
+    fixture.submit("active", fixture.request({{"pingPong", true}}));
+    QVERIFY(!fixture.waitFor("active", {"upload-required"}).isEmpty());
+    QVERIFY(QFile::remove(fixture.bin("ffmpeg-pid")));
+    fixture.socket.sendBinaryMessage(PngImage);
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(fixture.bin("ffmpeg-pid")), 10000);
+    QFile pidFile(fixture.bin("ffmpeg-pid"));
+    QVERIFY(pidFile.open(QIODevice::ReadOnly));
+    const QString process = "/proc/" + QString::fromUtf8(pidFile.readAll()).trimmed();
+    QTRY_VERIFY(QFileInfo::exists(process));
+    fixture.socket.close();
+    QTRY_VERIFY_WITH_TIMEOUT(!QFileInfo::exists(process), 10000);
+    QVERIFY(QFile::remove(fixture.bin("ffmpeg-hang")));
+
+    Nukleus::ServiceClient client;
+    client.setConfiguration(fixture.endpoint(), {});
+    client.connectToService();
+    QTRY_VERIFY(client.canPingPong());
+    QList<Nukleus::AnimationResult> results;
+    connect(&client, &Nukleus::ServiceClient::animationFinished, this,
+            [&](const Nukleus::AnimationResult &value) { results.append(value); });
+    Nukleus::AnimationRequest request;
+    request.modelId = fixture.modelId;
+    request.prompt = "she breathes slowly";
+    request.startImage = PngImage;
+    request.parameters = {{"pingPong", true}};
+    QVERIFY(!client.submitAnimation(request).isEmpty());
+    QTRY_COMPARE_WITH_TIMEOUT(results.size(), 1, 10000);
+    QVERIFY2(results.first().succeeded, qPrintable(results.first().message));
+    QCOMPARE(results.first().frames, 80);
+    QCOMPARE(results.first().videoData, VideoBytes + "ping-pong");
 }

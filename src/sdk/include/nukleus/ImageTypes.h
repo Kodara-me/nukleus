@@ -160,6 +160,7 @@ struct ServiceCapabilities
     bool chatModelControl = false; // text.chat.load and text.chat.unload.
     bool textChatImages = false; // text.chat accepts images for LLMs with an MMPROJ.
     bool imageAnimate = false; // image.animate turns an image into a video with an animation model.
+    bool imageAnimatePingPong = false; // image.animate accepts pingPong (the service has ffmpeg).
 };
 
 // Result of text.chat.load (load true) or text.chat.unload (load false).

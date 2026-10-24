@@ -356,6 +356,11 @@ bool ServiceClient::canAnimate() const
     return m_authenticated && m_capabilities.imageAnimate;
 }
 
+bool ServiceClient::canPingPong() const
+{
+    return canAnimate() && m_capabilities.imageAnimatePingPong;
+}
+
 QString ServiceClient::submitAnimation(const AnimationRequest &request)
 {
     if (!canAnimate() || !containsModel(request.modelId, ModelCategory::Animation)
@@ -428,7 +433,8 @@ void ServiceClient::handleTextMessage(const QString &message)
             operations.contains("image.edit"), operations.contains("prompt.enhance"), operations.contains("model-routing"),
             operations.contains("text.chat"), chatEngines,
             operations.contains("text.chat.load") && operations.contains("text.chat.unload"),
-            operations.contains("text.chat.images"), operations.contains("image.animate")});
+            operations.contains("text.chat.images"), operations.contains("image.animate"),
+            operations.contains("image.animate.pingPong")});
         if (m_capabilities.modelRouting) requestModelRouting();
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
@@ -639,7 +645,8 @@ void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
         && m_capabilities.textChatEngines == capabilities.textChatEngines
         && m_capabilities.chatModelControl == capabilities.chatModelControl
         && m_capabilities.textChatImages == capabilities.textChatImages
-        && m_capabilities.imageAnimate == capabilities.imageAnimate) return;
+        && m_capabilities.imageAnimate == capabilities.imageAnimate
+        && m_capabilities.imageAnimatePingPong == capabilities.imageAnimatePingPong) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
 }

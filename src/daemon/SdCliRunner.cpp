@@ -190,7 +190,8 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
     return start(RequestType::Generation, arguments, request.outputPath);
 }
 
-bool SdCliRunner::runVideo(const QStringList &arguments, const QString &outputPath, std::optional<int> totalSteps, bool twoPasses)
+bool SdCliRunner::runVideo(const QStringList &arguments, const QString &outputPath, std::optional<int> totalSteps, bool twoPasses,
+                           bool postProcessed)
 {
     if (m_requestType != RequestType::None || m_executablePath.isEmpty()) {
         return false;
@@ -202,7 +203,7 @@ bool SdCliRunner::runVideo(const QStringList &arguments, const QString &outputPa
     m_pendingStandardOutput.clear();
     m_pendingStandardError.clear();
     m_generationElapsed.start();
-    emit generationProgressChanged(m_progressParser.beginVideo(totalSteps, twoPasses));
+    emit generationProgressChanged(m_progressParser.beginVideo(totalSteps, twoPasses, postProcessed));
     qInfo().noquote() << QStringLiteral("[Nukleus][sd-cli] Starting image-to-video generation");
     qInfo().noquote() << QStringLiteral("[Nukleus][sd-cli] Command:\n%1").arg(commandLine(arguments));
     return start(RequestType::Generation, arguments, outputPath);

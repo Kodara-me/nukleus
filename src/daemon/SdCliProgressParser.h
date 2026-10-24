@@ -14,7 +14,10 @@ public:
     // Video mode (sd-cli -M vid_gen): sampling runs a high-noise pass then a low-noise pass, each with its own
     // "n/N" counter; the running step counts both. Without an expected total, the counters give it, and a
     // second pass (twoPasses) is assumed as long as the first until its own counter arrives.
-    Nukleus::GenerationProgress beginVideo(std::optional<int> totalSteps, bool twoPasses = true);
+    // With postProcessed, the video is not final when sd-cli saves it: its saving and completion are left
+    // to the post-processing step.
+    Nukleus::GenerationProgress beginVideo(std::optional<int> totalSteps, bool twoPasses = true,
+                                           bool postProcessed = false);
     std::optional<Nukleus::GenerationProgress> starting();
     std::optional<Nukleus::GenerationProgress> processLine(const QString &line);
     // Reads a complete step counter from output whose line has not ended yet.
@@ -46,4 +49,5 @@ private:
     int m_passIndex = 0;
     bool m_twoPasses = true;
     bool m_samplingDone = false;  // Later counters belong to VAE tiling, not sampling.
+    bool m_postProcessed = false;
 };

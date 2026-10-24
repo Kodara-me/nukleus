@@ -14,6 +14,7 @@ Nukleus::GenerationProgress SdCliProgressParser::begin(int samplingSteps)
     m_currentStep.reset();
     m_hasProgress = true;
     m_video = false;
+    m_postProcessed = false;
     return {Nukleus::GenerationProgressStage::Preparing,
             std::nullopt,
             std::nullopt,
@@ -21,10 +22,12 @@ Nukleus::GenerationProgress SdCliProgressParser::begin(int samplingSteps)
             QObject::tr("Preparing generation…")};
 }
 
-Nukleus::GenerationProgress SdCliProgressParser::beginVideo(std::optional<int> totalSteps, bool twoPasses)
+Nukleus::GenerationProgress SdCliProgressParser::beginVideo(std::optional<int> totalSteps, bool twoPasses,
+                                                            bool postProcessed)
 {
     auto progress = begin(totalSteps.value_or(0));
     m_video = true;
+    m_postProcessed = postProcessed;
     m_expectedTotalSteps = totalSteps && *totalSteps > 0 ? totalSteps : std::nullopt;
     m_completedPassSteps = 0;
     m_passSteps = 0;
@@ -81,8 +84,9 @@ std::optional<Nukleus::GenerationProgress> SdCliProgressParser::processVideoLine
     }
     if (line.contains(QStringLiteral("generating latent video completed")))
         return update(Stage::Decoding, 94, QObject::tr("Decoding video…"));
+    // A post-processed video is saved once the post-processing step has written it.
     if (line.contains(QStringLiteral("save result video")))
-        return update(Stage::Saving, 99, QObject::tr("Saving video…"));
+        return m_postProcessed ? std::nullopt : update(Stage::Saving, 99, QObject::tr("Saving video…"));
     static const QRegularExpression samplingCounter(QStringLiteral("\\b(\\d+)\\s*/\\s*(\\d+)\\b"));
     return videoSamplingProgress(samplingCounter.match(line));
 }
@@ -181,6 +185,7 @@ std::optional<Nukleus::GenerationProgress> SdCliProgressParser::samplingProgress
 
 std::optional<Nukleus::GenerationProgress> SdCliProgressParser::complete()
 {
+    if (m_postProcessed) return std::nullopt;
     return update(Nukleus::GenerationProgressStage::Complete, 100,
                   m_video ? QObject::tr("Animation complete") : QObject::tr("Generation complete"));
 }

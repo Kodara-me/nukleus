@@ -606,8 +606,10 @@ negative prompt containing `<lora:` is rejected: the model's LoRAs are applied
 by the service (below). An unknown key, a wrong type or an out-of-range value
 fails with `invalid-request` before any upload is requested; a model whose
 `missingFiles` is not empty fails with `model-files-missing`, and an unknown
-model with `model-unavailable`. `pingPong` true and `container` `mp4` fail with
-`backend-not-ready` until the post-processing tool is supported.
+model with `model-unavailable`. `pingPong` true, from the request or the
+model's defaults, fails with `backend-not-ready` before any upload when the
+service has no `ffmpeg` (below); `container` `mp4` fails with
+`backend-not-ready` until it is supported.
 
 **Uploads.** The service sends `upload-required` with `inputRole` `start` and
 `inputIndex` 0, then, with `hasEndImage` true, `inputRole` `end` and `inputIndex`
@@ -627,7 +629,7 @@ model defaults.
 | Video | `fps` | `--fps` | integer 1–120 |
 | Video | `container` | output extension | `webm` (default), `webp`, `avi`, `mp4` (not available yet) |
 | Video | `compressionQuality` | `--compression-quality` | integer 0–100 |
-| Video | `pingPong` | none | boolean (true is not available yet) |
+| Video | `pingPong` | none (post-processing with `ffmpeg`) | boolean; true needs `image.animate.pingPong` |
 | Sampling | `steps`, `highNoiseSteps` | `--steps`, `--high-noise-steps` | integer 1–200; `highNoiseSteps` also -1 (automatic split) |
 | Sampling | `cfgScale`, `highNoiseCfgScale` | `--cfg-scale`, `--high-noise-cfg-scale` | finite number 0–100 |
 | Sampling | `imgCfgScale`, `highNoiseImgCfgScale` | `--img-cfg-scale`, `--high-noise-img-cfg-scale` | finite number 0–100 |
@@ -687,6 +689,22 @@ model's, else 1: the service appends `<lora:NAME:W>` (low-noise) or
 where NAME is the LoRA file name without its extension. A weight of 0 leaves
 the LoRA out. Results never echo the tags.
 
+**Ping-pong loops.** With `pingPong` true, from the request or the model,
+the service runs `ffmpeg` on sd-cli's video once sd-cli succeeds, and returns a
+loop that plays the generated frames forward then backward without repeating
+the last frame or ending on the first: N generated frames become 2N - 2, in the
+requested container and at the same fps (WebM as VP9, animated WebP, AVI as
+MJPEG). `capabilities.operations` includes `image.animate.pingPong` only when
+the service's `ffmpeg` runs: it is found on the service's PATH, or named by
+`NUKLEUS_FFMPEG`, and must answer `ffmpeg -version`. A failure returns
+`generation-failed` with the ffmpeg command, its exit code and up to 4096
+trailing stderr characters.
+
+```json
+{"type":"progress","jobId":"anim-1","progress":{"stage":"decoding","percentage":96,"statusText":"Creating loop…"}}
+{"type":"result","jobId":"anim-1","operation":"image.animate","mimeType":"video/webm","frames":80,"fps":16}
+```
+
 **Queue, progress and cancellation.** Animation jobs share the FIFO with image
 jobs (`queued`, `queue-position`, `running`) and unload llama-server first.
 `progress` messages follow the run (`preparing`, `starting`, `loading-model`,
@@ -694,19 +712,23 @@ jobs (`queued`, `queue-position`, `running`) and unload llama-server first.
 noise passes, from 1 to their total (`steps` plus `highNoiseSteps` when both
 are set, `steps` split between the passes when `highNoiseSteps` is -1, the
 numeric `sigmas` count minus one), with a percentage that never decreases;
-without a `steps` option, sd-cli's default from `--help` is used. When the
-submitting client disconnects, its queued animations are dropped and its active
-one is stopped, as for image jobs; there is no per-job cancel message.
+without a `steps` option, sd-cli's default from `--help` is used. A ping-pong
+job reports `Creating loop…` (stage `decoding`) between decoding and saving.
+When the submitting client disconnects, its queued animations are dropped and
+its active one is stopped, sd-cli or ffmpeg alike, as for image jobs; there is
+no per-job cancel message.
 
 **Result.** `result` carries `operation` `image.animate`, `mimeType`
-(`video/webm`, `image/webp` or `video/x-msvideo`), `frames` (the frame count
-sd-cli generated, which it may align to the model) and `fps` (the option, else
+(`video/webm`, `image/webp` or `video/x-msvideo`), `frames` (the frame count of
+the returned video: the count sd-cli generated, which it may align to the model,
+or the loop's count with `pingPong`) and `fps` (the option, else
 sd-cli's default from `--help`), followed by one binary frame. A failure returns
 `generation-failed` with the sd-cli command, its exit code and up to 4096
 trailing stderr characters, as for image generation.
 
 **SDK.** `ServiceClient::canAnimate()` reports the capability
-(`ServiceCapabilities::imageAnimate`). `submitAnimation(AnimationRequest)` sends
+(`ServiceCapabilities::imageAnimate`), and `canPingPong()` the ping-pong one
+(`ServiceCapabilities::imageAnimatePingPong`). `submitAnimation(AnimationRequest)` sends
 the model ID, prompts, seed, start image, optional end image and a `QJsonObject`
 of parameters, and uploads the images when asked. Progress arrives through
 `generationProgressChanged`; `animationFinished(AnimationResult)` carries the

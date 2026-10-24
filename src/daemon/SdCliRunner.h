@@ -37,8 +37,10 @@ public:
     void runHelp();
     bool runGeneration(const GenerationRequest &request);
     // Runs sd-cli -M vid_gen with complete arguments; progress counts both sampling passes up to totalSteps,
-    // or up to the total read from sd-cli's counters when it is unknown. Reports generationFinished.
-    bool runVideo(const QStringList &arguments, const QString &outputPath, std::optional<int> totalSteps, bool twoPasses);
+    // or up to the total read from sd-cli's counters when it is unknown. Reports generationFinished. With
+    // postProcessed, its success reports no saving or completion progress: the post-processing step does.
+    bool runVideo(const QStringList &arguments, const QString &outputPath, std::optional<int> totalSteps, bool twoPasses,
+                  bool postProcessed = false);
     bool runUpscale(const QStringList &arguments, const QString &outputPath);
     void cancel();
     std::optional<SdCliGenerationResult> lastGenerationResult() const;

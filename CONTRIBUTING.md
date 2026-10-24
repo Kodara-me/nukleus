@@ -19,6 +19,13 @@ server process. Tests never start the real server: `nukleus-fake-llama-server`
 (tests/FakeLlamaServer.cpp) records launches and requests and simulates slow
 loads, load failures, context overflow, crashes and hangs through marker files.
 
+`ffmpeg` is an optional runtime tool (set NUKLEUS_FFMPEG to override) that
+post-processes video jobs; `FfmpegRunner` owns its process and builds its
+arguments, and is meant to be reused by later post-processing steps. Tests never
+run the host's ffmpeg: the test binary points NUKLEUS_FFMPEG at a missing path,
+and animation tests use a POSIX fake ffmpeg that records its arguments and
+fails, hangs or refuses `-version` through marker files.
+
 Nukleus is a C++20 Qt 6 project. Build dependencies are CMake 3.24+, Ninja, a C++20 compiler, and Qt 6.5+ Network, WebSockets, and Widgets, SVG, and LinguistTools development packages, LibArchive, plus Ardoise 0.1 (installed, or cloned by CMake). `sd-cli` is required on a machine that performs image work; README's "Runtime tools on Arch Linux" lists the Vulkan AUR packages for `sd-cli` and llama.cpp. Tests never need them.
 
 ```sh

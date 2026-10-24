@@ -235,6 +235,10 @@ CachyOS, build both with the Vulkan backend from the AUR:
 paru -S llama.cpp-vulkan-git stable-diffusion.cpp-vulkan-git
 ```
 
+`ffmpeg` is optional: it makes the ping-pong loops of `image.animate`
+(`sudo pacman -S ffmpeg`). The service uses the `ffmpeg` on its PATH, or the one
+`NUKLEUS_FFMPEG` names in `/etc/nukleus/nukleus.conf`.
+
 Both packages build from the upstream sources and install into `/usr/bin`,
 which is on the systemd unit's `PATH`. stable-diffusion.cpp links its own ggml,
 so the packages do not conflict. Restart the service after installing or
@@ -464,8 +468,16 @@ the prompt by the service with their stage and weight (`loraWeights`, default 1,
 and stop when their client disconnects. The result is the video bytes with its
 MIME type, frame count and fps. SDK clients use `canAnimate()`,
 `submitAnimation(AnimationRequest)` and `animationFinished(AnimationResult)`.
-Ping-pong loops and MP4 output are not available yet and fail with
-`backend-not-ready`.
+
+With `pingPong` true (from the request or the model's defaults), the service
+post-processes the video with `ffmpeg` into a seamless loop that plays the
+frames forward then backward without repeating the turning frames, in the same
+container and fps; `frames` reports the loop's count (2N - 2). `ffmpeg` is an
+optional runtime tool, like `llama-server`: it is found on the service's PATH or
+named by `NUKLEUS_FFMPEG`, and `image.animate.pingPong` is listed in the
+capabilities (SDK `canPingPong()`) only when it runs; without it, `pingPong`
+fails with `backend-not-ready` before any upload. MP4 output is not available
+yet and fails with `backend-not-ready`.
 
 ## Shared companions and model forms
 

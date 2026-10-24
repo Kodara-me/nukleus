@@ -6,6 +6,8 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS Network Test WebSockets)
 
 add_executable(nukleus-test
     ServiceTest.cpp
+    ../src/daemon/FfmpegRunner.cpp
+    ../src/daemon/FfmpegRunner.h
     ../src/daemon/GenerationRequest.h
     ../src/sdk/include/nukleus/GenerationProgress.h
     ../src/daemon/NukleusDaemon.cpp

@@ -2,6 +2,8 @@ include(GNUInstallDirs)
 add_subdirectory(sdk)
 
 set(SERVICE_DAEMON_SOURCES
+    daemon/FfmpegRunner.cpp
+    daemon/FfmpegRunner.h
     daemon/GenerationRequest.h
     daemon/NukleusDaemon.cpp
     daemon/NukleusDaemon.h

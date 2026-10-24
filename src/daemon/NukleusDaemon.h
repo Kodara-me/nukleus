@@ -3,6 +3,7 @@
 #include <nukleus/ModelRouting.h>
 #include <nukleus/ServiceProtocol.h>
 
+#include "FfmpegRunner.h"
 #include "LlamaServerRunner.h"
 #include "SdCliRunner.h"
 
@@ -46,6 +47,8 @@ struct NukleusConfiguration
     int promptEnhancementTimeoutMs = 10 * 60 * 1000; // Also bounds each text.chat turn, model loading included.
     QString llamaServer = qEnvironmentVariable("NUKLEUS_LLAMA_SERVER", "llama-server");
     int llamaServerIdleMs = defaultLlamaServerIdleMs();
+    // Optional post-processing tool of video jobs (ping-pong loops); its features are offered only when it runs.
+    QString ffmpeg = qEnvironmentVariable("NUKLEUS_FFMPEG", "ffmpeg");
 };
 
 class NukleusDaemon final : public QObject
@@ -70,6 +73,7 @@ private:
         QString container;
         int frames = 0;
         int fps = 0;
+        bool pingPong = false; // ffmpeg turns sd-cli's video into a forward-then-backward loop.
     };
     // A routed generation's submitted prompts, returned without preset prefixes.
     struct RoutedPrompts
@@ -113,7 +117,11 @@ private:
     void submitTextChat(QWebSocket* socket, const QJsonObject& message, Operation operation);
     void submitTextChatUnload(QWebSocket* socket, const QJsonObject& message);
     void submitAnimation(QWebSocket *socket, const QJsonObject &message);
-    void sendAnimationResult(const Job &job, const SdCliGenerationResult &result);
+    // Returns sd-cli's video, or starts its post-processing and returns false while it runs.
+    bool finishAnimation(Job &job, const SdCliGenerationResult &result);
+    void sendAnimationVideo(const Job &job, const QString &path, int frames);
+    void handleFfmpegFinished(const FfmpegResult &result);
+    void sendProgress(const Job &job, const Nukleus::GenerationProgress &progress) const;
     // sd-cli's --help, read once per executable; nullopt when it cannot be read.
     std::optional<SdCliHelp> sdCliHelp() const;
     // Checks the names of animation options listed by sd-cli's --help (samplers, schedulers, ...).
@@ -146,6 +154,7 @@ private:
     bool m_promptTimedOut = false;
     bool m_promptOutputExceeded = false;
     std::unique_ptr<LlamaServerRunner> m_llamaServer;
+    std::unique_ptr<FfmpegRunner> m_ffmpeg;
     QElapsedTimer m_activeJobClock;
     mutable QHash<QString, QStringList> m_chatTemplates; // Built-in chat template names per llama.cpp executable.
     mutable std::optional<SdCliHelp> m_sdCliHelp;
