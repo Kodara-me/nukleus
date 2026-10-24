@@ -121,7 +121,7 @@ struct AnimationResult
     QString jobId;
     bool succeeded = false;
     QByteArray videoData;
-    QString mimeType; // video/webm, image/webp or video/x-msvideo.
+    QString mimeType; // video/webm, image/webp, video/x-msvideo or video/mp4.
     int frames = 0;
     int fps = 0;
     QString errorCode;
@@ -161,6 +161,7 @@ struct ServiceCapabilities
     bool textChatImages = false; // text.chat accepts images for LLMs with an MMPROJ.
     bool imageAnimate = false; // image.animate turns an image into a video with an animation model.
     bool imageAnimatePingPong = false; // image.animate accepts pingPong (the service has ffmpeg).
+    bool imageAnimateMp4 = false; // image.animate accepts container mp4 (the service has ffmpeg).
 };
 
 // Result of text.chat.load (load true) or text.chat.unload (load false).

@@ -608,8 +608,7 @@ fails with `invalid-request` before any upload is requested; a model whose
 `missingFiles` is not empty fails with `model-files-missing`, and an unknown
 model with `model-unavailable`. `pingPong` true, from the request or the
 model's defaults, fails with `backend-not-ready` before any upload when the
-service has no `ffmpeg` (below); `container` `mp4` fails with
-`backend-not-ready` until it is supported.
+service has no `ffmpeg` (below), and so does `container` `mp4`.
 
 **Uploads.** The service sends `upload-required` with `inputRole` `start` and
 `inputIndex` 0, then, with `hasEndImage` true, `inputRole` `end` and `inputIndex`
@@ -627,8 +626,8 @@ model defaults.
 | Video | `width`, `height` | `-W`, `-H` | integers 64–4096, multiples of 16 |
 | Video | `videoFrames` | `--video-frames` | integer 1–1024 |
 | Video | `fps` | `--fps` | integer 1–120 |
-| Video | `container` | output extension | `webm` (default), `webp`, `avi`, `mp4` (not available yet) |
-| Video | `compressionQuality` | `--compression-quality` | integer 0–100 |
+| Video | `container` | output extension | `webm` (default), `webp`, `avi`, `mp4` (encoded with `ffmpeg`; needs `image.animate.mp4`) |
+| Video | `compressionQuality` | `--compression-quality` | integer 0–100, higher is better (see below for the files it applies to) |
 | Video | `pingPong` | none (post-processing with `ffmpeg`) | boolean; true needs `image.animate.pingPong` |
 | Sampling | `steps`, `highNoiseSteps` | `--steps`, `--high-noise-steps` | integer 1–200; `highNoiseSteps` also -1 (automatic split) |
 | Sampling | `cfgScale`, `highNoiseCfgScale` | `--cfg-scale`, `--high-noise-cfg-scale` | finite number 0–100 |
@@ -694,11 +693,41 @@ the service runs `ffmpeg` on sd-cli's video once sd-cli succeeds, and returns a
 loop that plays the generated frames forward then backward without repeating
 the last frame or ending on the first: N generated frames become 2N - 2, in the
 requested container and at the same fps (WebM as VP9, animated WebP, AVI as
-MJPEG). `capabilities.operations` includes `image.animate.pingPong` only when
+MJPEG, MP4 as H.264). `capabilities.operations` includes `image.animate.pingPong` only when
 the service's `ffmpeg` runs: it is found on the service's PATH, or named by
 `NUKLEUS_FFMPEG`, and must answer `ffmpeg -version`. A failure returns
 `generation-failed` with the ffmpeg command, its exit code and up to 4096
 trailing stderr characters.
+
+**MP4.** sd-cli does not write MP4, so for `container` `mp4` it writes AVI
+(MJPEG, which every sd-cli build writes) and the service encodes that file with
+the same `ffmpeg`: H.264 (`libx264`), `yuv420p`, `-movflags +faststart` (the index
+at the start of the file, so it plays while downloading), at the job's fps, with
+`mimeType` `video/mp4`. With `pingPong` true the reversal and the encoding run
+in one `ffmpeg` pass, and `frames` is the loop's count; otherwise it is the count
+sd-cli generated. `capabilities.operations` includes `image.animate.mp4` exactly
+when it includes `image.animate.pingPong` (the `ffmpeg` runs); without it,
+`container` `mp4`, from the request or the model's defaults, fails with
+`backend-not-ready` before any upload. A failure of the encode returns
+`generation-failed` as above. A plain MP4 job reports `Encoding video…` (stage
+`decoding`) between decoding and saving, a loop `Creating loop…`.
+
+**Container check.** Before returning or post-processing sd-cli's file, the
+service reads its signature (WebM: EBML header; AVI: `RIFF`…`AVI `; WebP:
+`RIFF`…`WEBP`) and compares it with the container sd-cli was asked to write: the
+requested one, or AVI for `mp4`. A sd-cli built without libwebm writes AVI under
+a `.webm` name, for instance. A mismatch returns `generation-failed` naming the
+actual and the expected container and the sd-cli command, instead of the file, so
+`mimeType` always matches the returned file.
+
+**Compression quality.** `compressionQuality` (0–100, higher is better) is
+passed to sd-cli, and it also sets the quality of every `ffmpeg` encode, ping-pong
+and MP4 alike, so the returned file follows it whichever path made it: WebP
+`-quality` is the value, MJPEG `-q:v` is 31 − 0.311 × value (2–31), H.264 `-crf` is
+40 − 0.22 × value and VP9 `-crf` is 63 − 0.43 × value. Without it, the `ffmpeg`
+encoders use the equivalent of 90 (WebP quality 90, MJPEG `-q:v` 3, H.264 crf 20,
+VP9 crf 24), and sd-cli's own default applies to its file. A ping-pong loop and
+an MP4 are encoded from sd-cli's file, so they are never better than it.
 
 ```json
 {"type":"progress","jobId":"anim-1","progress":{"stage":"decoding","percentage":96,"statusText":"Creating loop…"}}
@@ -719,7 +748,7 @@ its active one is stopped, sd-cli or ffmpeg alike, as for image jobs; there is
 no per-job cancel message.
 
 **Result.** `result` carries `operation` `image.animate`, `mimeType`
-(`video/webm`, `image/webp` or `video/x-msvideo`), `frames` (the frame count of
+(`video/webm`, `image/webp`, `video/x-msvideo` or `video/mp4`), `frames` (the frame count of
 the returned video: the count sd-cli generated, which it may align to the model,
 or the loop's count with `pingPong`) and `fps` (the option, else
 sd-cli's default from `--help`), followed by one binary frame. A failure returns
@@ -728,7 +757,8 @@ trailing stderr characters, as for image generation.
 
 **SDK.** `ServiceClient::canAnimate()` reports the capability
 (`ServiceCapabilities::imageAnimate`), and `canPingPong()` the ping-pong one
-(`ServiceCapabilities::imageAnimatePingPong`). `submitAnimation(AnimationRequest)` sends
+(`ServiceCapabilities::imageAnimatePingPong`) and `canAnimateMp4()` the MP4 one
+(`ServiceCapabilities::imageAnimateMp4`). `submitAnimation(AnimationRequest)` sends
 the model ID, prompts, seed, start image, optional end image and a `QJsonObject`
 of parameters, and uploads the images when asked. Progress arrives through
 `generationProgressChanged`; `animationFinished(AnimationResult)` carries the

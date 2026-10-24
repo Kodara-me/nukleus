@@ -147,6 +147,11 @@ private slots:
     void animatePingPongsWithFfmpeg_R14();
     void animateNeedsFfmpegForPingPong_R15();
     void animatePingPongReportsAndStopsFfmpeg_R14();
+    void animateEncodesMp4WithFfmpeg_R16_R17();
+    void animateNeedsFfmpegForMp4_R16();
+    void animateReportsAndStopsMp4Encoding_R17();
+    void animateChecksTheContainer_R18();
+    void animateMapsCompressionQualityOntoEncoders_R17();
 };
 
 void ServiceTest::initTestCase()
@@ -3204,6 +3209,9 @@ const QByteArray PngImage = QByteArray::fromBase64(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1kAAAAASUVORK5CYII=");
 // A WebM file starts with an EBML header.
 const QByteArray VideoBytes = QByteArray("\x1a\x45\xdf\xa3", 4) + "fake webm video";
+// Animated WebP and AVI files start with a RIFF header naming their format.
+const QByteArray WebpBytes = QByteArray("RIFF\0\0\0\0WEBP", 12) + "fake webp video";
+const QByteArray AviBytes = QByteArray("RIFF\0\0\0\0AVI ", 12) + "fake avi video";
 
 // Stands in for sd-cli -M vid_gen: records its arguments, prints two sampling passes of two steps like sd-cli,
 // then writes the fixture video to the -o path. Files beside it switch it to failing or hanging.
@@ -3229,7 +3237,9 @@ const QByteArray FakeVideoSdCli =
     "printf 'sampling completed, taking 2.00s\\ngenerating latent video completed, taking 4.00s\\n'\n"
     "printf '\\r  |#####| 3/3 - 1.00s/it\\033[K\\n'\n"
     "if [ -f \"$root/nofile\" ]; then exit 0; fi\n"
-    "cp \"$root/video.bin\" \"$out\"\n"
+    "content=\"video.${out##*.}\"\n"
+    "if [ -f \"$root/content\" ]; then content=$(cat \"$root/content\"); fi\n"
+    "cp \"$root/$content\" \"$out\"\n"
     "printf \"save result video to '%s'\\n\" \"$out\"\n";
 
 // Stands in for ffmpeg: answers -version, records its arguments, then writes its input followed by a marker
@@ -3242,13 +3252,15 @@ const QByteArray FakeFfmpeg =
     " echo 'ffmpeg version fake'; exit 0\n"
     "fi\n"
     "printf '%s\\n' \"$@\" > \"$root/ffmpeg-args\"\n"
+    "echo run >> \"$root/ffmpeg-runs\"\n"
     "echo $$ > \"$root/ffmpeg-pid\"\n"
     "if [ -f \"$root/ffmpeg-fail\" ]; then printf 'Error: the fake encoder failed\\n' >&2; exit 1; fi\n"
     "if [ -f \"$root/ffmpeg-hang\" ]; then exec sleep 30; fi\n"
-    "in=; out=; previous=\n"
-    "for argument in \"$@\"; do if [ \"$previous\" = -i ]; then in=\"$argument\"; fi; previous=\"$argument\"; out=\"$argument\"; done\n"
+    "in=; out=; previous=; mark=encoded\n"
+    "for argument in \"$@\"; do if [ \"$previous\" = -i ]; then in=\"$argument\"; fi; "
+    "if [ \"$argument\" = -filter_complex ]; then mark=ping-pong; fi; previous=\"$argument\"; out=\"$argument\"; done\n"
     "cat \"$in\" > \"$out\"\n"
-    "printf 'ping-pong' >> \"$out\"\n";
+    "printf '%s' \"$mark\" >> \"$out\"\n";
 
 bool writeFile(const QString &path, const QByteArray &bytes)
 {
@@ -3284,7 +3296,9 @@ public:
         QFile executable(bin("sd-cli"));
         QFile ffmpegExecutable(bin("ffmpeg"));
         if (!writeFile(bin("sd-cli"), FakeVideoSdCli) || !writeFile(bin("help.txt"), SdCliHelpText)
-            || !writeFile(bin("video.bin"), VideoBytes) || !writeFile(bin("ffmpeg"), FakeFfmpeg)
+            || !writeFile(bin("video.webm"), VideoBytes) || !writeFile(bin("video.webp"), WebpBytes)
+            || !writeFile(bin("video.avi"), AviBytes) || !writeFile(bin("video.txt"), "not a video")
+            || !writeFile(bin("ffmpeg"), FakeFfmpeg)
             || !executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner)
             || !ffmpegExecutable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner)) return false;
         if (ffmpeg == Ffmpeg::Broken && !writeFile(bin("ffmpeg-broken"), "1")) return false;
@@ -3669,7 +3683,7 @@ void ServiceTest::animateRejectsInvalidRequestsBeforeUpload_R3_R6_R7()
     options = fixture.request();
     options.insert("modelId", "image-generation:wan_low.gguf");
     QVERIFY(rejected(id(), options, "model-unavailable"));
-    // Ping-pong needs ffmpeg, which this service lacks (R15); MP4 is not available yet.
+    // Ping-pong and MP4 need ffmpeg, which this service lacks (R15, R16).
     QVERIFY(rejected(id(), fixture.request({{"pingPong", true}}), "backend-not-ready"));
     QVERIFY(rejected(id(), fixture.request({{"container", "mp4"}}), "backend-not-ready"));
     // R7: a model with a missing file fails before any upload.
@@ -3798,6 +3812,8 @@ void ServiceTest::animateThroughSdk_R12()
     QVERIFY(client.canAnimate());
     QVERIFY(client.capabilities().imageAnimate);
     QVERIFY(!client.canPingPong()); // This service has no ffmpeg.
+    QVERIFY(!client.canAnimateMp4());
+    QVERIFY(!client.capabilities().imageAnimateMp4);
     QList<Nukleus::GenerationProgress> progress;
     QList<Nukleus::AnimationResult> results;
     connect(&client, &Nukleus::ServiceClient::generationProgressChanged, this,
@@ -3966,6 +3982,8 @@ void ServiceTest::animatePingPongsWithFfmpeg_R14()
     QTRY_VERIFY(client.modelListAvailable());
     QVERIFY(client.canPingPong());
     QVERIFY(client.capabilities().imageAnimatePingPong);
+    QVERIFY(client.canAnimateMp4()); // The same ffmpeg encodes MP4.
+    QVERIFY(client.capabilities().imageAnimateMp4);
 }
 
 void ServiceTest::animateNeedsFfmpegForPingPong_R15()
@@ -4053,4 +4071,253 @@ void ServiceTest::animatePingPongReportsAndStopsFfmpeg_R14()
     QVERIFY2(results.first().succeeded, qPrintable(results.first().message));
     QCOMPARE(results.first().frames, 80);
     QCOMPARE(results.first().videoData, VideoBytes + "ping-pong");
+}
+
+void ServiceTest::animateEncodesMp4WithFfmpeg_R16_R17()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli and ffmpeg fixtures require a POSIX shell.");
+#endif
+    AnimationFixture fixture;
+    QVERIFY(fixture.start(AnimationFixture::Ffmpeg::Fake));
+    // R16: with a running ffmpeg, the service offers MP4.
+    fixture.send({{"type", "capabilities"}});
+    QTRY_VERIFY(!fixture.messages.isEmpty());
+    QVERIFY(fixture.messages.last().value("operations").toArray().contains("image.animate.mp4"));
+    fixture.messages.clear();
+
+    // R17: sd-cli writes AVI, and one ffmpeg run encodes it to H.264 in yuv420p with its index first.
+    auto result = fixture.run("mp4", fixture.request({{"container", "mp4"}, {"fps", 16}}));
+    QCOMPARE(result.value("type").toString(), QString("result"));
+    QCOMPARE(result.value("mimeType").toString(), QString("video/mp4"));
+    QCOMPARE(result.value("frames").toInt(), 41);
+    QCOMPARE(result.value("fps").toInt(), 16);
+    QTRY_COMPARE(fixture.binaries.size(), 1);
+    QCOMPARE(fixture.binaries.last(), AviBytes + "encoded");
+    QVERIFY(fixture.argument("-o").endsWith("/result.avi"));
+    QCOMPARE(fixture.argument("-i", "ffmpeg-args"), fixture.argument("-o"));
+    auto ffmpeg = fixture.arguments("ffmpeg-args");
+    QVERIFY(ffmpeg.last().endsWith("/result.mp4"));
+    QCOMPARE(fixture.argument("-c:v", "ffmpeg-args"), QString("libx264"));
+    QCOMPARE(fixture.argument("-pix_fmt", "ffmpeg-args"), QString("yuv420p"));
+    QCOMPARE(fixture.argument("-movflags", "ffmpeg-args"), QString("+faststart"));
+    QCOMPARE(fixture.argument("-r", "ffmpeg-args"), QString("16"));
+    QVERIFY(!ffmpeg.contains("-filter_complex"));
+    QCOMPARE(fixture.arguments("ffmpeg-runs").size(), 1);
+    // "Encoding video…" comes between decoding and saving, and the percentage never decreases.
+    QStringList statuses;
+    int percentage = 0;
+    for (const auto &message : fixture.of("mp4", "progress")) {
+        const auto progress = message.value("progress").toObject();
+        QVERIFY(progress.value("percentage").toInt() >= percentage);
+        percentage = progress.value("percentage").toInt();
+        statuses.append(progress.value("statusText").toString());
+    }
+    const auto encodeIndex = statuses.indexOf(QStringLiteral("Encoding video…"));
+    QVERIFY2(encodeIndex > statuses.indexOf(QStringLiteral("Decoding video…")), qPrintable(statuses.join(" | ")));
+    QCOMPARE(statuses.mid(encodeIndex), (QStringList{"Encoding video…", "Saving video…", "Animation complete"}));
+    QCOMPARE(percentage, 100);
+
+    // R14, R17: with pingPong, the same single ffmpeg run reverses and encodes: 41 forward, 39 backward.
+    QVERIFY(QFile::remove(fixture.bin("ffmpeg-runs")));
+    result = fixture.run("mp4-loop", fixture.request({{"container", "mp4"}, {"pingPong", true}}));
+    QCOMPARE(result.value("type").toString(), QString("result"));
+    QCOMPARE(result.value("mimeType").toString(), QString("video/mp4"));
+    QCOMPARE(result.value("frames").toInt(), 80);
+    QCOMPARE(result.value("fps").toInt(), 24);
+    QTRY_COMPARE(fixture.binaries.size(), 2);
+    QCOMPARE(fixture.binaries.last(), AviBytes + "ping-pong");
+    QCOMPARE(fixture.arguments("ffmpeg-runs").size(), 1);
+    ffmpeg = fixture.arguments("ffmpeg-args");
+    QVERIFY(ffmpeg.last().endsWith("/loop.mp4"));
+    QVERIFY(ffmpeg.contains("-filter_complex") && ffmpeg.contains("libx264") && ffmpeg.contains("+faststart"));
+    QCOMPARE(fixture.argument("-r", "ffmpeg-args"), QString("24"));
+    QCOMPARE(fixture.of("mp4-loop", "progress").last().value("progress").toObject().value("statusText").toString(),
+             QString("Animation complete"));
+
+    // The model's default container applies, and a request for another container overrides it.
+    auto defaults = AnimationOptions;
+    defaults.insert("container", "mp4");
+    fixture.messages.clear();
+    fixture.send({{"type", "models.configure"}, {"id", fixture.modelId}, {"recommendedOptions", defaults}});
+    QTRY_VERIFY(!fixture.messages.isEmpty());
+    QCOMPARE(fixture.messages.last().value("type").toString(), QString("models.configure.completed"));
+    result = fixture.run("model-default", fixture.request());
+    QCOMPARE(result.value("mimeType").toString(), QString("video/mp4"));
+    result = fixture.run("overridden", fixture.request({{"container", "avi"}}));
+    QCOMPARE(result.value("mimeType").toString(), QString("video/x-msvideo"));
+    QTRY_COMPARE(fixture.binaries.size(), 4);
+    QCOMPARE(fixture.binaries.last(), AviBytes);
+
+    // The SDK submits MP4 once it sees the capability, and receives the file.
+    Nukleus::ServiceClient client;
+    client.setConfiguration(fixture.endpoint(), {});
+    client.connectToService();
+    QTRY_VERIFY(client.canAnimateMp4());
+    QList<Nukleus::AnimationResult> results;
+    connect(&client, &Nukleus::ServiceClient::animationFinished, this,
+            [&](const Nukleus::AnimationResult &value) { results.append(value); });
+    Nukleus::AnimationRequest request;
+    request.modelId = fixture.modelId;
+    request.prompt = "she breathes slowly";
+    request.startImage = PngImage;
+    request.parameters = {{"container", "mp4"}};
+    QVERIFY(!client.submitAnimation(request).isEmpty());
+    QTRY_COMPARE_WITH_TIMEOUT(results.size(), 1, 10000);
+    QVERIFY2(results.first().succeeded, qPrintable(results.first().message));
+    QCOMPARE(results.first().mimeType, QString("video/mp4"));
+    QCOMPARE(results.first().videoData, AviBytes + "encoded");
+}
+
+void ServiceTest::animateNeedsFfmpegForMp4_R16()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli and ffmpeg fixtures require a POSIX shell.");
+#endif
+    // Missing, or present but failing to run: no capability, and mp4 fails before any upload.
+    for (const auto ffmpeg : {AnimationFixture::Ffmpeg::Missing, AnimationFixture::Ffmpeg::Broken}) {
+        AnimationFixture fixture;
+        QVERIFY(fixture.start(ffmpeg));
+        fixture.send({{"type", "capabilities"}});
+        QTRY_VERIFY(!fixture.messages.isEmpty());
+        const auto operations = fixture.messages.last().value("operations").toArray();
+        QVERIFY(operations.contains("image.animate"));
+        QVERIFY(!operations.contains("image.animate.mp4"));
+        fixture.submit("requested", fixture.request({{"container", "mp4"}}));
+        auto reply = fixture.waitFor("requested", {"error", "upload-required"});
+        QCOMPARE(reply.value("code").toString(), QString("backend-not-ready"));
+        // A model default asks for it just as well.
+        auto defaults = AnimationOptions;
+        defaults.insert("container", "mp4");
+        fixture.messages.clear();
+        fixture.send({{"type", "models.configure"}, {"id", fixture.modelId}, {"recommendedOptions", defaults}});
+        QTRY_VERIFY(!fixture.messages.isEmpty());
+        QCOMPARE(fixture.messages.last().value("type").toString(), QString("models.configure.completed"));
+        fixture.submit("default", fixture.request());
+        reply = fixture.waitFor("default", {"error", "upload-required"});
+        QCOMPARE(reply.value("code").toString(), QString("backend-not-ready"));
+        QVERIFY(fixture.of("requested", "upload-required").isEmpty() && fixture.of("default", "upload-required").isEmpty());
+        QVERIFY(!QFileInfo::exists(fixture.bin("sd-args")));
+        QVERIFY(!QFileInfo::exists(fixture.bin("ffmpeg-args")));
+
+        Nukleus::ServiceClient client;
+        client.setConfiguration(fixture.endpoint(), {});
+        client.connectToService();
+        QTRY_VERIFY(client.canAnimate());
+        QVERIFY(!client.canAnimateMp4());
+    }
+}
+
+void ServiceTest::animateReportsAndStopsMp4Encoding_R17()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli and ffmpeg fixtures require a POSIX shell.");
+#endif
+    AnimationFixture fixture;
+    QVERIFY(fixture.start(AnimationFixture::Ffmpeg::Fake));
+    // A failing ffmpeg returns its command, exit code and stderr tail.
+    QVERIFY(writeFile(fixture.bin("ffmpeg-fail"), "1"));
+    auto result = fixture.run("failing", fixture.request({{"container", "mp4"}}));
+    QCOMPARE(result.value("code").toString(), QString("generation-failed"));
+    const auto detail = result.value("message").toString();
+    QVERIFY2(detail.contains("Encoding the video failed (ffmpeg exit code 1)"), qPrintable(detail));
+    QVERIFY(detail.contains("'" + fixture.bin("ffmpeg") + "'"));
+    QVERIFY(detail.contains("'libx264'"));
+    QVERIFY(detail.contains("Error: the fake encoder failed"));
+    QCOMPARE(fixture.of("failing", "progress").last().value("progress").toObject().value("stage").toString(), QString("failed"));
+    QVERIFY(fixture.binaries.isEmpty());
+    QVERIFY(QFile::remove(fixture.bin("ffmpeg-fail")));
+
+    // Disconnecting while ffmpeg encodes stops it.
+    QVERIFY(writeFile(fixture.bin("ffmpeg-hang"), "1"));
+    fixture.submit("active", fixture.request({{"container", "mp4"}}));
+    QVERIFY(!fixture.waitFor("active", {"upload-required"}).isEmpty());
+    QVERIFY(QFile::remove(fixture.bin("ffmpeg-pid")));
+    fixture.socket.sendBinaryMessage(PngImage);
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(fixture.bin("ffmpeg-pid")), 10000);
+    QFile pidFile(fixture.bin("ffmpeg-pid"));
+    QVERIFY(pidFile.open(QIODevice::ReadOnly));
+    const QString process = "/proc/" + QString::fromUtf8(pidFile.readAll()).trimmed();
+    QTRY_VERIFY(QFileInfo::exists(process));
+    fixture.socket.close();
+    QTRY_VERIFY_WITH_TIMEOUT(!QFileInfo::exists(process), 10000);
+}
+
+void ServiceTest::animateChecksTheContainer_R18()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli and ffmpeg fixtures require a POSIX shell.");
+#endif
+    AnimationFixture fixture;
+    QVERIFY(fixture.start(AnimationFixture::Ffmpeg::Fake));
+    // A sd-cli built without libwebm writes AVI under a .webm name: the job fails, naming both containers.
+    QVERIFY(writeFile(fixture.bin("content"), "video.avi"));
+    auto result = fixture.run("avi-as-webm", fixture.request());
+    QCOMPARE(result.value("code").toString(), QString("generation-failed"));
+    auto detail = result.value("message").toString();
+    QVERIFY2(detail.contains("container is avi, but webm was expected"), qPrintable(detail));
+    QVERIFY(detail.contains("'-M'")); // The sd-cli command, as for any failure.
+    QVERIFY(fixture.binaries.isEmpty());
+    // The same holds for each container, and for a file that is no video at all.
+    result = fixture.run("avi-as-avi", fixture.request({{"container", "avi"}}));
+    QCOMPARE(result.value("type").toString(), QString("result"));
+    QTRY_COMPARE(fixture.binaries.size(), 1);
+    QVERIFY(writeFile(fixture.bin("content"), "video.webp"));
+    result = fixture.run("webp-as-webm", fixture.request({{"pingPong", true}}));
+    QCOMPARE(result.value("code").toString(), QString("generation-failed"));
+    QVERIFY(result.value("message").toString().contains("container is webp, but webm was expected"));
+    QCOMPARE(fixture.of("webp-as-webm", "progress").last().value("progress").toObject().value("stage").toString(), QString("failed"));
+    QVERIFY(writeFile(fixture.bin("content"), "video.txt"));
+    result = fixture.run("garbage", fixture.request({{"container", "webp"}}));
+    QCOMPARE(result.value("code").toString(), QString("generation-failed"));
+    QVERIFY(result.value("message").toString().contains("container is unknown, but webp was expected"));
+    // For MP4 the container sd-cli was asked for is AVI; nothing is encoded from anything else.
+    QVERIFY(writeFile(fixture.bin("content"), "video.webm"));
+    QVERIFY(QFile::remove(fixture.bin("ffmpeg-args")) || !QFileInfo::exists(fixture.bin("ffmpeg-args")));
+    result = fixture.run("webm-as-mp4", fixture.request({{"container", "mp4"}}));
+    QCOMPARE(result.value("code").toString(), QString("generation-failed"));
+    detail = result.value("message").toString();
+    QVERIFY2(detail.contains("container is webm, but avi was expected") && detail.contains("mp4"), qPrintable(detail));
+    QVERIFY(!QFileInfo::exists(fixture.bin("ffmpeg-args")));
+    QCOMPARE(fixture.binaries.size(), 1); // Only the valid AVI result above.
+
+    // Real outputs are returned with their own mimeType.
+    QVERIFY(QFile::remove(fixture.bin("content")));
+    const QList<std::tuple<QString, QString, QByteArray>> outputs{
+        {"webm", "video/webm", VideoBytes}, {"webp", "image/webp", WebpBytes}, {"avi", "video/x-msvideo", AviBytes}};
+    for (const auto &[container, mimeType, bytes] : outputs) {
+        result = fixture.run("real-" + container, fixture.request({{"container", container}}));
+        QCOMPARE(result.value("mimeType").toString(), mimeType);
+        QTRY_COMPARE(fixture.binaries.last(), bytes);
+    }
+}
+
+void ServiceTest::animateMapsCompressionQualityOntoEncoders_R17()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli and ffmpeg fixtures require a POSIX shell.");
+#endif
+    AnimationFixture fixture;
+    QVERIFY(fixture.start(AnimationFixture::Ffmpeg::Fake));
+    // Without compressionQuality, every encoder keeps the settings the loops had before: quality 90.
+    // With it, the one value drives sd-cli's own file and ffmpeg's encode, ping-pong and MP4 alike.
+    struct Case { QString container; QString option; std::optional<int> quality; QString expected; };
+    const QList<Case> cases{
+        {"webm", "-crf", std::nullopt, "24"}, {"webm", "-crf", 100, "20"}, {"webm", "-crf", 50, "42"},
+        {"webp", "-quality", std::nullopt, "90"}, {"webp", "-quality", 50, "50"},
+        {"avi", "-q:v", std::nullopt, "3"}, {"avi", "-q:v", 100, "2"}, {"avi", "-q:v", 0, "31"}, {"avi", "-q:v", 50, "15"},
+        {"mp4", "-crf", std::nullopt, "20"}, {"mp4", "-crf", 100, "18"}, {"mp4", "-crf", 50, "29"}, {"mp4", "-crf", 0, "40"}};
+    int index = 0;
+    for (const auto &c : cases) {
+        QJsonObject parameters{{"container", c.container}, {"pingPong", true}};
+        if (c.quality) parameters.insert("compressionQuality", *c.quality);
+        const QString label = QString("%1 %2").arg(c.container).arg(c.quality ? QString::number(*c.quality) : "default");
+        const auto result = fixture.run(QString("quality-%1").arg(index++), fixture.request(parameters));
+        QVERIFY2(result.value("type").toString() == "result", qPrintable(label));
+        QVERIFY2(fixture.arguments("ffmpeg-args").last().endsWith("." + c.container), qPrintable(label));
+        QCOMPARE_NE(fixture.arguments("ffmpeg-args").indexOf(c.option), -1);
+        QVERIFY2(fixture.argument(c.option, "ffmpeg-args") == c.expected, qPrintable(label + ": " + fixture.argument(c.option, "ffmpeg-args")));
+        if (c.quality) QCOMPARE(fixture.argument("--compression-quality"), QString::number(*c.quality));
+        else QVERIFY(!fixture.arguments().contains("--compression-quality"));
+    }
 }

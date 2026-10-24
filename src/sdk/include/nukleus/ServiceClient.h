@@ -60,6 +60,8 @@ public:
     bool canAnimate() const;
     // The service offers image.animate's pingPong parameter, which returns a forward-then-backward loop.
     bool canPingPong() const;
+    // The service offers image.animate's mp4 container (H.264, yuv420p, fast start), which plays everywhere.
+    bool canAnimateMp4() const;
     // Submits an animation with an installed animation model and its start image (and end image, if any);
     // progress arrives through generationProgressChanged and the video through animationFinished.
     QString submitAnimation(const AnimationRequest &request);

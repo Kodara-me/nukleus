@@ -2,6 +2,7 @@
 
 #include <QDateTime>
 #include <QMetaType>
+#include <optional>
 #include <QObject>
 #include <QProcess>
 #include <QString>
@@ -37,9 +38,13 @@ public:
     // Stops the running ffmpeg; finished then reports a failure.
     void cancel();
 
-    // Arguments that write output (in the container its extension names, at fps) playing input forward then
-    // backward, without repeating the last frame or ending on the first: 2N - 2 frames from N.
-    static QStringList pingPongArguments(const QString &input, const QString &output, int fps);
+    // Arguments that encode input into output (in the container its extension names, at fps: WebM as VP9,
+    // animated WebP, AVI as MJPEG, MP4 as H.264 in yuv420p with its index first). With loop, the output plays
+    // input forward then backward, without repeating the last frame or ending on the first: 2N - 2 frames
+    // from N. quality (0-100, higher is better) is the request's compressionQuality, mapped onto the
+    // encoder's scale; without it, every encoder uses the equivalent of 90.
+    static QStringList encodeArguments(const QString &input, const QString &output, int fps, bool loop,
+                                       std::optional<int> quality = std::nullopt);
 
 signals:
     void finished(const FfmpegResult &result);

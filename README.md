@@ -235,8 +235,8 @@ CachyOS, build both with the Vulkan backend from the AUR:
 paru -S llama.cpp-vulkan-git stable-diffusion.cpp-vulkan-git
 ```
 
-`ffmpeg` is optional: it makes the ping-pong loops of `image.animate`
-(`sudo pacman -S ffmpeg`). The service uses the `ffmpeg` on its PATH, or the one
+`ffmpeg` is optional: it makes the ping-pong loops and the MP4 output of
+`image.animate` (`sudo pacman -S ffmpeg`). The service uses the `ffmpeg` on its PATH, or the one
 `NUKLEUS_FFMPEG` names in `/etc/nukleus/nukleus.conf`.
 
 Both packages build from the upstream sources and install into `/usr/bin`,
@@ -457,7 +457,7 @@ into a short video with an installed animation model, through
 `sd-cli -M vid_gen`. A request carries the model ID, a prompt, an optional
 negative prompt and seed, and a `parameters` object holding any sd-cli video
 option of the [option table](docs/protocol-v3.md#animating-an-image-imageanimate):
-size, frame count, fps, container (`webm`, `webp`, `avi`), steps, guidance and
+size, frame count, fps, container (`webm`, `webp`, `avi`, `mp4`), steps, guidance and
 sampler for each noise pass, flow shift, LoRA weights, cache, memory and VAE
 tiling options. Each option the request leaves out comes from the model's
 `recommendedOptions`, else is left to sd-cli's own default; this is the one
@@ -476,8 +476,19 @@ container and fps; `frames` reports the loop's count (2N - 2). `ffmpeg` is an
 optional runtime tool, like `llama-server`: it is found on the service's PATH or
 named by `NUKLEUS_FFMPEG`, and `image.animate.pingPong` is listed in the
 capabilities (SDK `canPingPong()`) only when it runs; without it, `pingPong`
-fails with `backend-not-ready` before any upload. MP4 output is not available
-yet and fails with `backend-not-ready`.
+fails with `backend-not-ready` before any upload.
+
+`container` `mp4` plays everywhere (phones, browsers, players, game engines):
+sd-cli writes AVI and the same `ffmpeg` encodes it to H.264 (`yuv420p`, index at
+the start of the file) at the same fps, in one pass with the ping-pong loop when
+`pingPong` is true. `image.animate.mp4` is listed in the capabilities (SDK
+`canAnimateMp4()`) only when `ffmpeg` runs; without it, `mp4` fails with
+`backend-not-ready` before any upload. `compressionQuality` (0–100) goes to
+sd-cli and sets the quality of every `ffmpeg` encode too, loops and MP4 alike
+(90 when absent). Before returning or encoding sd-cli's file, the service checks
+that its content is the container requested (a sd-cli built without libwebm
+writes AVI under a `.webm` name) and fails with `generation-failed` naming both
+otherwise, so `mimeType` always matches the file.
 
 ## Shared companions and model forms
 

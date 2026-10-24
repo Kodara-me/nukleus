@@ -316,7 +316,8 @@ struct NukleusDaemon::Job
     QStringList inputPaths;
     QString outputPath;
     std::optional<AnimationPlan> animation;
-    int generatedFrames = 0; // Frames of sd-cli's video, while ffmpeg post-processes it.
+    int resultFrames = 0; // Frames of the video ffmpeg writes, while it post-processes sd-cli's.
+    bool looped = false; // ffmpeg is making the ping-pong loop, not only encoding.
 };
 
 NukleusDaemon::NukleusDaemon(NukleusConfiguration configuration, QObject *parent)
@@ -1066,12 +1067,12 @@ void NukleusDaemon::runActiveJob()
     }
     if (m_activeJob->operation == Operation::Animate) {
         const auto &plan = *m_activeJob->animation;
-        m_activeJob->outputPath = m_activeJob->directory->filePath(QStringLiteral("result.") + plan.container);
+        m_activeJob->outputPath = m_activeJob->directory->filePath(QStringLiteral("result.") + plan.sdContainer);
         QStringList arguments = plan.arguments + QStringList{"-i", m_activeJob->inputPaths.value(0)};
         if (m_activeJob->inputPaths.size() > 1) arguments += {"--end-img", m_activeJob->inputPaths.at(1)};
         arguments += {"-o", m_activeJob->outputPath};
         if (!m_sdRunner
-            || !m_sdRunner->runVideo(arguments, m_activeJob->outputPath, plan.totalSteps, plan.twoPasses, plan.pingPong)) {
+            || !m_sdRunner->runVideo(arguments, m_activeJob->outputPath, plan.totalSteps, plan.twoPasses, plan.postProcessed())) {
             sendError(m_activeJob->client, "start-failed", tr("Could not start animation"), m_activeJob->id);
             m_activeJob.reset(); startNextJob();
         }
@@ -1181,7 +1182,10 @@ void NukleusDaemon::sendCapabilities(QWebSocket *socket) const
         operations.append(QStringLiteral("image.upscale"));
         operations.append(QStringLiteral("image.edit"));
         operations.append(QStringLiteral("image.animate"));
-        if (m_ffmpeg->isAvailable()) operations.append(QStringLiteral("image.animate.pingPong"));
+        if (m_ffmpeg->isAvailable()) {
+            operations.append(QStringLiteral("image.animate.pingPong"));
+            operations.append(QStringLiteral("image.animate.mp4"));
+        }
     }
     if (isPromptEnhancementReady()) operations.append("prompt.enhance");
     const auto chatEngines = readyTextChatEngines();
@@ -1744,8 +1748,8 @@ void NukleusDaemon::submitAnimation(QWebSocket *socket, const QJsonObject &messa
         return;
     }
     const QString container = effective.value("container").toString(QStringLiteral("webm"));
-    if (container == QStringLiteral("mp4")) {
-        sendError(socket, "backend-not-ready", tr("MP4 output is unavailable"), jobId);
+    if (container == QStringLiteral("mp4") && !m_ffmpeg->isAvailable()) {
+        sendError(socket, "backend-not-ready", tr("MP4 output needs ffmpeg, which is unavailable"), jobId);
         return;
     }
     if (m_pendingUploads.contains(socket)) {
@@ -1761,6 +1765,9 @@ void NukleusDaemon::submitAnimation(QWebSocket *socket, const QJsonObject &messa
     };
     AnimationPlan plan;
     plan.container = container;
+    // sd-cli does not write MP4; every build writes AVI (MJPEG), which ffmpeg then encodes.
+    plan.sdContainer = container == QStringLiteral("mp4") ? QStringLiteral("avi") : container;
+    if (effective.contains("compressionQuality")) plan.compressionQuality = effective.value("compressionQuality").toInt();
     const QString highNoise = attached("high-noise");
     QStringList arguments{"-M", "vid_gen", "--diffusion-model", model->filePath};
     if (!highNoise.isEmpty()) arguments += {"--high-noise-diffusion-model", highNoise};
@@ -1831,13 +1838,29 @@ void NukleusDaemon::submitAnimation(QWebSocket *socket, const QJsonObject &messa
     send(socket, {{"type", "upload-required"}, {"jobId", jobId}, {"inputRole", "start"}, {"inputIndex", 0}});
 }
 
+namespace
+{
+// The container a video file's signature names: webm (EBML header), avi (RIFF…AVI ), webp (RIFF…WEBP) or unknown.
+QString videoContainerOf(const QString &path)
+{
+    QFile file(path);
+    const QByteArray header = file.open(QIODevice::ReadOnly) ? file.read(12) : QByteArray();
+    if (header.startsWith(QByteArray("\x1a\x45\xdf\xa3", 4))) return QStringLiteral("webm");
+    if (header.size() == 12 && header.startsWith("RIFF")) {
+        if (header.mid(8) == "AVI ") return QStringLiteral("avi");
+        if (header.mid(8, 4) == "WEBP") return QStringLiteral("webp");
+    }
+    return QStringLiteral("unknown");
+}
+}
+
 bool NukleusDaemon::finishAnimation(Job &job, const SdCliGenerationResult &result)
 {
     using Stage = Nukleus::GenerationProgressStage;
     const auto &plan = *job.animation;
     if (!result.succeeded || !QFileInfo(job.outputPath).isFile()) {
         // sd-cli's runner reports its own failures; a missing file after a success is the service's to report.
-        if (plan.pingPong && result.succeeded)
+        if (plan.postProcessed() && result.succeeded)
             sendProgress(job, {Stage::Failed, std::nullopt, std::nullopt, 94, tr("Animation failed")});
         QString detail = result.succeeded
             ? tr("Animation failed: sd-cli exited with code %1 but wrote no video file%2")
@@ -1850,6 +1873,20 @@ bool NukleusDaemon::finishAnimation(Job &job, const SdCliGenerationResult &resul
         sendError(job.client, "generation-failed", detail, job.id);
         return true;
     }
+    // A file whose content is not the container sd-cli was asked for would be sent under a wrong mimeType (a
+    // sd-cli built without libwebm writes AVI under a .webm name).
+    const QString actual = videoContainerOf(job.outputPath);
+    if (actual != plan.sdContainer) {
+        if (plan.postProcessed())
+            sendProgress(job, {Stage::Failed, std::nullopt, std::nullopt, 94, tr("Animation failed")});
+        sendError(job.client, "generation-failed",
+                  tr("Animation failed: the video container is %1, but %2 was expected%3\nCommand:\n%4")
+                      .arg(actual, plan.sdContainer,
+                           plan.container != plan.sdContainer ? tr(" (sd-cli writes it for %1 output)").arg(plan.container) : QString(),
+                           m_sdRunner->commandLine(result.arguments)),
+                  job.id);
+        return true;
+    }
     // sd-cli may align the frame count to the model (4n + 1 for Wan); it logs the count it generates.
     static const QRegularExpression generated("generate_video \\d+x\\d+x(\\d+)");
     auto match = generated.match(result.standardOutput);
@@ -1860,21 +1897,24 @@ bool NukleusDaemon::finishAnimation(Job &job, const SdCliGenerationResult &resul
         const auto help = sdCliHelp();
         job.animation->fps = help && help->defaultFps ? *help->defaultFps : 24;
     }
-    // Two frames already play forward then backward; a client that left needs no loop.
-    if (!plan.pingPong || (frames > 0 && frames <= 2) || !job.client) {
-        if (plan.pingPong) {
+    // Two frames already play forward then backward, so they need no loop; a client that left needs no video.
+    const bool loop = plan.pingPong && !(frames > 0 && frames <= 2);
+    if (!job.client || (!loop && plan.container != QStringLiteral("mp4"))) {
+        if (plan.postProcessed()) {
             sendProgress(job, {Stage::Saving, std::nullopt, std::nullopt, 99, tr("Saving video…")});
             sendProgress(job, {Stage::Complete, std::nullopt, std::nullopt, 100, tr("Animation complete")});
         }
         sendAnimationVideo(job, job.outputPath, frames);
         return true;
     }
-    job.generatedFrames = frames;
-    const QString loopPath = job.directory->filePath(QStringLiteral("loop.") + plan.container);
-    sendProgress(job, {Stage::Decoding, std::nullopt, std::nullopt, 96, tr("Creating loop…")});
-    if (!m_ffmpeg->run(FfmpegRunner::pingPongArguments(job.outputPath, loopPath, plan.fps), loopPath)) {
+    // One ffmpeg pass makes the loop and the MP4 together; the loop is 2N - 2 frames (0 when sd-cli's count is unknown).
+    job.looped = loop;
+    job.resultFrames = loop ? (frames > 0 ? frames * 2 - 2 : 0) : frames;
+    const QString videoPath = job.directory->filePath((loop ? QStringLiteral("loop.") : QStringLiteral("result.")) + plan.container);
+    sendProgress(job, {Stage::Decoding, std::nullopt, std::nullopt, 96, loop ? tr("Creating loop…") : tr("Encoding video…")});
+    if (!m_ffmpeg->run(FfmpegRunner::encodeArguments(job.outputPath, videoPath, plan.fps, loop, plan.compressionQuality), videoPath)) {
         sendProgress(job, {Stage::Failed, std::nullopt, std::nullopt, 96, tr("Animation failed")});
-        sendError(job.client, "generation-failed", tr("Could not start ffmpeg to create the loop"), job.id);
+        sendError(job.client, "generation-failed", tr("Could not start ffmpeg to encode the video"), job.id);
         return true;
     }
     return false;
@@ -1887,7 +1927,8 @@ void NukleusDaemon::sendAnimationVideo(const Job &job, const QString &path, int 
     if (bytes.isEmpty()) { sendError(job.client, "result-read-failed", tr("Could not read the generated video"), job.id); return; }
     const QString &container = job.animation->container;
     const QString mimeType = container == QStringLiteral("webp") ? QStringLiteral("image/webp")
-        : container == QStringLiteral("avi") ? QStringLiteral("video/x-msvideo") : QStringLiteral("video/webm");
+        : container == QStringLiteral("avi") ? QStringLiteral("video/x-msvideo")
+        : container == QStringLiteral("mp4") ? QStringLiteral("video/mp4") : QStringLiteral("video/webm");
     send(job.client, {{"type", "result"}, {"jobId", job.id}, {"operation", "image.animate"},
                       {"mimeType", mimeType}, {"frames", frames}, {"fps", job.animation->fps}});
     if (job.client) job.client->sendBinaryMessage(bytes);
@@ -1900,7 +1941,8 @@ void NukleusDaemon::handleFfmpegFinished(const FfmpegResult &result)
     using Stage = Nukleus::GenerationProgressStage;
     if (!result.succeeded || !QFileInfo(result.outputPath).isFile()) {
         sendProgress(*job, {Stage::Failed, std::nullopt, std::nullopt, 96, tr("Animation failed")});
-        QString detail = tr("Creating the loop failed (ffmpeg exit code %1)").arg(result.exitCode);
+        QString detail = (job->looped ? tr("Creating the loop failed (ffmpeg exit code %1)")
+                                      : tr("Encoding the video failed (ffmpeg exit code %1)")).arg(result.exitCode);
         detail += tr("\nCommand:\n%1").arg(m_ffmpeg->commandLine(result.arguments));
         const QString diagnostic = result.standardError.trimmed().right(4096);
         if (!diagnostic.isEmpty()) detail += tr("\nBackend error:\n%1").arg(diagnostic);
@@ -1908,8 +1950,7 @@ void NukleusDaemon::handleFfmpegFinished(const FfmpegResult &result)
     } else {
         sendProgress(*job, {Stage::Saving, std::nullopt, std::nullopt, 99, tr("Saving video…")});
         sendProgress(*job, {Stage::Complete, std::nullopt, std::nullopt, 100, tr("Animation complete")});
-        // Forward, then backward without the turning frames: 2N - 2 (0 when sd-cli's count is unknown).
-        sendAnimationVideo(*job, result.outputPath, job->generatedFrames > 0 ? job->generatedFrames * 2 - 2 : 0);
+        sendAnimationVideo(*job, result.outputPath, job->resultFrames);
     }
     m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
 }

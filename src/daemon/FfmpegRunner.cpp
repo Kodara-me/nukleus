@@ -1,5 +1,8 @@
 #include "FfmpegRunner.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include <QDebug>
 #include <QFileInfo>
 #include <QStandardPaths>
@@ -22,16 +25,26 @@ QString quotedArgument(QString argument)
     return QLatin1Char('\'') + argument + QLatin1Char('\'');
 }
 
-// Encoder arguments for the container an output file's extension names, close to what sd-cli writes.
-QStringList encoderArguments(const QString &output)
+// The quality of the encoders without a compressionQuality: the value the fixed settings of earlier
+// versions correspond to (WebP quality 90, MJPEG q:v 3, VP9 crf 24, H.264 crf 20).
+constexpr int DefaultQuality = 90;
+
+// Encoder arguments for the container an output file's extension names. quality (0-100, higher is better)
+// maps linearly onto each encoder's own scale.
+QStringList encoderArguments(const QString &output, int quality)
 {
+    const auto number = [](long value) { return QString::number(value); };
     const QString container = QFileInfo(output).suffix().toLower();
     if (container == QStringLiteral("webp"))
-        return {QStringLiteral("-c:v"), QStringLiteral("libwebp_anim"), QStringLiteral("-quality"), QStringLiteral("90"),
+        return {QStringLiteral("-c:v"), QStringLiteral("libwebp_anim"), QStringLiteral("-quality"), number(quality),
                 QStringLiteral("-loop"), QStringLiteral("0")};
     if (container == QStringLiteral("avi"))
-        return {QStringLiteral("-c:v"), QStringLiteral("mjpeg"), QStringLiteral("-q:v"), QStringLiteral("3")};
-    return {QStringLiteral("-c:v"), QStringLiteral("libvpx-vp9"), QStringLiteral("-crf"), QStringLiteral("24"),
+        return {QStringLiteral("-c:v"), QStringLiteral("mjpeg"), QStringLiteral("-q:v"),
+                number(std::clamp(std::lround(31 - quality * 0.311), 2L, 31L))};
+    if (container == QStringLiteral("mp4"))
+        return {QStringLiteral("-c:v"), QStringLiteral("libx264"), QStringLiteral("-crf"), number(std::lround(40 - quality * 0.22)),
+                QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"), QStringLiteral("-movflags"), QStringLiteral("+faststart")};
+    return {QStringLiteral("-c:v"), QStringLiteral("libvpx-vp9"), QStringLiteral("-crf"), number(std::lround(63 - quality * 0.43)),
             QStringLiteral("-b:v"), QStringLiteral("0"), QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p")};
 }
 }
@@ -142,17 +155,22 @@ void FfmpegRunner::finish(bool succeeded, int exitCode)
     emit finished(result);
 }
 
-QStringList FfmpegRunner::pingPongArguments(const QString &input, const QString &output, int fps)
+QStringList FfmpegRunner::encodeArguments(const QString &input, const QString &output, int fps, bool loop,
+                                          std::optional<int> quality)
 {
-    // The backward copy drops the first frame before reversing (so it does not end on it) and the last
-    // frame after (so the turning frame is not repeated); concat then plays both copies in order.
-    const QString graph = QStringLiteral(
-        "[0:v]split[forward][source];"
-        "[source]trim=start_frame=1,setpts=PTS-STARTPTS,reverse,trim=start_frame=1,setpts=PTS-STARTPTS[backward];"
-        "[forward][backward]concat=n=2:v=1:a=0[loop]");
-    return QStringList{QStringLiteral("-hide_banner"), QStringLiteral("-nostdin"), QStringLiteral("-v"), QStringLiteral("error"),
-                       QStringLiteral("-y"), QStringLiteral("-i"), input, QStringLiteral("-filter_complex"), graph,
-                       QStringLiteral("-map"), QStringLiteral("[loop]"), QStringLiteral("-an"), QStringLiteral("-r"),
-                       QString::number(fps)}
-        + encoderArguments(output) + QStringList{output};
+    QStringList arguments{QStringLiteral("-hide_banner"), QStringLiteral("-nostdin"), QStringLiteral("-v"), QStringLiteral("error"),
+                          QStringLiteral("-y"), QStringLiteral("-i"), input};
+    if (loop) {
+        // The backward copy drops the first frame before reversing (so it does not end on it) and the last
+        // frame after (so the turning frame is not repeated); concat then plays both copies in order.
+        const QString graph = QStringLiteral(
+            "[0:v]split[forward][source];"
+            "[source]trim=start_frame=1,setpts=PTS-STARTPTS,reverse,trim=start_frame=1,setpts=PTS-STARTPTS[backward];"
+            "[forward][backward]concat=n=2:v=1:a=0[loop]");
+        arguments += {QStringLiteral("-filter_complex"), graph, QStringLiteral("-map"), QStringLiteral("[loop]")};
+    } else {
+        arguments += {QStringLiteral("-map"), QStringLiteral("0:v:0")};
+    }
+    arguments += {QStringLiteral("-an"), QStringLiteral("-r"), QString::number(fps)};
+    return arguments + encoderArguments(output, quality.value_or(DefaultQuality)) + QStringList{output};
 }

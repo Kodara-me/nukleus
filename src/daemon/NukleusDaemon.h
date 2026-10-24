@@ -70,10 +70,14 @@ private:
         QStringList files; // Model files the job reads, protected from deletion while it is pending.
         std::optional<int> totalSteps;
         bool twoPasses = false; // A high-noise pass runs before the low-noise one.
-        QString container;
+        QString container; // What the client asked for, and the returned file's.
+        QString sdContainer; // What sd-cli writes: the same, except AVI for mp4, which ffmpeg encodes.
         int frames = 0;
         int fps = 0;
+        std::optional<int> compressionQuality; // Also the quality of ffmpeg's encode.
         bool pingPong = false; // ffmpeg turns sd-cli's video into a forward-then-backward loop.
+        // ffmpeg writes the returned file, so sd-cli's saving and completion are not the job's.
+        bool postProcessed() const { return pingPong || container == QStringLiteral("mp4"); }
     };
     // A routed generation's submitted prompts, returned without preset prefixes.
     struct RoutedPrompts

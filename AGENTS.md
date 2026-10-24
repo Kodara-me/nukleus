@@ -363,5 +363,10 @@ SdCliProgressParser's video mode counts both sampling passes as one running
 step and ignores counters before `generate_video` and after sampling. Results
 carry mimeType, frames (from sd-cli's `generate_video WxHxT` line) and fps,
 then the video bytes; failures return the command and stderr tail. pingPong
-true and container mp4 fail with backend-not-ready until their tasks land.
+true and container mp4 fail with backend-not-ready without ffmpeg (ffmpeg, optional,
+via NUKLEUS_FFMPEG; capabilities image.animate.pingPong and image.animate.mp4). mp4: sd-cli
+writes AVI, one ffmpeg pass encodes H.264/yuv420p/+faststart (with the loop when pingPong).
+The file sd-cli wrote must have the signature of the container asked (webm/avi/webp), else
+generation-failed naming both. compressionQuality also drives every ffmpeg encode (WebP,
+MJPEG, H.264, VP9), 90 when absent.
 Tests use the fake sd-cli script and never run the real one.
