@@ -20,6 +20,7 @@ enum class ModelCategory
     LlmChat,
     Companion,
     Unknown,
+    Animation,
 };
 
 struct ModelInfo
@@ -38,6 +39,9 @@ struct ModelInfo
     QList<PromptStyle> styles;
     QString displayName;
     QString mmprojModelId;
+    // Animation models: roles whose file or shared companion is absent (primary, high-noise, lora-low-noise,
+    // lora-high-noise, vae, text-encoder). Such a model cannot run until the files are restored.
+    QStringList missingFiles;
     QString displayLabel() const { return displayName.trimmed().isEmpty() ? fileName : displayName.trimmed(); }
     // An image-generation model's prompt format (natural, phrases or tags); phrases when unset.
     QString promptFormat() const { return recommendedOptions.value("promptFormat").toString(QStringLiteral("phrases")); }

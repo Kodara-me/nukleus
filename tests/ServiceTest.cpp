@@ -7,7 +7,9 @@
 #include <nukleus/ModelOptions.h>
 #include <nukleus/ServiceClient.h>
 
+#include <QDateTime>
 #include <QDir>
+#include <QDirIterator>
 #include <QScopeGuard>
 #include <QFile>
 #include <QFileInfo>
@@ -123,6 +125,12 @@ private slots:
     void migratesLegacyDataRoot();
     void rejectsConflictingModelRoots();
     void separatesWeightsFromCatalogue();
+    void animationInstallsAllFiles_R1_R2_R5_R9();
+    void animationListsOverProtocol_R1_R7_R9();
+    void animationRollsBackCanceledAndFailedInstalls_R3();
+    void animationRequiresMatchingCompanions_R4_R5();
+    void animationAttachesAndRemovesFiles_R6_R7();
+    void animationDeletionKeepsSharedCompanions_R8();
 };
 
 void ServiceTest::persistsAndProtectsModelRouting()
@@ -1338,7 +1346,8 @@ void ServiceTest::configuresModelsOverProtocol()
     send({{"type", "models.list"}});
     QTRY_COMPARE(received.count(), 1);
     response = QJsonDocument::fromJson(received.takeFirst().first().toString().toUtf8()).object();
-    QCOMPARE(response.value("categories").toArray().size(), 4);
+    QCOMPARE(response.value("categories").toArray().size(), 5);
+    QCOMPARE(response.value("categories").toArray().last().toObject().value("category").toString(), QString("animation"));
     QCOMPARE(response.value("categories").toArray().first().toObject().value("models").toArray().first().toObject().value("recommendedOptions").toObject(), options);
     for (const auto& invalid : {QJsonObject{{"explicitContent", "true"}}, QJsonObject{{"recommendedOptions", true}}}) {
         QJsonObject message{{"type", "models.configure"}, {"displayName", "Fixture model"}, {"id", "image-generation:test.gguf"}, {"recommendedOptions", options}};
@@ -1450,7 +1459,7 @@ void ServiceTest::rejectsRetiredCategoriesAndOperations()
         QVERIFY(Nukleus::Protocol::defaultModelOptions(category).isEmpty());
     }
     ModelCatalog catalog(directory.path(), false);
-    QCOMPARE(ModelCatalog::categories().size(), 4);
+    QCOMPARE(ModelCatalog::categories().size(), 5);
     for (const auto& category : retired)
         QVERIFY(QFileInfo::exists(directory.filePath(category + "/model.gguf")));
     NukleusConfiguration configuration;
@@ -2709,4 +2718,436 @@ void ServiceTest::importsLocalModelWithoutChangingSources()
         QVERIFY(file.open(QIODevice::ReadOnly));
         QCOMPARE(file.readAll(), bytes);
     }
+}
+
+namespace
+{
+const QJsonObject AnimationOptions{{"vaeModelId", "companion:wan_vae.safetensors"}, {"textEncoderModelId", "companion:umt5.gguf"}};
+
+// Installs a shared companion of the given subtype and waits for it.
+bool installCompanion(ModelCatalog &catalog, const QUrl &url, const QString &subtype)
+{
+    QSignalSpy finished(&catalog, &ModelCatalog::installFinished);
+    ModelInstallRequest request;
+    request.installId = "companion-" + url.fileName();
+    request.category = ModelCategory::Companion;
+    request.url = url;
+    request.displayName = subtype.toUpper();
+    request.recommendedOptions = QJsonObject{{"subtype", subtype}};
+    return catalog.install(request) && (finished.count() == 1 || finished.wait(5000));
+}
+
+ModelInstallRequest animationRequest(const QString &installId, const QUrl &url, const QJsonObject &companionUrls = {})
+{
+    ModelInstallRequest request;
+    request.installId = installId;
+    request.category = ModelCategory::Animation;
+    request.url = url;
+    request.modelType = "diffusion";
+    request.displayName = "Wan 2.2 I2V";
+    request.recommendedOptions = AnimationOptions;
+    request.companionUrls = companionUrls;
+    return request;
+}
+
+QStringList fileRoles(const QSignalSpy &progress)
+{
+    QStringList roles;
+    for (const auto &event : progress) {
+        const auto role = event.first().value<ModelInstallProgress>().fileRole;
+        if (!roles.contains(role)) roles.append(role);
+    }
+    return roles;
+}
+
+// Every file under a directory, with its content, to compare a tree before and after an operation.
+QMap<QString, QByteArray> treeSnapshot(const QString &root)
+{
+    QMap<QString, QByteArray> files;
+    QDirIterator it(root, QDir::Files | QDir::Hidden, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        QFile file(it.next());
+        if (file.open(QIODevice::ReadOnly)) files.insert(QDir(root).relativeFilePath(file.fileName()), file.readAll());
+    }
+    return files;
+}
+}
+
+void ServiceTest::animationInstallsAllFiles_R1_R2_R5_R9()
+{
+    TestHttpServer server("weights");
+    QVERIFY(server.start());
+    QTemporaryDir root;
+    const QString models = root.filePath("models");
+    const QString catalogue = root.filePath("config/catalog");
+    ModelCatalog catalog(models, catalogue, true);
+    QString error;
+    QVERIFY2(catalog.ensureStorage(&error), qPrintable(error));
+    QVERIFY(QFileInfo(QDir(models).filePath("animation")).isDir());
+    QCOMPARE(ModelCatalog::categoryFromName("animation"), std::optional<ModelCategory>(ModelCategory::Animation));
+    QVERIFY(installCompanion(catalog, server.url("wan_vae.safetensors"), "vae"));
+    QVERIFY(installCompanion(catalog, server.url("umt5.gguf"), "t5xxl"));
+
+    auto request = animationRequest("wan", server.url("wan_low.gguf"),
+        {{"high-noise", server.url("wan_high.gguf").toString()},
+         {"lora-low-noise", server.url("low_lightx2v.safetensors").toString()},
+         {"lora-high-noise", server.url("high_lightx2v.safetensors").toString()}});
+    QSignalSpy progress(&catalog, &ModelCatalog::installProgress);
+    QSignalSpy finished(&catalog, &ModelCatalog::installFinished);
+    QVERIFY2(catalog.install(request, &error), qPrintable(error));
+    QVERIFY(catalog.models(ModelCategory::Animation).isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    QCOMPARE(fileRoles(progress), (QStringList{"primary", "high-noise", "lora-high-noise", "lora-low-noise"}));
+
+    ModelCatalog restored(models, catalogue, true);
+    const auto model = restored.modelById("animation:wan_low.gguf");
+    QVERIFY(model);
+    QCOMPARE(model->name, QString("Wan 2.2 I2V"));
+    QCOMPARE(model->modelType, QString("diffusion"));
+    QVERIFY(!model->explicitContent);
+    QVERIFY(model->missingFiles.isEmpty());
+    QCOMPARE(model->recommendedOptions, AnimationOptions);
+    const QJsonObject files{{"high-noise", "companions/wan_low.gguf/high-noise/wan_high.gguf"},
+                            {"lora-low-noise", "companions/wan_low.gguf/lora/low_lightx2v.safetensors"},
+                            {"lora-high-noise", "companions/wan_low.gguf/lora/high_lightx2v.safetensors"}};
+    QCOMPARE(model->companionFiles, files);
+    QVERIFY(QFileInfo(QDir(models).filePath("animation/wan_low.gguf")).isFile());
+    for (const auto &name : files) QVERIFY(QFileInfo(QDir(models).filePath("animation/" + name.toString())).isFile());
+    QVERIFY(QFileInfo::exists(QDir(catalogue).filePath("animation.json")));
+    QVERIFY(!QFileInfo::exists(QDir(models).filePath("animation/metadata.json")));
+
+    // R9: a display name is required, and the explicit-content classification is kept.
+    request = animationRequest("unnamed", server.url("wan_5b.safetensors"));
+    request.displayName.reset();
+    QVERIFY(!restored.install(request, &error));
+    request.displayName = "   ";
+    QVERIFY(!restored.install(request, &error));
+    request.displayName = "Wan 2.2 TI2V 5B";
+    request.explicitContent = true;
+    QSignalSpy single(&restored, &ModelCatalog::installFinished);
+    QVERIFY2(restored.install(request, &error), qPrintable(error));
+    QTRY_COMPARE(single.count(), 1);
+    QVERIFY(ModelCatalog(models, catalogue, true).modelById("animation:wan_5b.safetensors")->explicitContent);
+    QVERIFY(!restored.configure("animation:wan_5b.safetensors", AnimationOptions, &error, {}, QString(" ")));
+    QVERIFY(restored.configure("animation:wan_5b.safetensors", AnimationOptions, &error, false, QString("Renamed")));
+    QVERIFY(!restored.modelById("animation:wan_5b.safetensors")->explicitContent);
+    QCOMPARE(restored.modelById("animation:wan_5b.safetensors")->name, QString("Renamed"));
+    QCOMPARE(restored.models(ModelCategory::Animation).size(), 2);
+
+    // Unsupported primary files and a checkpoint type are refused.
+    QVERIFY(!restored.install(animationRequest("ckpt", server.url("wan.ckpt")), &error));
+    request = animationRequest("checkpoint", server.url("other.gguf"));
+    request.modelType = "checkpoint";
+    QVERIFY(!restored.install(request, &error));
+}
+
+void ServiceTest::animationListsOverProtocol_R1_R7_R9()
+{
+    TestHttpServer server("weights");
+    QVERIFY(server.start());
+    QTemporaryDir directory;
+    NukleusConfiguration configuration;
+    configuration.port = 0;
+    configuration.modelRootPath = directory.path();
+    NukleusDaemon daemon(configuration);
+    QString error;
+    QVERIFY2(daemon.start(&error), qPrintable(error));
+    Nukleus::ServiceClient client;
+    client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
+    client.connectToService();
+    QTRY_VERIFY(client.modelListAvailable());
+    QVERIFY(!client.installModel(Nukleus::ModelCategory::Companion, server.url("wan_vae.safetensors"), {}, {{"subtype", "vae"}},
+        {}, "checkpoint", {}, {}, QString("Wan VAE")).isEmpty());
+    QTRY_COMPARE(client.models(Nukleus::ModelCategory::Companion).size(), 1);
+    QVERIFY(!client.installModel(Nukleus::ModelCategory::Companion, server.url("umt5.gguf"), {}, {{"subtype", "t5xxl"}},
+        {}, "checkpoint", {}, {}, QString("UMT5-XXL")).isEmpty());
+    QTRY_COMPARE(client.models(Nukleus::ModelCategory::Companion).size(), 2);
+    QVERIFY(!client.installModel(Nukleus::ModelCategory::Animation, server.url("wan_low.gguf"), {}, AnimationOptions,
+        {{"high-noise", server.url("wan_high.gguf").toString()}}, "checkpoint", {}, {}, QString("Wan 2.2 I2V")).isEmpty());
+    QTRY_COMPARE(client.models(Nukleus::ModelCategory::Animation).size(), 1);
+    const auto model = client.models(Nukleus::ModelCategory::Animation).first();
+    QCOMPARE(model.id, QString("animation:wan_low.gguf"));
+    QCOMPARE(model.displayName, QString("Wan 2.2 I2V"));
+    QCOMPARE(model.companionFiles.value("high-noise").toString(), QString("companions/wan_low.gguf/high-noise/wan_high.gguf"));
+    QVERIFY(model.missingFiles.isEmpty());
+    QVERIFY(!model.explicitContent);
+
+    QWebSocket socket;
+    QList<QJsonObject> messages;
+    connect(&socket, &QWebSocket::textMessageReceived, this, [&](const QString &text) {
+        messages.append(QJsonDocument::fromJson(text.toUtf8()).object());
+    });
+    socket.open(client.endpoint());
+    QTRY_COMPARE(socket.state(), QAbstractSocket::ConnectedState);
+    socket.sendTextMessage("{\"type\":\"authenticate\",\"version\":3}");
+    QTRY_VERIFY(messages.size() >= 2);
+    const auto listed = [&]() -> QJsonObject {
+        messages.clear();
+        socket.sendTextMessage("{\"type\":\"models.list\"}");
+        if (!QTest::qWaitFor([&] { return !messages.isEmpty(); })) return {};
+        for (const auto &category : messages.first().value("categories").toArray())
+            if (category.toObject().value("category") == "animation") {
+                const auto models = category.toObject().value("models").toArray();
+                return models.isEmpty() ? QJsonObject{{"category", "animation"}} : models.first().toObject();
+            }
+        return {};
+    };
+    auto entry = listed();
+    QCOMPARE(entry.value("missingFiles").toArray(), QJsonArray{});
+    QCOMPARE(entry.value("explicitContent").toBool(true), false);
+    QCOMPARE(entry.value("recommendedOptions").toObject(), AnimationOptions);
+    QVERIFY(!QJsonDocument(messages.first()).toJson().contains(directory.path().toUtf8()));
+
+    // A checkpoint type is refused for the category.
+    messages.clear();
+    socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "models.install"}, {"installId", "bad"},
+        {"category", "animation"}, {"url", server.url("other.gguf").toString()}, {"modelType", "checkpoint"},
+        {"displayName", "Other"}, {"recommendedOptions", AnimationOptions}}).toJson(QJsonDocument::Compact)));
+    QTRY_VERIFY(!messages.isEmpty());
+    QCOMPARE(messages.last().value("code").toString(), QString("invalid-model-install"));
+
+    // Configure keeps the classification and reports missing files.
+    messages.clear();
+    socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "models.configure"}, {"id", "animation:wan_low.gguf"},
+        {"recommendedOptions", AnimationOptions}, {"explicitContent", true}}).toJson(QJsonDocument::Compact)));
+    QTRY_VERIFY(!messages.isEmpty());
+    QCOMPARE(messages.last().value("type").toString(), QString("models.configure.completed"));
+    QVERIFY(messages.last().value("model").toObject().value("explicitContent").toBool());
+    QVERIFY(QFile::remove(directory.filePath("animation/companions/wan_low.gguf/high-noise/wan_high.gguf")));
+    entry = listed();
+    QCOMPARE(entry.value("missingFiles").toArray(), QJsonArray{"high-noise"});
+    QVERIFY(entry.value("explicitContent").toBool());
+}
+
+void ServiceTest::animationRollsBackCanceledAndFailedInstalls_R3()
+{
+    TestHttpServer server("weights");
+    QVERIFY(server.start());
+    QTemporaryDir root;
+    const QString models = root.filePath("models");
+    const QString catalogue = root.filePath("catalog");
+    ModelCatalog catalog(models, catalogue, true);
+    QVERIFY(installCompanion(catalog, server.url("wan_vae.safetensors"), "vae"));
+    QVERIFY(installCompanion(catalog, server.url("umt5.gguf"), "t5xxl"));
+    QSignalSpy finished(&catalog, &ModelCatalog::installFinished);
+    QString error;
+    QVERIFY(catalog.install(animationRequest("existing", server.url("existing.gguf"),
+        {{"lora-low-noise", server.url("lora.safetensors").toString()}}), &error));
+    QTRY_COMPARE(finished.count(), 1);
+    const auto weightsBefore = treeSnapshot(models);
+    const auto catalogueBefore = treeSnapshot(catalogue);
+    const auto listedBefore = catalog.models(ModelCategory::Animation);
+    const auto unchanged = [&] {
+        const auto listed = catalog.models(ModelCategory::Animation);
+        return treeSnapshot(models) == weightsBefore && treeSnapshot(catalogue) == catalogueBefore
+            && listed.size() == listedBefore.size() && listed.first().companionFiles == listedBefore.first().companionFiles;
+    };
+
+    // Canceled while the last file downloads: the staged files are removed.
+    QSignalSpy progress(&catalog, &ModelCatalog::installProgress);
+    QSignalSpy canceled(&catalog, &ModelCatalog::installCanceled);
+    QVERIFY2(catalog.install(animationRequest("cancel", server.url("next.gguf"),
+        {{"high-noise", server.url("next_high.gguf").toString()}, {"lora-high-noise", server.url("slow.gguf").toString()}}), &error),
+        qPrintable(error));
+    QTRY_VERIFY(fileRoles(progress).contains("lora-high-noise"));
+    QVERIFY(QFileInfo::exists(QDir(models).filePath("animation/next.gguf.part")));
+    catalog.cancel("cancel");
+    QCOMPARE(canceled.count(), 1);
+    QVERIFY(unchanged());
+
+    // A failed download removes the files already staged.
+    QSignalSpy failed(&catalog, &ModelCatalog::installFailed);
+    QVERIFY(catalog.install(animationRequest("fail", server.url("next.gguf"),
+        {{"high-noise", server.url("missing.safetensors").toString()}}), &error));
+    QTRY_COMPARE(failed.count(), 1);
+    QVERIFY(unchanged());
+
+    // A failure after the files were published removes them and keeps the catalogue.
+    QVERIFY(QFile::setPermissions(catalogue, QFileDevice::ReadOwner | QFileDevice::ExeOwner));
+    const auto restore = qScopeGuard([&] { QFile::setPermissions(catalogue, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner); });
+    QVERIFY(catalog.install(animationRequest("unsaved", server.url("next.gguf"),
+        {{"high-noise", server.url("next_high.gguf").toString()}}), &error));
+    QTRY_COMPARE(failed.count(), 2);
+    QVERIFY(unchanged());
+    QCOMPARE(failed.last().last().toString(), QString("Could not save model metadata"));
+}
+
+void ServiceTest::animationRequiresMatchingCompanions_R4_R5()
+{
+    TestHttpServer server("weights");
+    QVERIFY(server.start());
+    QTemporaryDir directory;
+    ModelCatalog catalog(directory.path(), true);
+    QVERIFY(installCompanion(catalog, server.url("wan_vae.safetensors"), "vae"));
+    QVERIFY(installCompanion(catalog, server.url("umt5.gguf"), "t5xxl"));
+    QVERIFY(installCompanion(catalog, server.url("umt5.safetensors"), "t5xxl"));
+    QVERIFY(installCompanion(catalog, server.url("projector.gguf"), "mmproj"));
+    QVERIFY(installCompanion(catalog, server.url("old_vae.ckpt"), "vae"));
+    QVERIFY(!installCompanion(catalog, server.url("umt5.ckpt"), "t5xxl"));
+    QVERIFY(Nukleus::Protocol::validateModelOptions("companion", {{"subtype", "t5xxl"}}));
+    QString error;
+    QVERIFY(!catalog.configure("companion:old_vae.ckpt", {{"subtype", "t5xxl"}}, &error, {}, QString("Old VAE")));
+    QCOMPARE(catalog.modelById("companion:umt5.safetensors")->recommendedOptions.value("subtype").toString(), QString("t5xxl"));
+
+    auto request = animationRequest("wan", server.url("wan_low.gguf"));
+    request.recommendedOptions.reset();
+    QVERIFY(!catalog.install(request, &error));
+    const QList<QJsonObject> invalid{
+        {{"vaeModelId", "companion:umt5.gguf"}, {"textEncoderModelId", "companion:umt5.gguf"}},
+        {{"vaeModelId", "companion:wan_vae.safetensors"}, {"textEncoderModelId", "companion:wan_vae.safetensors"}},
+        {{"vaeModelId", "companion:wan_vae.safetensors"}, {"textEncoderModelId", "companion:projector.gguf"}},
+        {{"vaeModelId", "companion:wan_vae.safetensors"}, {"textEncoderModelId", "companion:absent.gguf"}},
+        {{"vaeModelId", "companion:wan_vae.safetensors"}, {"textEncoderModelId", ""}},
+        {{"vaeModelId", "companion:wan_vae.safetensors"}},
+        {{"vaeModelId", "companion:wan_vae.safetensors"}, {"textEncoderModelId", "companion:umt5.gguf"}, {"steps", 4}}};
+    for (const auto &options : invalid) {
+        request.recommendedOptions = options;
+        QVERIFY2(!catalog.install(request, &error), qPrintable(QJsonDocument(options).toJson()));
+    }
+    request.recommendedOptions = QJsonObject{{"vaeModelId", "companion:wan_vae.safetensors"}, {"textEncoderModelId", "companion:umt5.safetensors"}};
+    QSignalSpy finished(&catalog, &ModelCatalog::installFinished);
+    QVERIFY2(catalog.install(request, &error), qPrintable(error));
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(QFileInfo::exists(directory.filePath("animation/metadata.json")));
+    const QString id = "animation:wan_low.gguf";
+    for (const auto &options : invalid)
+        QVERIFY(!catalog.configure(id, options, &error));
+    QVERIFY2(catalog.configure(id, AnimationOptions, &error), qPrintable(error));
+    QCOMPARE(catalog.modelById(id)->recommendedOptions, AnimationOptions);
+    QVERIFY(catalog.modelById(id)->missingFiles.isEmpty());
+}
+
+void ServiceTest::animationAttachesAndRemovesFiles_R6_R7()
+{
+    TestHttpServer server("weights");
+    QVERIFY(server.start());
+    QTemporaryDir directory;
+    ModelCatalog catalog(directory.path(), true);
+    QVERIFY(installCompanion(catalog, server.url("wan_vae.safetensors"), "vae"));
+    QVERIFY(installCompanion(catalog, server.url("umt5.gguf"), "t5xxl"));
+    QSignalSpy finished(&catalog, &ModelCatalog::installFinished);
+    QString error;
+    auto request = animationRequest("wan", server.url("wan_low.gguf"));
+    request.explicitContent = true;
+    QVERIFY(catalog.install(request, &error));
+    QTRY_COMPARE(finished.count(), 1);
+    const QString id = "animation:wan_low.gguf";
+    const QString primary = directory.filePath("animation/wan_low.gguf");
+    QFile primaryFile(primary);
+    QVERIFY(primaryFile.open(QIODevice::ReadWrite));
+    QVERIFY(primaryFile.setFileTime(QDateTime(QDate(2026, 1, 1), QTime(0, 0)), QFileDevice::FileModificationTime));
+    primaryFile.close();
+    const auto modified = QFileInfo(primary).lastModified();
+    const auto unchanged = [&] {
+        const auto model = catalog.modelById(id);
+        return model && model->name == "Wan 2.2 I2V" && model->recommendedOptions == AnimationOptions && model->explicitContent
+            && QFileInfo(primary).lastModified() == modified;
+    };
+
+    // Attach the optional files without downloading the primary again.
+    ModelInstallRequest attach;
+    attach.installId = "attach";
+    attach.category = ModelCategory::Animation;
+    attach.existingModelId = id;
+    attach.modelType = "";
+    attach.companionUrls = {{"high-noise", server.url("wan_high.gguf").toString()},
+                            {"lora-low-noise", server.url("low.safetensors").toString()}};
+    QSignalSpy progress(&catalog, &ModelCatalog::installProgress);
+    QVERIFY2(catalog.install(attach, &error), qPrintable(error));
+    QTRY_COMPARE(finished.count(), 2);
+    QCOMPARE(fileRoles(progress), (QStringList{"high-noise", "lora-low-noise"}));
+    QCOMPARE(catalog.modelById(id)->companionFiles.size(), 2);
+    QCOMPARE(catalog.modelById(id)->modelType, QString("diffusion"));
+    QVERIFY(unchanged());
+    attach.installId = "duplicate";
+    attach.companionUrls = {{"high-noise", server.url("other_high.gguf").toString()}};
+    QVERIFY(!catalog.install(attach, &error));
+    attach.companionUrls = {{"vae", server.url("vae.safetensors").toString()}};
+    QVERIFY(!catalog.install(attach, &error));
+    attach.companionUrls = {{"lora-high-noise", server.url("low.safetensors").toString()}};
+    QVERIFY(!catalog.install(attach, &error));
+
+    // Remove one, keeping everything else.
+    QVERIFY2(catalog.removeCompanion(id, "lora-low-noise", &error), qPrintable(error));
+    QVERIFY(!QFileInfo::exists(directory.filePath("animation/companions/wan_low.gguf/lora/low.safetensors")));
+    QCOMPARE(catalog.modelById(id)->companionFiles.keys(), QStringList{"high-noise"});
+    QVERIFY(catalog.modelById(id)->missingFiles.isEmpty());
+    QVERIFY(unchanged());
+
+    // Files removed outside the service are reported, and an attached one can be received again.
+    QVERIFY(QFile::remove(directory.filePath("animation/companions/wan_low.gguf/high-noise/wan_high.gguf")));
+    QCOMPARE(catalog.modelById(id)->missingFiles, QStringList{"high-noise"});
+    attach.installId = "again";
+    attach.companionUrls = {{"high-noise", server.url("wan_high.gguf").toString()}};
+    QVERIFY2(catalog.install(attach, &error), qPrintable(error));
+    QTRY_COMPARE(finished.count(), 3);
+    QVERIFY(catalog.modelById(id)->missingFiles.isEmpty());
+    QVERIFY(QFile::remove(directory.filePath("animation/companions/wan_low.gguf/high-noise/wan_high.gguf")));
+    QVERIFY2(catalog.removeCompanion(id, "high-noise", &error), qPrintable(error));
+    QVERIFY(catalog.modelById(id)->missingFiles.isEmpty());
+    QVERIFY(QFile::remove(directory.filePath("companion/umt5.gguf")));
+    QCOMPARE(catalog.modelById(id)->missingFiles, QStringList{"text-encoder"});
+    QVERIFY(QFile::remove(directory.filePath("companion/wan_vae.safetensors")));
+    QCOMPARE(catalog.modelById(id)->missingFiles, (QStringList{"vae", "text-encoder"}));
+    QVERIFY(QFile::remove(primary));
+    QCOMPARE(ModelCatalog(directory.path(), true).modelById(id)->missingFiles, (QStringList{"primary", "vae", "text-encoder"}));
+    QVERIFY2(catalog.remove(id, &error), qPrintable(error));
+    QVERIFY(catalog.models(ModelCategory::Animation).isEmpty());
+}
+
+void ServiceTest::animationDeletionKeepsSharedCompanions_R8()
+{
+    TestHttpServer server("weights");
+    QVERIFY(server.start());
+    QTemporaryDir directory;
+    ModelCatalog catalog(directory.path(), true);
+    QVERIFY(installCompanion(catalog, server.url("wan_vae.safetensors"), "vae"));
+    QVERIFY(installCompanion(catalog, server.url("umt5.gguf"), "t5xxl"));
+    QString error;
+
+    // Companions named by an installation in progress are protected too.
+    QSignalSpy canceled(&catalog, &ModelCatalog::installCanceled);
+    QVERIFY(catalog.install(animationRequest("pending", server.url("slow.gguf")), &error));
+    QVERIFY(!catalog.remove("companion:umt5.gguf", &error));
+    QVERIFY(!catalog.configure("companion:wan_vae.safetensors", {{"subtype", "t5xxl"}}, &error, {}, QString("VAE")));
+    catalog.cancel("pending");
+    QCOMPARE(canceled.count(), 1);
+
+    QSignalSpy finished(&catalog, &ModelCatalog::installFinished);
+    QVERIFY(catalog.install(animationRequest("wan", server.url("wan_low.gguf"),
+        {{"high-noise", server.url("wan_high.gguf").toString()}, {"lora-low-noise", server.url("low.safetensors").toString()},
+         {"lora-high-noise", server.url("high.safetensors").toString()}}), &error));
+    QTRY_COMPARE(finished.count(), 1);
+    const QString id = "animation:wan_low.gguf";
+    const auto model = catalog.modelById(id);
+    QVERIFY(model);
+    ModelCatalog restored(directory.path(), true);
+    QVERIFY(!restored.remove("companion:wan_vae.safetensors", &error));
+    QVERIFY(!restored.remove("companion:umt5.gguf", &error));
+    QVERIFY(!restored.configure("companion:wan_vae.safetensors", {{"subtype", "mmproj"}}, &error, {}, QString("VAE")));
+    QVERIFY(!restored.configure("companion:wan_vae.safetensors", {{"subtype", "t5xxl"}}, &error, {}, QString("VAE")));
+    QVERIFY(!restored.configure("companion:umt5.gguf", {{"subtype", "vae"}}, &error, {}, QString("UMT5")));
+    QVERIFY2(restored.configure("companion:umt5.gguf", {{"subtype", "t5xxl"}}, &error, {}, QString("UMT5-XXL")), qPrintable(error));
+
+    // A model receiving files can neither be deleted nor lose a file.
+    ModelInstallRequest attach;
+    attach.installId = "attach";
+    attach.category = ModelCategory::Animation;
+    attach.existingModelId = id;
+    attach.modelType = "";
+    QVERIFY(restored.removeCompanion(id, "lora-high-noise", &error));
+    attach.companionUrls = {{"lora-high-noise", server.url("slow.gguf").toString()}};
+    QVERIFY2(restored.install(attach, &error), qPrintable(error));
+    QVERIFY(!restored.remove(id, &error));
+    QVERIFY(!restored.removeCompanion(id, "high-noise", &error));
+    restored.cancel("attach");
+
+    QVERIFY2(restored.remove(id, &error), qPrintable(error));
+    QVERIFY(!QFileInfo::exists(directory.filePath("animation/wan_low.gguf")));
+    for (const auto &name : model->companionFiles)
+        QVERIFY(!QFileInfo::exists(directory.filePath("animation/" + name.toString())));
+    QVERIFY(restored.modelById("companion:wan_vae.safetensors"));
+    QVERIFY(restored.modelById("companion:umt5.gguf"));
+    QVERIFY(restored.remove("companion:wan_vae.safetensors", &error));
+    QVERIFY(restored.remove("companion:umt5.gguf", &error));
 }

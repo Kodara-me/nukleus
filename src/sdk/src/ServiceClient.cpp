@@ -16,6 +16,7 @@ Nukleus::ModelCategory categoryFromName(const QString &name)
     if (name == QStringLiteral("upscaler")) return Nukleus::ModelCategory::Upscaler;
     if (name == "companion") return Nukleus::ModelCategory::Companion;
     if (name == QStringLiteral("llm-chat")) return Nukleus::ModelCategory::LlmChat;
+    if (name == QStringLiteral("animation")) return Nukleus::ModelCategory::Animation;
     return Nukleus::ModelCategory::Unknown;
 }
 
@@ -25,6 +26,7 @@ QString categoryName(Nukleus::ModelCategory category)
     if (category == Nukleus::ModelCategory::Upscaler) return QStringLiteral("upscaler");
     if (category == Nukleus::ModelCategory::Companion) return QStringLiteral("companion");
     if (category == Nukleus::ModelCategory::LlmChat) return QStringLiteral("llm-chat");
+    if (category == Nukleus::ModelCategory::Animation) return QStringLiteral("animation");
     return {};
 }
 
@@ -171,7 +173,9 @@ QString ServiceClient::installModel(ModelCategory category, const QUrl &url, con
     if (!companionUrl.isEmpty()) message.insert(QStringLiteral("companionUrl"), companionUrl.toString());
     if (!recommendedOptions.isEmpty()) message.insert("recommendedOptions", recommendedOptions);
     if (!companionUrls.isEmpty()) message.insert("companionUrls", companionUrls);
-    if (modelType != "checkpoint" || !existingModelId.isEmpty()) message.insert("modelType", modelType);
+    // Animation models are always diffusion models: the service sets their type.
+    if (category != ModelCategory::Animation && (modelType != "checkpoint" || !existingModelId.isEmpty()))
+        message.insert("modelType", modelType);
     if (!existingModelId.isEmpty()) message.insert("id", existingModelId);
     if (explicitContent) message.insert("explicitContent", *explicitContent);
     if (displayName) message.insert("displayName", displayName->trimmed());
@@ -420,7 +424,8 @@ void ServiceClient::handleTextMessage(const QString &message)
                                  model.value(QStringLiteral("companionFileName")).toString(),
                                  model.value(QStringLiteral("companionRole")).toString(), model.value("recommendedOptions").toObject(),
                     model.value("companionFiles").toObject(), model.value("modelType").toString("checkpoint"), model.value("explicitContent").toBool(false),
-                    Protocol::promptStylesFromJson(model.value("styles")).value_or(QList<PromptStyle>{}), model.value("displayName").toString().trimmed(), model.value("mmprojModelId").toString()});
+                    Protocol::promptStylesFromJson(model.value("styles")).value_or(QList<PromptStyle>{}), model.value("displayName").toString().trimmed(), model.value("mmprojModelId").toString(),
+                    model.value("missingFiles").toVariant().toStringList()});
             }
         }
         m_modelListAvailable = true;

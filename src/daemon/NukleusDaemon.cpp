@@ -363,13 +363,14 @@ NukleusDaemon::NukleusDaemon(NukleusConfiguration configuration, QObject *parent
         const QPointer<QWebSocket> client = m_installClients.take(installId);
         QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
                                 {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
-        if (model.id.startsWith("image-generation:") || model.id.startsWith("llm-chat:"))
+        if (model.id.startsWith("image-generation:") || model.id.startsWith("llm-chat:") || model.id.startsWith("animation:"))
             modelObject.insert("explicitContent", model.explicitContent);
         modelObject.insert("displayName", model.displayName);
         modelObject.insert("mmprojModelId", model.mmprojModelId);
         if (!model.recommendedOptions.isEmpty()) modelObject.insert("recommendedOptions", model.recommendedOptions);
         modelObject.insert("companionFiles", model.companionFiles);
         modelObject.insert("modelType", model.modelType);
+        if (model.id.startsWith("animation:")) modelObject.insert("missingFiles", QJsonArray::fromStringList(model.missingFiles));
         if (!model.companionFileName.isEmpty()) {
             modelObject.insert(QStringLiteral("companionFileName"), model.companionFileName);
             modelObject.insert(QStringLiteral("companionRole"), model.companionRole);
@@ -731,8 +732,10 @@ void NukleusDaemon::listModels(QWebSocket *socket) const
         for (const ModelInfo &model : m_models->models(category)) {
             QJsonObject modelObject{{QStringLiteral("id"), model.id}, {QStringLiteral("name"), model.name},
                                     {QStringLiteral("fileName"), model.fileName}, {QStringLiteral("bytes"), model.fileSize}};
-            if (category == ModelCategory::ImageGeneration || category == ModelCategory::LlmChat)
+            if (category == ModelCategory::ImageGeneration || category == ModelCategory::LlmChat || category == ModelCategory::Animation)
                 modelObject.insert("explicitContent", model.explicitContent);
+            if (category == ModelCategory::Animation)
+                modelObject.insert("missingFiles", QJsonArray::fromStringList(model.missingFiles));
             modelObject.insert("displayName", model.displayName);
             if (category == ModelCategory::LlmChat)
                 modelObject.insert("mmprojModelId", model.mmprojModelId);
@@ -781,7 +784,8 @@ void NukleusDaemon::installModel(QWebSocket *socket, const QJsonObject &message)
     request.url = QUrl(message.value("url").toString());
     request.companionUrl = companionUrl;
     request.existingModelId = message.value("id").toString();
-    request.modelType = message.value("modelType").toString(request.existingModelId.isEmpty() ? "checkpoint" : "");
+    const QString defaultType = *category == ModelCategory::Animation ? "diffusion" : "checkpoint";
+    request.modelType = message.value("modelType").toString(request.existingModelId.isEmpty() ? defaultType : "");
     if ((message.contains("companionUrls") && !message.value("companionUrls").isObject())
         || (message.contains("modelType") && !message.value("modelType").isString())
         || (message.contains("id") && !message.value("id").isString())) {
@@ -859,12 +863,13 @@ void NukleusDaemon::configureModel(QWebSocket *socket, const QJsonObject &messag
     }
     const auto model = *m_models->modelById(id);
     QJsonObject value{{"id", model.id}, {"name", model.name}, {"fileName", model.fileName}, {"bytes", model.fileSize}, {"recommendedOptions", model.recommendedOptions}};
-    if (model.id.startsWith("image-generation:") || model.id.startsWith("llm-chat:"))
+    if (model.id.startsWith("image-generation:") || model.id.startsWith("llm-chat:") || model.id.startsWith("animation:"))
         value.insert("explicitContent", model.explicitContent);
     value.insert("displayName", model.displayName);
     value.insert("mmprojModelId", model.mmprojModelId);
     value.insert("companionFiles", model.companionFiles);
     value.insert("modelType", model.modelType);
+    if (model.id.startsWith("animation:")) value.insert("missingFiles", QJsonArray::fromStringList(model.missingFiles));
     if (!model.companionFileName.isEmpty()) {
         value.insert("companionFileName", model.companionFileName);
         value.insert("companionRole", model.companionRole);

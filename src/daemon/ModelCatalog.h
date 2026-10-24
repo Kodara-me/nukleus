@@ -16,6 +16,7 @@ enum class ModelCategory
     Upscaler,
     LlmChat,
     Companion,
+    Animation,
 };
 
 struct ModelInfo
@@ -34,6 +35,8 @@ struct ModelInfo
     QList<Nukleus::PromptStyle> styles;
     QString displayName;
     QString mmprojModelId;
+    // Animation models: required and attached roles whose file or shared companion is absent.
+    QStringList missingFiles;
 };
 
 Q_DECLARE_METATYPE(ModelInfo)
@@ -108,7 +111,7 @@ private:
     struct InstallJob;
     bool validateMmproj(ModelCategory category, const std::optional<QString>& id, QString* error) const;
     bool validateImageReferences(ModelCategory category, const QJsonObject& options, QString* error) const;
-    bool isImageReference(const QString& id) const;
+    QStringList sharedUses(const QString& id) const;
     bool validateRoutingReferences(const Nukleus::ModelRouting &routing, QString *error) const;
     void initializeRoutingOptions(Nukleus::ModelRouting &routing) const;
     bool protectRouting(const QString &id, const QJsonObject *options, QString *error) const;

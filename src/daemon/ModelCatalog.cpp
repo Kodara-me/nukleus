@@ -37,11 +37,38 @@ QStringList extensionsFor(ModelCategory category)
     case ModelCategory::Companion:
     case ModelCategory::ImageGeneration:
         return {QStringLiteral("safetensors"), QStringLiteral("ckpt"), QStringLiteral("gguf")};
+    case ModelCategory::Animation:
+        return {QStringLiteral("safetensors"), QStringLiteral("gguf")};
     case ModelCategory::Upscaler:
     case ModelCategory::LlmChat:
         return {QStringLiteral("gguf")};
     }
     return {};
+}
+
+// Roles of the files attached to one model of the category (companionUrls / companionFiles).
+QStringList attachmentRoles(ModelCategory category)
+{
+    switch (category) {
+    case ModelCategory::ImageGeneration: return {"vae", "clip-l", "clip-g", "llm", "mmproj"};
+    case ModelCategory::Animation: return {"high-noise", "lora-low-noise", "lora-high-noise"};
+    case ModelCategory::LlmChat: return {"mmproj"};
+    case ModelCategory::Upscaler:
+    case ModelCategory::Companion: return {};
+    }
+    return {};
+}
+
+// Both LoRA stages share one directory, so that a single --lora-model-dir serves them.
+QString attachmentDirectory(const QString &role)
+{
+    return role.startsWith(QStringLiteral("lora-")) ? QStringLiteral("lora") : role;
+}
+
+bool isAnimationSourceFile(const QString &fileName)
+{
+    const auto suffix = QFileInfo(fileName).suffix().toLower();
+    return suffix == QStringLiteral("gguf") || suffix == QStringLiteral("safetensors");
 }
 
 bool isHuggingFaceHost(const QString &host)
@@ -131,7 +158,8 @@ ModelCatalog::~ModelCatalog() = default;
 
 QList<ModelCategory> ModelCatalog::categories()
 {
-    return {ModelCategory::ImageGeneration, ModelCategory::Upscaler, ModelCategory::LlmChat, ModelCategory::Companion};
+    return {ModelCategory::ImageGeneration, ModelCategory::Upscaler, ModelCategory::LlmChat, ModelCategory::Companion,
+            ModelCategory::Animation};
 }
 
 QString ModelCatalog::categoryName(ModelCategory category)
@@ -141,6 +169,7 @@ QString ModelCatalog::categoryName(ModelCategory category)
     case ModelCategory::Upscaler: return QStringLiteral("upscaler");
     case ModelCategory::LlmChat: return QStringLiteral("llm-chat");
     case ModelCategory::Companion: return QStringLiteral("companion");
+    case ModelCategory::Animation: return QStringLiteral("animation");
     }
     return {};
 }
@@ -150,6 +179,7 @@ QString ModelCatalog::companionRole(ModelCategory category)
     switch (category) {
     case ModelCategory::LlmChat: return QStringLiteral("mmproj");
     case ModelCategory::ImageGeneration: return QStringLiteral("vae");
+    case ModelCategory::Animation:
     case ModelCategory::Companion:
     case ModelCategory::Upscaler: return {};
     }
@@ -169,10 +199,22 @@ QList<ModelInfo> ModelCatalog::models(ModelCategory category) const
     QList<ModelInfo> models;
     QDir directory(directoryPath(category));
     const QJsonObject metadata = readMetadata(category).value_or(QJsonObject{});
-    for (const QFileInfo &fileInfo : directory.entryInfoList(QDir::Files | QDir::Readable, QDir::Name)) {
+    const bool animation = category == ModelCategory::Animation;
+    QList<QFileInfo> primaries = directory.entryInfoList(QDir::Files | QDir::Readable, QDir::Name);
+    QList<ModelInfo> companions;
+    if (animation) {
+        // An animation model stays listed when its primary file is gone, so that it is reported missing.
+        for (auto it = metadata.begin(); it != metadata.end(); ++it)
+            if (it.value().isObject() && acceptsFileName(category, it.key()) && !QFileInfo(directory.filePath(it.key())).isFile())
+                primaries.append(QFileInfo(directory.filePath(it.key())));
+        companions = this->models(ModelCategory::Companion);
+    }
+    for (const QFileInfo &fileInfo : primaries) {
         if (!acceptsFileName(category, fileInfo.fileName())) continue;
         const QString fileName = fileInfo.fileName();
         const auto entry = metadata.value(fileName);
+        QStringList missing;
+        if (animation && !fileInfo.isFile()) missing.append(QStringLiteral("primary"));
         const QString companionFileName = entry.isString() ? entry.toString() : entry.toObject().value("companionFileName").toString();
         if (!companionFileName.isEmpty() && companionPath(category, fileName, companionFileName).isEmpty()) continue;
         if (!companionFileName.isEmpty() && !QFileInfo(companionPath(category, fileName, companionFileName)).isFile()) continue;
@@ -180,15 +222,31 @@ QList<ModelInfo> ModelCatalog::models(ModelCategory category) const
         auto files = entry.toObject().value("companionFiles").toObject();
         if (!companionFileName.isEmpty()) files.insert(companionRole(category), companionFileName);
         bool valid = true;
-        for (auto it = files.begin(); it != files.end(); ++it) {
-            const auto roles = category == ModelCategory::ImageGeneration
-                ? QStringList{"vae", "clip-l", "clip-g", "llm", "mmproj"} : QStringList{companionRole(category)};
-            if (!roles.contains(it.key()) || !it.value().isString()) { valid = false; break; }
-            const auto path = companionPath(category, fileName, it.value().toString());
-            if (path.isEmpty() || !QFileInfo(path).isFile() || !QFileInfo(path).isReadable()) { valid = false; break; }
+        const auto roles = category == ModelCategory::ImageGeneration || animation
+            ? attachmentRoles(category) : QStringList{companionRole(category)};
+        for (const auto &role : roles) {
+            if (!files.contains(role)) continue;
+            if (!files.value(role).isString()) { valid = false; break; }
+            const auto path = companionPath(category, fileName, files.value(role).toString());
+            if (path.isEmpty()) { valid = false; break; }
+            if (QFileInfo(path).isFile() && QFileInfo(path).isReadable()) continue;
+            if (!animation) { valid = false; break; }
+            missing.append(role);
         }
-        const auto type = entry.toObject().value("modelType").toString("checkpoint");
+        for (auto it = files.begin(); it != files.end(); ++it)
+            if (!roles.contains(it.key())) valid = false;
+        const auto type = entry.toObject().value("modelType").toString(animation ? "diffusion" : "checkpoint");
         if (!valid || (type != "checkpoint" && type != "diffusion")) continue;
+        if (animation) {
+            const auto options = entry.toObject().value("recommendedOptions").toObject();
+            const auto installed = [&companions](const QString &id, const QString &subtype) {
+                return std::any_of(companions.cbegin(), companions.cend(), [&](const ModelInfo &companion) {
+                    return companion.id == id && companion.recommendedOptions.value("subtype") == subtype;
+                });
+            };
+            if (!installed(options.value("vaeModelId").toString(), "vae")) missing.append(QStringLiteral("vae"));
+            if (!installed(options.value("textEncoderModelId").toString(), "t5xxl")) missing.append(QStringLiteral("text-encoder"));
+        }
         QList<Nukleus::PromptStyle> styles;
         if (category == ModelCategory::ImageGeneration) {
             styles = entry.toObject().contains("styles")
@@ -200,7 +258,7 @@ QList<ModelInfo> ModelCatalog::models(ModelCategory category) const
                        displayName.isEmpty() ? fileName : displayName, fileName, fileInfo.size(), fileInfo.absoluteFilePath(),
                        companionFileName, companionFileName.isEmpty() ? QString() : companionRole(category),
                        category == ModelCategory::Upscaler ? QJsonObject{} : entry.toObject().value("recommendedOptions").toObject(), files, type, category != ModelCategory::Upscaler && category != ModelCategory::Companion && entry.toObject().value("explicitContent").toBool(false), styles, displayName,
-                       entry.toObject().value("mmprojModelId").toString()});
+                       entry.toObject().value("mmprojModelId").toString(), missing});
     }
     std::sort(models.begin(), models.end(), [](const ModelInfo &left, const ModelInfo &right) {
         return QString::compare(left.fileName, right.fileName, Qt::CaseInsensitive) < 0;
@@ -229,8 +287,8 @@ std::optional<ModelInfo> ModelCatalog::modelById(const QString &id) const
 bool ModelCatalog::remove(const QString &id, QString *errorMessage)
 {
     if (!protectRouting(id, nullptr, errorMessage)) return false;
-    if (isImageReference(id)) {
-        if (errorMessage) *errorMessage = tr("This model is assigned to an image-generation model");
+    if (!sharedUses(id).isEmpty()) {
+        if (errorMessage) *errorMessage = tr("This model is assigned to an image-generation or animation model");
         return false;
     }
     if (id.startsWith("companion:") && !readMetadata(ModelCategory::LlmChat)) {
@@ -258,7 +316,7 @@ bool ModelCatalog::remove(const QString &id, QString *errorMessage)
     const auto previous = *metadata;
     metadata->remove(modelInfo->fileName);
     if (!writeMetadata(category, *metadata)) { if (errorMessage) *errorMessage = tr("Could not update model metadata"); return false; }
-    if (!QFile::remove(modelInfo->filePath)) {
+    if (QFileInfo::exists(modelInfo->filePath) && !QFile::remove(modelInfo->filePath)) {
         writeMetadata(category, previous);
         if (errorMessage) *errorMessage = tr("Could not remove the model");
         return false;
@@ -284,12 +342,15 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
         return fail(tr("This category has no explicit-content setting"));
     if (request.category == ModelCategory::LlmChat && request.companionUrl)
         return fail(tr("Select an installed MMPROJ companion instead of a URL"));
-    if (request.modelType != "checkpoint" && request.modelType != "diffusion"
-        && !(request.modelType.isEmpty() && !request.existingModelId.isEmpty())) return fail(tr("Invalid model type"));
+    const bool keepsType = request.modelType.isEmpty() && !request.existingModelId.isEmpty();
+    if (request.modelType != "checkpoint" && request.modelType != "diffusion" && !keepsType) return fail(tr("Invalid model type"));
     const bool image = request.category == ModelCategory::ImageGeneration;
-    if (!image && ((request.modelType != "checkpoint" && !(request.modelType.isEmpty() && !request.existingModelId.isEmpty()))
-        || !request.companionUrls.isEmpty()))
+    const bool animation = request.category == ModelCategory::Animation;
+    if (animation && request.modelType != "diffusion" && !keepsType) return fail(tr("Animation models are diffusion models"));
+    if (!image && !animation && ((request.modelType != "checkpoint" && !keepsType) || !request.companionUrls.isEmpty()))
         return fail(tr("CLIP/VAE files and diffusion models require an image model category"));
+    if (animation && request.existingModelId.isEmpty() && !request.recommendedOptions)
+        return fail(tr("Animation models require a VAE and a T5-XXL text encoder companion"));
     if (request.recommendedOptions && !Nukleus::Protocol::validateModelOptions(categoryName(request.category), *request.recommendedOptions, errorMessage)) return false;
     const auto acceptsSource = [&](const QUrl& url) {
         if (url.isLocalFile()) {
@@ -319,8 +380,11 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
         const auto url = normalizedModelUrl(request.url);
         if (!acceptsSource(url)) return fail(tr("Choose a readable local model file or an HTTPS model URL"));
         job->fileName = fileNameForUrl(url);
-        if (request.category == ModelCategory::Companion && request.recommendedOptions.value_or(Nukleus::Protocol::defaultModelOptions("companion")).value("subtype") == "mmproj"
+        const auto subtype = request.recommendedOptions.value_or(Nukleus::Protocol::defaultModelOptions("companion")).value("subtype");
+        if (request.category == ModelCategory::Companion && subtype == "mmproj"
             && QFileInfo(job->fileName).suffix().toLower() != "gguf") return fail(tr("MMPROJ companions require GGUF files"));
+        if (request.category == ModelCategory::Companion && subtype == "t5xxl" && !isAnimationSourceFile(job->fileName))
+            return fail(tr("T5-XXL companions require GGUF or safetensors files"));
         if (!acceptsFileName(request.category, job->fileName)) return fail(tr("The URL filename is not supported for this model category"));
         job->finalPath = QDir(directoryPath(request.category)).filePath(job->fileName);
         const QFileInfo original(job->fileName);
@@ -338,19 +402,27 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
     }
     for (auto it = urls.begin(); it != urls.end(); ++it) {
         const auto role = it.key();
-        if ((!image && role != legacyRole) || (image && !QStringList{"vae", "clip-l", "clip-g", "llm", "mmproj"}.contains(role)) || !it.value().isString())
+        if ((!image && !animation && role != legacyRole) || ((image || animation) && !attachmentRoles(request.category).contains(role))
+            || !it.value().isString())
             return fail(tr("Invalid companion role or URL"));
-        if (job->companionFiles.contains(role)) return fail(tr("A file for this companion role is already installed"));
+        if (job->companionFiles.contains(role)) {
+            // An animation model may receive again a file reported missing; installed files are never replaced.
+            const auto current = companionPath(request.category, job->fileName, job->companionFiles.value(role).toString());
+            if (!animation || current.isEmpty() || QFileInfo::exists(current))
+                return fail(tr("A file for this companion role is already installed"));
+        }
         const auto url = normalizedModelUrl(QUrl(it.value().toString()));
         if (!acceptsSource(url)) return fail(tr("Choose a readable local companion file or an HTTPS URL"));
         const auto name = fileNameForUrl(url);
-        const auto extensions = (request.category == ModelCategory::LlmChat || role == "mmproj") ? QStringList{"gguf"} : QStringList{"safetensors", "ckpt", "gguf"};
+        const auto extensions = animation ? QStringList{"safetensors", "gguf"}
+            : (request.category == ModelCategory::LlmChat || role == "mmproj") ? QStringList{"gguf"} : QStringList{"safetensors", "ckpt", "gguf"};
         if (!isSafeFileName(name) || !extensions.contains(QFileInfo(name).suffix(), Qt::CaseInsensitive)) return fail(tr("The companion filename is not supported"));
         const bool legacy = request.companionUrl && role == legacyRole;
         const auto relative = legacy ? QString("companions/%1/%2").arg(job->fileName, name)
-                                    : QString("companions/%1/%2/%3").arg(job->fileName, role, name);
+                                    : QString("companions/%1/%2/%3").arg(job->fileName, attachmentDirectory(role), name);
         const auto finalPath = companionPath(request.category, job->fileName, relative);
-        if (finalPath.isEmpty() || QFileInfo::exists(finalPath)) return fail(tr("The companion file is already installed for this model"));
+        const bool staged = std::any_of(job->files.cbegin(), job->files.cend(), [&finalPath](const auto &file) { return file.finalPath == finalPath; });
+        if (finalPath.isEmpty() || QFileInfo::exists(finalPath) || staged) return fail(tr("The companion file is already installed for this model"));
         job->companionFiles.insert(role, relative);
         if (legacy) job->legacyCompanion = relative;
         job->files.append({legacy ? QString("companion") : role, url, relative, finalPath, finalPath + ".part"});
@@ -383,9 +455,19 @@ bool ModelCatalog::configure(const QString &id, const QJsonObject &options, QStr
     const auto category = *categoryFromName(id.section(':', 0, 0));
     if (!Nukleus::Protocol::validateModelOptions(categoryName(category), options, error)) return false;
     if (!validateImageReferences(category, options, error)) return false;
-    if (isImageReference(id) && ((category == ModelCategory::Companion && options.value("subtype") != "vae")
-        || (category == ModelCategory::LlmChat && !options.value("canBeTextEncoder").toBool()))) {
-        if (error) *error = tr("This model is assigned to an image-generation model");
+    const auto uses = sharedUses(id);
+    const bool unknownUses = uses.contains(QStringLiteral("unknown"));
+    const bool keepsSubtype = category != ModelCategory::Companion
+        || ((!uses.contains("vae") || options.value("subtype") == "vae") && (!uses.contains("t5xxl") || options.value("subtype") == "t5xxl")
+            && (!unknownUses || options.value("subtype") == info->recommendedOptions.value("subtype")));
+    const bool keepsEncoder = category != ModelCategory::LlmChat
+        || ((!uses.contains("llm") && !unknownUses) || options.value("canBeTextEncoder").toBool());
+    if (!keepsSubtype || !keepsEncoder) {
+        if (error) *error = tr("This model is assigned to an image-generation or animation model");
+        return false;
+    }
+    if (category == ModelCategory::Companion && options.value("subtype") == "t5xxl" && !isAnimationSourceFile(info->fileName)) {
+        if (error) *error = tr("T5-XXL companions require GGUF or safetensors files");
         return false;
     }
     const auto name = displayName.value_or(info->displayName).trimmed();
@@ -428,35 +510,43 @@ bool ModelCatalog::configure(const QString &id, const QJsonObject &options, QStr
 
 bool ModelCatalog::validateImageReferences(ModelCategory category, const QJsonObject& options, QString* error) const
 {
-    if (category != ModelCategory::ImageGeneration) return true;
+    const bool animation = category == ModelCategory::Animation;
+    if (category != ModelCategory::ImageGeneration && !animation) return true;
     for (const auto& key : {QString("vaeModelId"), QString("textEncoderModelId")}) {
         const auto id = options.value(key).toString();
-        if (id.isEmpty()) continue;
-        const auto target = modelById(id);
+        if (id.isEmpty() && !animation) continue;
+        const auto target = id.isEmpty() ? std::optional<ModelInfo>() : modelById(id);
         const bool valid = target && (key == "vaeModelId"
             ? id.startsWith("companion:") && target->recommendedOptions.value("subtype") == "vae"
-            : id.startsWith("llm-chat:") && target->recommendedOptions.value("canBeTextEncoder").toBool());
+            : animation ? id.startsWith("companion:") && target->recommendedOptions.value("subtype") == "t5xxl"
+                        : id.startsWith("llm-chat:") && target->recommendedOptions.value("canBeTextEncoder").toBool());
         if (!valid) {
-            if (error) *error = tr("Select an installed VAE or an eligible LLM text encoder");
+            if (error) *error = animation ? tr("Select an installed VAE companion and an installed T5-XXL text encoder companion")
+                                          : tr("Select an installed VAE or an eligible LLM text encoder");
             return false;
         }
     }
     return true;
 }
 
-bool ModelCatalog::isImageReference(const QString& id) const
+QStringList ModelCatalog::sharedUses(const QString& id) const
 {
-    if (id.startsWith("companion:") || id.startsWith("llm-chat:")) {
-        if (!readMetadata(ModelCategory::ImageGeneration)) return true;
-        const auto references = [&id](const QJsonObject& options) {
-            return options.value("vaeModelId").toString() == id || options.value("textEncoderModelId").toString() == id;
-        };
-        if (m_activeInstall && m_activeInstall->request.recommendedOptions
-            && references(*m_activeInstall->request.recommendedOptions)) return true;
-        for (const auto& model : models(ModelCategory::ImageGeneration))
-            if (references(model.recommendedOptions)) return true;
+    // How image-generation and animation models, installed or being installed, use a shared model:
+    // "vae", "llm" (image text encoder) or "t5xxl" (animation text encoder); "unknown" when a catalogue cannot be read.
+    QStringList uses;
+    if (!id.startsWith("companion:") && !id.startsWith("llm-chat:")) return uses;
+    const auto add = [&uses, &id](ModelCategory category, const QJsonObject& options) {
+        if (options.value("vaeModelId").toString() == id && !uses.contains("vae")) uses.append("vae");
+        const auto encoder = category == ModelCategory::Animation ? QStringLiteral("t5xxl") : QStringLiteral("llm");
+        if (options.value("textEncoderModelId").toString() == id && !uses.contains(encoder)) uses.append(encoder);
+    };
+    for (const auto category : {ModelCategory::ImageGeneration, ModelCategory::Animation}) {
+        if (!readMetadata(category)) { uses.append("unknown"); continue; }
+        if (m_activeInstall && m_activeInstall->request.category == category && m_activeInstall->request.recommendedOptions)
+            add(category, *m_activeInstall->request.recommendedOptions);
+        for (const auto& model : models(category)) add(category, model.recommendedOptions);
     }
-    return false;
+    return uses;
 }
 
 bool ModelCatalog::configureStyles(const QString &id, const QList<Nukleus::PromptStyle> &styles, QString *error)
@@ -589,7 +679,7 @@ QString ModelCatalog::companionPath(ModelCategory category, const QString &prima
     const auto parts = companionFileName.mid(prefix.size()).split('/');
     if (parts.size() < 1 || parts.size() > 2) return {};
     for (const auto &part : parts) if (!isSafeFileName(part)) return {};
-    if (parts.size() == 2 && !QStringList{"vae", "clip-l", "clip-g", "llm", "mmproj", "lora"}.contains(parts.first())) return {};
+    if (parts.size() == 2 && !QStringList{"vae", "clip-l", "clip-g", "llm", "mmproj", "lora", "high-noise"}.contains(parts.first())) return {};
     return QDir(directoryPath(category)).filePath(companionFileName);
 }
 
@@ -621,6 +711,7 @@ QString ModelCatalog::directoryPath(ModelCategory category) const
     case ModelCategory::Upscaler: return QDir(root).filePath(QStringLiteral("upscale"));
     case ModelCategory::LlmChat: return QDir(root).filePath(QStringLiteral("llm"));
     case ModelCategory::Companion: return QDir(root).filePath(QStringLiteral("companion"));
+    case ModelCategory::Animation: return QDir(root).filePath(QStringLiteral("animation"));
     }
     return {};
 }
@@ -865,7 +956,7 @@ bool ModelCatalog::removeCompanion(const QString& id, const QString& role, QStri
     if (!writeMetadata(category, *metadata)) return fail(tr("Could not update model metadata"));
     bool shared = false;
     for (const auto& value : files) shared |= value.toString() == name;
-    if (!shared && !QFile::remove(path)) {
+    if (!shared && QFileInfo::exists(path) && !QFile::remove(path)) {
         if (!writeMetadata(category, previous)) return fail(tr("Could not remove companion or restore model metadata"));
         return fail(tr("Could not remove the companion file"));
     }

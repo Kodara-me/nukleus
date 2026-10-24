@@ -22,6 +22,9 @@ QJsonObject defaultModelOptions(const QString &category)
         return {};
     if (category == "companion")
         return {{"subtype", "vae"}};
+    // Both IDs are required: an animation model names its installed VAE and T5-XXL text-encoder companions.
+    if (category == "animation")
+        return {{"vaeModelId", ""}, {"textEncoderModelId", ""}};
     return {};
 }
 QStringList exclusiveLlmRoles() { return {"defaultPromptEnhancer", "defaultPromptTranslator", "defaultImageDescriber"}; }
@@ -79,8 +82,11 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
             !number("maxTokens", 1, options.value("contextLength").toDouble(), true))
             return fail();
     }
-    else if (category == "companion" && options.value("subtype") != "vae" && options.value("subtype") != "mmproj")
+    else if (category == "companion" && !QStringList{"vae", "mmproj", "t5xxl"}.contains(options.value("subtype").toString()))
         return fail();
+    else if (category == "animation")
+        for (const auto &key : {"vaeModelId", "textEncoderModelId"})
+            if (!options.value(key).isString() || options.value(key).toString().isEmpty()) return fail();
     return true;
 }
 } // namespace Nukleus::Protocol

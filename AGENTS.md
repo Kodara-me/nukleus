@@ -17,8 +17,8 @@
 - Preserve protocol v3 unless an explicit compatibility slice changes it. Canvas and other clients select opaque model IDs and submit work; Canvas may expose installation only for explicitly curated packages through the SDK, while the local manager remains the general model-management UI.
 - CMake installs the daemon to `libexec/nukleus/` and the manager to `bin/` under the selected prefix; the shell installer remains authoritative for systemd deployment and configuration.
 - CMake also installs SDK headers and static libraries and generates the `NukleusSdk` package. The SDK supports image operations.
-- Use `$XDG_DATA_HOME/nukleus/models/` with `upscale/`, `llm/` and `companion/` subdirectories. Generation models in the root also serve image.edit with reference-image conditioning. Never overwrite installed model files. Keep the legacy-root migration safe and non-merging.
-- `--models-dir`/`--config-dir` (always together) select the split layout: weights in `models-dir/{generation,upscale,llm,companion}/` and the catalogue (`<category>.json` in the former metadata.json format, plus `model-routing.json`) in `config-dir/catalog/`. The weight tree may be shared with other applications and is never named after this service. `scripts/migrate-nukleus-storage.sh` copies a legacy tree into it without modifying the source or merging into non-empty destinations.
+- Use `$XDG_DATA_HOME/nukleus/models/` with `upscale/`, `llm/`, `companion/` and `animation/` subdirectories. Generation models in the root also serve image.edit with reference-image conditioning. Never overwrite installed model files. Keep the legacy-root migration safe and non-merging.
+- `--models-dir`/`--config-dir` (always together) select the split layout: weights in `models-dir/{generation,upscale,llm,companion,animation}/` and the catalogue (`<category>.json` in the former metadata.json format, plus `model-routing.json`) in `config-dir/catalog/`. The weight tree may be shared with other applications and is never named after this service. `scripts/migrate-nukleus-storage.sh` copies a legacy tree into it without modifying the source or merging into non-empty destinations.
 - Linux systemd deployment keeps the `nukleus` account, `/etc/nukleus`, `/var/lib/nukleus`, `/run/nukleus`, and fixed port `9384`. Installer `--models-dir`/`--config-dir` store `NUKLEUS_MODELS_DIR`/`NUKLEUS_CONFIG_DIR` in nukleus.conf, preserved by updates, and render `RequiresMountsFor=` and `ReadWritePaths=` for the weight tree and catalogue only. A storage tree with a non-root group is shared: the service joins that group and directories receive setgid group write without recursive chown. The token remains in `/etc/nukleus`.
 - Nukleus was formerly Kira Service. Keep the rename migrations move-only and non-merging: the installer renames the `kira-service` account/group in place and moves `/etc/kira-service`, `/var/lib/kira-service` and `data/kira-service`, rewriting `KIRA_SERVICE_*` keys; the daemon renames `$XDG_DATA_HOME/kira-service`; the manager copies legacy `Kira Service Manager` settings only into empty settings. Refuse when both old and new locations exist.
 - Shared VAE and LLM text encoders are assigned by opaque IDs; LLM MMPROJ uses a shared companion ID. Never copy/delete shared weights with a primary model. Keep legacy companionUrl, companionFileName, companionUrls/companionFiles and string metadata compatible without restoring removed CLIP/image-level mmproj controls or execution arguments. Legacy VAE/LLM attachments remain fallbacks. Existing attachment operations never redownload or overwrite the primary. Stage files and publish metadata atomically; cancellation/failure preserves an existing primary and recommendations. Do not perform SHA-256 download checks. Diffusion models use --diffusion-model and checkpoints use --model. Validate generation values/types before queuing, omit automatic sampler/scheduler flags, and preserve numeric precision. Never auto-apply numeric recommendedOptions to jobs.
@@ -297,7 +297,8 @@ Removed conditioning/extraction APIs and model categories must not be restored.
 Existing user model directories and packages are retained on disk.
 
 Companion is a dedicated model category with recommendedOptions.subtype equal to
-vae or mmproj. VAE accepts safetensors/ckpt/GGUF; MMPROJ requires GGUF. Standalone
+vae, mmproj or t5xxl. VAE accepts safetensors/ckpt/GGUF; MMPROJ requires GGUF;
+T5-XXL (animation text encoder) accepts GGUF/safetensors. Standalone
 companions have required names and no explicit-content classification.
 LLM install/configure accepts optional string mmprojModelId: omission preserves,
 empty clears, and nonempty must reference an installed mmproj subtype. Save this
@@ -307,3 +308,21 @@ assigned companion and protect references during pending installation.
 The Manager add/edit LLM selector offers None and installed MMPROJ entries by ID,
 preserving drafts during catalogue refreshes. Text prompt enhancement remains
 text-only; this assignment does not introduce image chat.
+
+## Animation models
+
+Animation (`animation`) is the image-to-video category: weights in `animation/`,
+catalogue in `animation/metadata.json` or split `catalog/animation.json`. The
+primary is the low-noise diffusion model (GGUF/safetensors, modelType always
+`diffusion`). Optional per-model attachments reuse companionUrls/companionFiles:
+`high-noise` under `companions/<primary>/high-noise/`, `lora-low-noise` and
+`lora-high-noise` both under `companions/<primary>/lora/` (one --lora-model-dir).
+recommendedOptions holds exactly the required `vaeModelId` (vae companion) and
+`textEncoderModelId` (t5xxl companion); validate them on install, completion and
+configure. Lists and completions return `missingFiles` (primary, high-noise,
+lora-low-noise, lora-high-noise, vae, text-encoder) instead of hiding a model
+with an absent file; a role whose file is missing may be attached again.
+Shared companions are never deleted with the model; assigned ones (installed or
+pending) cannot be deleted or retyped. Display name and explicitContent follow
+image-generation rules. No job uses the category yet (image.animate comes
+separately), and the Manager does not offer it yet.

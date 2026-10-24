@@ -9,7 +9,8 @@ Clients authenticate first:
 The version-3 authentication message is required for every client. Loopback peers may send an empty token. Non-loopback peers must send the configured shared LAN token.
 
 The service replies with `authenticated` and `capabilities`. `models.list` returns
-`image-generation`, `upscaler`, `llm-chat` and `companion`.
+`image-generation`, `upscaler`, `llm-chat`, `companion` and `animation`
+(see [Animation models](#animation-models)).
 Each model contains `id`, `name`, `fileName` and `bytes`; a model with a
 companion also includes the category-relative `companionFileName` and
 `companionRole` (`mmproj` or `vae`).
@@ -252,7 +253,8 @@ when provided, the object must contain exactly the category's complete fields:
 | image-generation | `width` and `height`: identical integers 256–2048, multiples of 256; `steps`: integer 1–200; `cfgScale`: number 0–100; `sampler` and `scheduler`: allowed strings; `clipSkip`: -1 or integer 1–12; optional `promptFormat`: `natural`, `phrases` or `tags` (default `phrases`) |
 | llm-chat | `temperature`: number 0–2; `topP`: number >0 and ≤1; `contextLength`: integer 256–131072; `maxTokens`: integer 1–contextLength; optional booleans `canBeTextEncoder`, `defaultPromptEnhancer`, `defaultPromptTranslator` and `defaultImageDescriber` (default false) |
 | upscaler | No options: empty object only. No explicit-content classification. |
-| companion | `subtype`: exactly `vae` or `mmproj`; MMPROJ requires GGUF. |
+| companion | `subtype`: exactly `vae`, `mmproj` or `t5xxl`; MMPROJ requires GGUF; T5-XXL requires GGUF or safetensors. |
+| animation | Required for new installs: `vaeModelId` (an installed `vae` companion) and `textEncoderModelId` (an installed `t5xxl` companion), both nonblank strings, and no other field. |
 
 Samplers: empty (Automatic), `euler`, `euler_a`, `heun`, `dpm2`, `dpm++2m`, `lcm`.
 Schedulers: empty (Automatic), `discrete`, `karras`, `exponential`, `ays`,
@@ -376,11 +378,11 @@ heuristics determine model type. Unused companions remain optional.
 
 ## Explicit-content classification
 
-Image-generation and LLM objects in model lists and install/configure completion
+Image-generation, LLM and animation objects in model lists and install/configure completion
 messages expose explicitContent, default false. It is separate from recommendations.
 Upscaler and Companion objects omit this field.
 
-For Image generation and LLM, `models.install` and `models.configure` accept optional `explicitContent`.
+For Image generation, LLM and Animation, `models.install` and `models.configure` accept optional `explicitContent`.
 Upscaler and Companion omit classification; true is rejected for these categories.
 Non-boolean values are rejected. Omission leaves existing classification unchanged
 (including companion attachments); new models default to false. Configuration
@@ -501,9 +503,9 @@ Explicit empty renames fail; omitted names preserve the existing name on configu
 or companion attachment. Names do not change opaque IDs or primary filenames.
 Upscaler and Companion entries do not expose or accept explicit-content classification.
 
-Standalone Companion files live in models/companion/, with VAE or MMPROJ subtype
+Standalone Companion files live in models/companion/, with VAE, MMPROJ or T5-XXL subtype
 stored under recommendedOptions.subtype. VAE accepts safetensors/ckpt/GGUF;
-MMPROJ accepts GGUF. LLM install/configure accepts optional string mmprojModelId.
+MMPROJ accepts GGUF; T5-XXL (animation text encoders) accepts GGUF/safetensors. LLM install/configure accepts optional string mmprojModelId.
 A nonempty ID must resolve to an installed MMPROJ entry; empty clears the assignment,
 omission preserves it. Lists and completion messages return this ID. It never copies
 the companion file. Deleting an LLM retains its shared companion; assigned companions
@@ -519,3 +521,61 @@ Manager category/subtype selections have no configuration panel. Model add/save
 requires a name. Upscalers have no recommended options, classification checkbox
 or recommendations hint; LLM forms omit that hint and offer an installed-MMPROJ
 selector. The current prompt-enhancement execution remains text-only.
+
+## Animation models
+
+The `animation` category keeps image-to-video models (such as Wan 2.2 I2V A14B)
+with every file they need. Weights live in `models/animation/` (split layout:
+`models-dir/animation/`) and the catalogue in `animation/metadata.json` (split
+layout: `catalog/animation.json`), in the same per-category metadata format.
+The primary file is the low-noise diffusion model (GGUF or safetensors); the
+model type is always `diffusion`, and `modelType` other than `diffusion` is
+rejected.
+
+| Role | Kind | Required | Stored as |
+| --- | --- | --- | --- |
+| `primary` | primary file | yes | `animation/<file>` |
+| `high-noise` | per-model attachment | no | `companions/<primary>/high-noise/<file>` |
+| `lora-low-noise` | per-model attachment | no | `companions/<primary>/lora/<file>` |
+| `lora-high-noise` | per-model attachment | no | `companions/<primary>/lora/<file>` |
+| `vae` | shared companion, `recommendedOptions.vaeModelId` | yes | Companion of subtype `vae` |
+| `text-encoder` | shared companion, `recommendedOptions.textEncoderModelId` | yes | Companion of subtype `t5xxl` |
+
+Attachments are GGUF or safetensors files. Both LoRA stages share one `lora`
+directory, so two LoRAs of one model need distinct file names.
+
+A new model is installed in one `models.install` with a display name, the
+diffusion model `url`, optional `companionUrls` for the attachment roles, and
+`recommendedOptions` naming the installed VAE and T5-XXL companions. Progress
+reports the `fileRole` of each file. The model is listed only after every file
+and its metadata are saved; cancellation or failure removes every file the
+installation staged or published and leaves other models unchanged.
+
+```json
+{"type":"models.install","category":"companion","installId":"t5","url":"https://example.com/umt5-xxl-encoder-Q8_0.gguf","displayName":"UMT5-XXL","recommendedOptions":{"subtype":"t5xxl"}}
+{"type":"models.install","category":"animation","installId":"wan","url":"https://example.com/wan2.2_i2v_low_noise_14B_Q4_K_M.gguf","displayName":"Wan 2.2 I2V A14B","recommendedOptions":{"vaeModelId":"companion:wan_2.1_vae.safetensors","textEncoderModelId":"companion:umt5-xxl-encoder-Q8_0.gguf"},"companionUrls":{"high-noise":"https://example.com/wan2.2_i2v_high_noise_14B_Q4_K_M.gguf","lora-low-noise":"https://example.com/wan2.2_i2v_low_noise_lightx2v_4step.safetensors","lora-high-noise":"https://example.com/wan2.2_i2v_high_noise_lightx2v_4step.safetensors"}}
+```
+
+An optional file is attached later with the existing attachment install (`id`
+of the model, `companionUrls`, no `url`): the primary is not downloaded again
+and the name, recommendations and classification stay unchanged unless sent.
+A role whose file is missing can receive a new file; a role whose file is
+present must be removed first with `models.companion.delete`.
+
+Animation entries in `models.list.result`, `models.install.completed` and
+`models.configure.completed` carry `id`, `name`, `displayName`, `fileName`,
+`bytes`, `explicitContent`, `recommendedOptions`, `companionFiles` (role to
+category-relative file name) and `missingFiles`: the roles among `primary`,
+`high-noise`, `lora-low-noise`, `lora-high-noise`, `vae` and `text-encoder` whose
+file or shared companion is absent. A model whose primary file is missing stays
+listed, with `bytes` 0, so that it can be reported and deleted. Paths are never
+returned.
+
+Deleting an animation model removes its primary and attachments and keeps the
+shared VAE and text-encoder companions. A companion assigned to an animation
+model, installed or being installed, cannot be deleted nor changed to another
+subtype. A model used by queued or active work, or receiving files, cannot be
+deleted nor lose a file. Display names and the explicit-content classification
+follow the image-generation rules. SDK `ModelInfo` exposes
+`ModelCategory::Animation` and `missingFiles`; `installModel` and
+`configureModel` accept the category.

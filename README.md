@@ -217,9 +217,9 @@ Use `--help` for all options. CLI and GUI manager connections are local-only and
 
 Image-generation models support generation and image.edit with uploaded reference images.
 
-Service models live in `$XDG_DATA_HOME/nukleus/models/`: image-generation files in `models/`, upscalers in `models/upscale/`, LLM files in `models/llm/`, and shared VAE/MMPROJ companions in `models/companion/`. Assignments use opaque IDs and never expose service paths or delete shared files with a primary. The manager accepts HTTPS sources and local imports, never overwriting installed weights. VAE accepts `.safetensors`, `.ckpt`, or `.gguf`; MMPROJ requires `.gguf`. Hugging Face `blob` links normalize to `resolve` URLs. SHA-256 verification is not supported. Legacy category-local attachments remain stored under `companions/<primary filename>/`; legacy VAE/LLM weights remain usable as fallbacks. modelType defaults to checkpoint when absent.
+Service models live in `$XDG_DATA_HOME/nukleus/models/`: image-generation files in `models/`, upscalers in `models/upscale/`, LLM files in `models/llm/`, animation (image-to-video) models in `models/animation/`, and shared VAE/MMPROJ/T5-XXL companions in `models/companion/`. Assignments use opaque IDs and never expose service paths or delete shared files with a primary. The manager accepts HTTPS sources and local imports, never overwriting installed weights. VAE accepts `.safetensors`, `.ckpt`, or `.gguf`; MMPROJ requires `.gguf`; T5-XXL accepts `.gguf` or `.safetensors`. Hugging Face `blob` links normalize to `resolve` URLs. SHA-256 verification is not supported. Legacy category-local attachments remain stored under `companions/<primary filename>/`; legacy VAE/LLM weights remain usable as fallbacks. modelType defaults to checkpoint when absent.
 
-`nukleusd --models-dir DIR --config-dir DIR` selects a split layout instead: weights in `models-dir/{generation,upscale,llm,companion}/` and the catalogue (`generation.json`, `upscale.json`, `llm.json`, `companion.json`, each in the former category `metadata.json` format, plus `model-routing.json`) in `config-dir/catalog/`. Both options are required together; the daemon creates the directories at startup. See `docs/plans/storage-layout.md`.
+`nukleusd --models-dir DIR --config-dir DIR` selects a split layout instead: weights in `models-dir/{generation,upscale,llm,companion,animation}/` and the catalogue (`generation.json`, `upscale.json`, `llm.json`, `companion.json`, `animation.json`, each in the former category `metadata.json` format, plus `model-routing.json`) in `config-dir/catalog/`. Both options are required together; the daemon creates the directories at startup. See `docs/plans/storage-layout.md`.
 
 The Linux installer moves legacy models from `$XDG_DATA_HOME/kira-canvas/models/` during an upgrade. It aborts without changing either directory if both model roots already exist.
 
@@ -395,7 +395,20 @@ and generation/edit prompts describing how to use the references.
 No extraction backend or binary payload is required. Existing user models and
 older identity files are retained on disk.
 
-Supported categories are Image generation, Upscaler, LLM and Companion.
+Supported categories are Image generation, Upscaler, LLM, Companion and Animation.
+
+## Animation models
+
+The Animation category (`animation`) keeps image-to-video models such as Wan 2.2
+I2V with every file they need. Its primary file is the low-noise diffusion
+model; the high-noise diffusion model and a speed-up LoRA for each stage are
+optional attachments (`high-noise`, `lora-low-noise`, `lora-high-noise`), and the
+VAE and the T5-XXL text encoder are shared companions selected by ID
+(`vaeModelId`, `textEncoderModelId`, both required). One `models.install`
+downloads the model and its attachments; optional files can be attached or
+removed later without downloading the model again. `models.list` reports the
+roles whose file or companion is absent in `missingFiles`. The Manager does not
+offer the category yet; see [the protocol](docs/protocol-v3.md#animation-models).
 Removed model directories and existing identity files are retained on disk.
 Rebuild SDK consumers and deploy the updated Service alongside the updated clients.
 
