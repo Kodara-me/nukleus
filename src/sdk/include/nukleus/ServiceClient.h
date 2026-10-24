@@ -56,6 +56,11 @@ public:
     // Preloads the server engine with the same model and parameters as later chat requests.
     QString loadChatModel(const QString& modelId, const QJsonObject& parameters = {});
     QString unloadChatModel();
+    // The service offers image.animate.
+    bool canAnimate() const;
+    // Submits an animation with an installed animation model and its start image (and end image, if any);
+    // progress arrives through generationProgressChanged and the video through animationFinished.
+    QString submitAnimation(const AnimationRequest &request);
 signals:
     void serviceStateChanged(Nukleus::ServiceConnectionState state, const QString &code, const QString &detail);
     void capabilitiesChanged(const Nukleus::ServiceCapabilities &capabilities);
@@ -76,6 +81,7 @@ signals:
     void promptEnhancementFinished(const Nukleus::PromptEnhancementResult& result);
     void chatFinished(const Nukleus::TextChatResult& result);
     void chatModelFinished(const Nukleus::ChatModelResult& result);
+    void animationFinished(const Nukleus::AnimationResult &result);
 private:
     QString defaultLlmModelId(const QString &role) const;
     struct PendingJob
@@ -88,6 +94,9 @@ private:
         QString chatModelOperation; // "text.chat.load" or "text.chat.unload".
         QString prompt;
         QString negativePrompt;
+        bool animation = false;
+        int frames = 0;
+        int fps = 0;
     };
     QString submit(ImageOperation operation, const QJsonObject& options, const QList<QByteArray>& inputImages);
     void authenticate();

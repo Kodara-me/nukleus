@@ -13,6 +13,7 @@ Nukleus::GenerationProgress SdCliProgressParser::begin(int samplingSteps)
     m_samplingStarted = false;
     m_currentStep.reset();
     m_hasProgress = true;
+    m_video = false;
     return {Nukleus::GenerationProgressStage::Preparing,
             std::nullopt,
             std::nullopt,
@@ -20,13 +21,92 @@ Nukleus::GenerationProgress SdCliProgressParser::begin(int samplingSteps)
             QObject::tr("Preparing generation…")};
 }
 
+Nukleus::GenerationProgress SdCliProgressParser::beginVideo(std::optional<int> totalSteps, bool twoPasses)
+{
+    auto progress = begin(totalSteps.value_or(0));
+    m_video = true;
+    m_expectedTotalSteps = totalSteps && *totalSteps > 0 ? totalSteps : std::nullopt;
+    m_completedPassSteps = 0;
+    m_passSteps = 0;
+    m_passIndex = 0;
+    m_twoPasses = twoPasses;
+    m_samplingDone = false;
+    progress.statusText = QObject::tr("Preparing animation…");
+    return progress;
+}
+
 std::optional<Nukleus::GenerationProgress> SdCliProgressParser::starting()
 {
-    return update(Nukleus::GenerationProgressStage::Starting, 2, QObject::tr("Starting image generation…"));
+    return update(Nukleus::GenerationProgressStage::Starting, 2,
+                  m_video ? QObject::tr("Starting animation…") : QObject::tr("Starting image generation…"));
+}
+
+int SdCliProgressParser::videoTotalSteps(int passSteps) const
+{
+    // sd-cli may adjust the step count (custom sigmas), so the counters raise the expected total when needed.
+    // Without an expected total, the second pass is estimated as long as the first until it starts.
+    const int remainingPass = !m_expectedTotalSteps && m_twoPasses && m_passIndex == 0 ? passSteps : 0;
+    return std::max(m_expectedTotalSteps.value_or(0), m_completedPassSteps + passSteps + remainingPass);
+}
+
+std::optional<Nukleus::GenerationProgress> SdCliProgressParser::processVideoLine(const QString &line)
+{
+    using Stage = Nukleus::GenerationProgressStage;
+    static const QRegularExpression loading(QStringLiteral("loading (high noise )?(diffusion )?model from"),
+                                            QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression generating(QStringLiteral("generate_video \\d+x\\d+x\\d+"));
+    if (loading.match(line).hasMatch())
+        return update(Stage::LoadingModel, 5, QObject::tr("Loading animation model…"));
+    // Printed once the conditions are ready, just before the first sampling step.
+    if (!m_samplingStarted && generating.match(line).hasMatch()) {
+        m_samplingStarted = true;
+        if (!m_expectedTotalSteps) return update(Stage::Sampling, 15, QObject::tr("Sampling video…"));
+        return update(Stage::Sampling, 15, QObject::tr("Sampling video %1 / %2").arg(1).arg(*m_expectedTotalSteps),
+                      1, *m_expectedTotalSteps);
+    }
+    if (m_samplingStarted && !m_samplingDone && line.contains(QStringLiteral("sampling(high noise) completed"))) {
+        m_completedPassSteps += m_passSteps;
+        m_passSteps = 0;
+        ++m_passIndex;
+        return std::nullopt;
+    }
+    if (m_samplingStarted && !m_samplingDone && line.contains(QStringLiteral("sampling completed"))) {
+        m_samplingDone = true;
+        m_completedPassSteps += m_passSteps;
+        m_passSteps = 0;
+        ++m_passIndex;
+        const int total = videoTotalSteps(0);
+        if (total <= 0) return update(Stage::Sampling, 90, QObject::tr("Sampling video…"));
+        return update(Stage::Sampling, 90, QObject::tr("Sampling video %1 / %2").arg(total).arg(total), total, total);
+    }
+    if (line.contains(QStringLiteral("generating latent video completed")))
+        return update(Stage::Decoding, 94, QObject::tr("Decoding video…"));
+    if (line.contains(QStringLiteral("save result video")))
+        return update(Stage::Saving, 99, QObject::tr("Saving video…"));
+    static const QRegularExpression samplingCounter(QStringLiteral("\\b(\\d+)\\s*/\\s*(\\d+)\\b"));
+    return videoSamplingProgress(samplingCounter.match(line));
+}
+
+std::optional<Nukleus::GenerationProgress> SdCliProgressParser::videoSamplingProgress(const QRegularExpressionMatch &match)
+{
+    // Counters before sampling (loading) or after it (VAE tiling) are not sampling steps.
+    if (!m_samplingStarted || m_samplingDone || !match.hasMatch()) return std::nullopt;
+    const int completedSteps = match.captured(1).toInt();
+    const int passSteps = match.captured(2).toInt();
+    if (passSteps <= 0 || completedSteps < 0 || completedSteps > passSteps) return std::nullopt;
+    m_passSteps = passSteps;
+    const int total = videoTotalSteps(passSteps);
+    const int completed = m_completedPassSteps + completedSteps;
+    // As for images, the step being sampled is shown and the percentage follows completed steps.
+    const int runningStep = std::min(completed + 1, total);
+    const int percentage = 15 + (completed * 75 + total / 2) / total;
+    return update(Nukleus::GenerationProgressStage::Sampling, percentage,
+                  QObject::tr("Sampling video %1 / %2").arg(runningStep).arg(total), runningStep, total);
 }
 
 std::optional<Nukleus::GenerationProgress> SdCliProgressParser::processLine(const QString &line)
 {
+    if (m_video) return processVideoLine(line);
     if (line.contains(QStringLiteral("loading model from"), Qt::CaseInsensitive)) {
         return update(Nukleus::GenerationProgressStage::LoadingModel, 5, QObject::tr("Loading image generation model…"));
     }
@@ -73,7 +153,7 @@ std::optional<Nukleus::GenerationProgress> SdCliProgressParser::processPartialLi
     // last step, so a counter is complete before its terminator arrives. Require the " -" that
     // follows it, so a number cut in half by a read is never taken.
     static const QRegularExpression completeCounter(QStringLiteral("\\b(\\d+)\\s*/\\s*(\\d+)\\s+-"));
-    return samplingProgress(completeCounter.match(text));
+    return m_video ? videoSamplingProgress(completeCounter.match(text)) : samplingProgress(completeCounter.match(text));
 }
 
 std::optional<Nukleus::GenerationProgress> SdCliProgressParser::samplingProgress(const QRegularExpressionMatch &match)
@@ -101,12 +181,14 @@ std::optional<Nukleus::GenerationProgress> SdCliProgressParser::samplingProgress
 
 std::optional<Nukleus::GenerationProgress> SdCliProgressParser::complete()
 {
-    return update(Nukleus::GenerationProgressStage::Complete, 100, QObject::tr("Generation complete"));
+    return update(Nukleus::GenerationProgressStage::Complete, 100,
+                  m_video ? QObject::tr("Animation complete") : QObject::tr("Generation complete"));
 }
 
 std::optional<Nukleus::GenerationProgress> SdCliProgressParser::failed()
 {
-    return update(Nukleus::GenerationProgressStage::Failed, m_percentage, QObject::tr("Generation failed"));
+    return update(Nukleus::GenerationProgressStage::Failed, m_percentage,
+                  m_video ? QObject::tr("Animation failed") : QObject::tr("Generation failed"));
 }
 
 std::optional<Nukleus::GenerationProgress> SdCliProgressParser::update(Nukleus::GenerationProgressStage stage,

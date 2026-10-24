@@ -131,6 +131,15 @@ private slots:
     void animationRequiresMatchingCompanions_R4_R5();
     void animationAttachesAndRemovesFiles_R6_R7();
     void animationDeletionKeepsSharedCompanions_R8();
+    void animateValidatesTheOptionTable_R3_R5();
+    void animateReadsSdCliHelp_R3();
+    void animateCountsBothSamplingPasses_R8();
+    void animateRunsSdCliWithModelFiles_R1_R2_R7_R10();
+    void animateResolvesOptionsAndLoras_R4_R6();
+    void animateRejectsInvalidRequestsBeforeUpload_R3_R6_R7();
+    void animateConfiguresModelDefaults_R5();
+    void animateReportsProgressAndFailures_R8_R9_R11();
+    void animateThroughSdk_R12();
 };
 
 void ServiceTest::persistsAndProtectsModelRouting()
@@ -2999,7 +3008,8 @@ void ServiceTest::animationRequiresMatchingCompanions_R4_R5()
         {{"vaeModelId", "companion:wan_vae.safetensors"}, {"textEncoderModelId", "companion:absent.gguf"}},
         {{"vaeModelId", "companion:wan_vae.safetensors"}, {"textEncoderModelId", ""}},
         {{"vaeModelId", "companion:wan_vae.safetensors"}},
-        {{"vaeModelId", "companion:wan_vae.safetensors"}, {"textEncoderModelId", "companion:umt5.gguf"}, {"steps", 4}}};
+        {{"vaeModelId", "companion:wan_vae.safetensors"}, {"textEncoderModelId", "companion:umt5.gguf"}, {"steps", 0}},
+        {{"vaeModelId", "companion:wan_vae.safetensors"}, {"textEncoderModelId", "companion:umt5.gguf"}, {"prompt", "x"}}};
     for (const auto &options : invalid) {
         request.recommendedOptions = options;
         QVERIFY2(!catalog.install(request, &error), qPrintable(QJsonDocument(options).toJson()));
@@ -3150,4 +3160,643 @@ void ServiceTest::animationDeletionKeepsSharedCompanions_R8()
     QVERIFY(restored.modelById("companion:umt5.gguf"));
     QVERIFY(restored.remove("companion:wan_vae.safetensors", &error));
     QVERIFY(restored.remove("companion:umt5.gguf", &error));
+}
+
+namespace
+{
+// Excerpt of sd-cli's --help, with its wrapped descriptions.
+const QByteArray SdCliHelpText =
+    "Generation Options:\n"
+    "  --steps <int>                            number of sample steps (default: 20)\n"
+    "  --high-noise-steps <int>                 (high noise) number of sample steps (default: -1 = auto)\n"
+    "  --fps <int>                              fps (default: 24)\n"
+    "  --type                                   weight type (examples: f32, f16, q4_0, q4_1, q5_0, q5_1, q8_0, q2_K, q3_K,\n"
+    "                                           q4_K). If not specified, the default is the type of the weight file\n"
+    "  --prediction                             prediction type override, one of [eps, v, edm_v, sd3_flow, flux_flow,\n"
+    "                                           sefi_flow]\n"
+    "  -s, --seed                               RNG seed (default: 42, use random seed for < 0)\n"
+    "  --sampling-method                        sampling method, one of [euler, euler_a, heun, dpm2, dpm++2s_a, dpm++2m,\n"
+    "                                           lms], default: euler for Flux/SD3/Wan, euler_a otherwise\n"
+    "  --high-noise-sampling-method             (high noise) sampling method, one of [euler, euler_a, heun, dpm2, dpm++2s_a,\n"
+    "                                           dpm++2m, lms], default: euler for Flux/SD3/Wan, euler_a otherwise\n"
+    "  --scheduler                              denoiser sigma scheduler, one of [discrete, karras, exponential, ays, gits,\n"
+    "                                           sgm_uniform, simple], alias: normal=discrete,\n"
+    "                                           default: model-specific\n"
+    "  --sigmas                                 custom sigma values for the sampler, comma-separated (e.g.,\n"
+    "                                           \"14.61,7.8,3.5,0.0\") or preset: qwen-image-2.1-turbo.\n"
+    "  --hires-sigmas                           custom sigma values for the highres fix second pass\n";
+
+const QByteArray PngImage = QByteArray::fromBase64(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1kAAAAASUVORK5CYII=");
+// A WebM file starts with an EBML header.
+const QByteArray VideoBytes = QByteArray("\x1a\x45\xdf\xa3", 4) + "fake webm video";
+
+// Stands in for sd-cli -M vid_gen: records its arguments, prints two sampling passes of two steps like sd-cli,
+// then writes the fixture video to the -o path. Files beside it switch it to failing or hanging.
+const QByteArray FakeVideoSdCli =
+    "#!/bin/sh\n"
+    "root=$(dirname \"$0\")\n"
+    "if [ \"$1\" = --help ]; then cat \"$root/help.txt\"; exit 0; fi\n"
+    "printf '%s\\n' \"$@\" > \"$root/sd-args\"\n"
+    "echo $$ > \"$root/pid\"\n"
+    "if [ -f \"$root/fail\" ]; then printf 'loading diffusion model from model\\n'; "
+    "printf 'fatal: the diffusion model could not be loaded\\n' >&2; exit 3; fi\n"
+    "out=; previous=\n"
+    "for argument in \"$@\"; do if [ \"$previous\" = -o ]; then out=\"$argument\"; fi; previous=\"$argument\"; done\n"
+    "printf 'loading diffusion model from model\\nloading high noise diffusion model from model\\n'\n"
+    "printf '\\r  |###   | 1/3 - 9.00MB/s\\033[K\\n'\n"
+    "printf 'sampling using euler method\\nsampling(high noise) using euler method\\ngenerate_video 480x832x41\\n'\n"
+    "printf '\\r  |=====>     | 1/2 - 1.00s/it\\033[K'\n"
+    "if [ -f \"$root/hang\" ]; then exec sleep 30; fi\n"
+    "printf '\\r  |==========>| 2/2 - 1.00s/it\\033[K\\n'\n"
+    "printf 'sampling(high noise) completed, taking 2.00s\\n'\n"
+    "printf '\\r  |=====>     | 1/2 - 1.00s/it\\033[K'\n"
+    "printf '\\r  |==========>| 2/2 - 1.00s/it\\033[K\\n'\n"
+    "printf 'sampling completed, taking 2.00s\\ngenerating latent video completed, taking 4.00s\\n'\n"
+    "printf '\\r  |#####| 3/3 - 1.00s/it\\033[K\\n'\n"
+    "cp \"$root/video.bin\" \"$out\"\n"
+    "printf \"save result video to '%s'\\n\" \"$out\"\n";
+
+bool writeFile(const QString &path, const QByteArray &bytes)
+{
+    QFile file(path);
+    return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
+}
+
+// A service on temporary storage with an installed Wan 2.2 style animation model (high-noise model and
+// both LoRAs) and the fake sd-cli first on PATH; tests never reach the real sd-cli or real models.
+class AnimationFixture
+{
+public:
+    QTemporaryDir directory;
+    TestHttpServer server{"weights"};
+    std::unique_ptr<NukleusDaemon> daemon;
+    QWebSocket socket;
+    QList<QJsonObject> messages;
+    QList<QByteArray> binaries;
+    const QString modelId = QStringLiteral("animation:wan_low.gguf");
+
+    AnimationFixture() : m_path(qgetenv("PATH")) {}
+    ~AnimationFixture() { qputenv("PATH", m_path); }
+
+    QString bin(const QString &name) const { return directory.filePath("bin/" + name); }
+    QString models() const { return directory.filePath("models"); }
+
+    bool start()
+    {
+        if (!directory.isValid() || !server.start() || !QDir().mkpath(bin({}))) return false;
+        QFile executable(bin("sd-cli"));
+        if (!writeFile(bin("sd-cli"), FakeVideoSdCli) || !writeFile(bin("help.txt"), SdCliHelpText)
+            || !writeFile(bin("video.bin"), VideoBytes)
+            || !executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner)) return false;
+        qputenv("PATH", bin({}).toUtf8() + ':' + m_path);
+        ModelCatalog catalog(models(), true);
+        if (!installCompanion(catalog, server.url("wan_vae.safetensors"), "vae")
+            || !installCompanion(catalog, server.url("umt5.gguf"), "t5xxl")) return false;
+        QSignalSpy finished(&catalog, &ModelCatalog::installFinished);
+        if (!catalog.install(animationRequest("wan", server.url("wan_low.gguf"),
+                {{"high-noise", server.url("wan_high.gguf").toString()},
+                 {"lora-low-noise", server.url("low_lightx2v.safetensors").toString()},
+                 {"lora-high-noise", server.url("high_lightx2v.safetensors").toString()}}))
+            || !(finished.count() == 1 || finished.wait(5000))) return false;
+        NukleusConfiguration configuration;
+        configuration.port = 0;
+        configuration.modelRootPath = models();
+        daemon = std::make_unique<NukleusDaemon>(configuration);
+        if (!daemon->start()) return false;
+        QObject::connect(&socket, &QWebSocket::textMessageReceived, &socket,
+                         [this](const QString &text) { messages.append(QJsonDocument::fromJson(text.toUtf8()).object()); });
+        QObject::connect(&socket, &QWebSocket::binaryMessageReceived, &socket,
+                         [this](const QByteArray &data) { binaries.append(data); });
+        socket.open(endpoint());
+        if (!QTest::qWaitFor([this] { return socket.state() == QAbstractSocket::ConnectedState; })) return false;
+        send({{"type", "authenticate"}, {"version", 3}});
+        if (!QTest::qWaitFor([this] { return messages.size() >= 2; })) return false;
+        messages.clear();
+        return true;
+    }
+
+    QUrl endpoint() const { return QUrl(QString("ws://127.0.0.1:%1").arg(daemon->serverPort())); }
+    void send(const QJsonObject &message) { socket.sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact))); }
+    void submit(const QString &jobId, const QJsonObject &options)
+    {
+        send({{"type", "submit"}, {"operation", "image.animate"}, {"jobId", jobId}, {"options", options}});
+    }
+    QJsonObject request(const QJsonObject &parameters = {}) const
+    {
+        QJsonObject options{{"modelId", modelId}, {"prompt", "she breathes slowly"}, {"seed", 7}};
+        if (!parameters.isEmpty()) options.insert("parameters", parameters);
+        return options;
+    }
+    QList<QJsonObject> of(const QString &jobId, const QString &type = {}) const
+    {
+        QList<QJsonObject> found;
+        for (const auto &message : messages)
+            if (message.value("jobId") == jobId && (type.isEmpty() || message.value("type") == type)) found.append(message);
+        return found;
+    }
+    // Waits for the job's next message among types, after the ones already seen.
+    QJsonObject waitFor(const QString &jobId, const QStringList &types, int timeout = 10000)
+    {
+        QJsonObject found;
+        QTest::qWaitFor([&] {
+            for (const auto &message : of(jobId))
+                if (types.contains(message.value("type").toString())) { found = message; return true; }
+            return false;
+        }, timeout);
+        return found;
+    }
+    // Submits a job, uploads its images when asked, and returns its result or error.
+    QJsonObject run(const QString &jobId, const QJsonObject &options, const QByteArray &endImage = {})
+    {
+        submit(jobId, options);
+        auto reply = waitFor(jobId, {"upload-required", "error"});
+        if (reply.value("type") != "upload-required") return reply;
+        socket.sendBinaryMessage(PngImage);
+        if (!endImage.isEmpty()) {
+            if (!QTest::qWaitFor([&] { return of(jobId, "upload-required").size() == 2; })) return {};
+            socket.sendBinaryMessage(endImage);
+        }
+        return waitFor(jobId, {"result", "error"});
+    }
+    QStringList arguments() const
+    {
+        QFile file(bin("sd-args"));
+        return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()).split('\n', Qt::SkipEmptyParts) : QStringList();
+    }
+    QString argument(const QString &flag) const
+    {
+        const auto list = arguments();
+        const auto index = list.indexOf(flag);
+        return index >= 0 && index + 1 < list.size() ? list.at(index + 1) : QString();
+    }
+
+private:
+    QByteArray m_path;
+};
+}
+
+void ServiceTest::animateValidatesTheOptionTable_R3_R5()
+{
+    using namespace Nukleus::Protocol;
+    // Every option has a unique key and a group of the specification's table.
+    QStringList keys;
+    for (const auto &option : animationOptions()) {
+        QVERIFY2(!keys.contains(option.key), qPrintable(option.key));
+        keys.append(option.key);
+        QVERIFY(QStringList({"Video", "Sampling", "LoRA", "Cache", "Memory", "VAE tiling"}).contains(option.group));
+    }
+    QCOMPARE(keys.size(), 67);
+    const QJsonObject valid{{"width", 480}, {"height", 832}, {"videoFrames", 41}, {"fps", 16}, {"container", "webm"},
+        {"compressionQuality", 90}, {"pingPong", false}, {"steps", 4}, {"highNoiseSteps", -1}, {"cfgScale", 1},
+        {"highNoiseCfgScale", 1.5}, {"sampler", "euler"}, {"sigmas", "1.0,0.5,0"}, {"flowShift", 3.0}, {"moeBoundary", 0.875},
+        {"skipLayers", QJsonArray{7, 8, 9}}, {"extraSampleArgs", "guidance_schedule=1"}, {"rng", "cuda"},
+        {"loraWeights", QJsonObject{{"lowNoise", 1}, {"highNoise", 0.5}}}, {"loraApplyMode", "at_runtime"},
+        {"cacheMode", "easycache"}, {"cacheOption", "threshold=0.25,reset=0"}, {"scmMask", "1,1,0"}, {"scmPolicy", "static"},
+        {"offloadToCpu", true}, {"flashAttention", "auto,te=off,vae=on"}, {"autoFit", "off"}, {"maxVram", 6},
+        {"backend", "clip=cpu,diffusion=vulkan0"}, {"threads", -1}, {"vaeFormat", "wan"}, {"vaeTiling", true},
+        {"vaeTileSize", "256x256"}, {"vaeRelativeTileSize", "0.5"}, {"vaeTileOverlap", 0.5}, {"extraTilingArgs", "temporal_tile_frames=4"}};
+    QString error;
+    QVERIFY2(validateAnimationParameters(valid, &error), qPrintable(error));
+    QVERIFY(validateAnimationParameters({{"maxVram", "cuda0=6,vulkan0=4"}}));
+    // R3: an unknown key, a wrong type or an out-of-range value, in each group.
+    const QList<QJsonObject> invalid{
+        {{"unknown", 1}},
+        {{"width", 100}}, {{"height", 8192}}, {{"videoFrames", "41"}}, {{"fps", 0}}, {{"container", "mkv"}}, {{"pingPong", 1}},
+        {{"steps", 0}}, {{"highNoiseSteps", 0}}, {{"cfgScale", 101}}, {{"sampler", 5}}, {{"sampler", "../euler"}},
+        {{"sigmas", "1,,2"}}, {{"skipLayers", QJsonArray{}}}, {{"skipLayers", QJsonArray{256}}}, {{"moeBoundary", 2}},
+        {{"extraSampleArgs", "no pair"}}, {{"rng", "gpu"}},
+        {{"loraWeights", QJsonObject{{"lowNoise", 11}}}}, {{"loraWeights", QJsonObject{{"middle", 1}}}}, {{"loraWeights", 1}},
+        {{"loraApplyMode", "never"}},
+        {{"cacheMode", "lru"}}, {{"scmMask", "1,2"}}, {{"scmPolicy", true}},
+        {{"threads", 2000}}, {{"offloadToCpu", "yes"}}, {{"backend", "/dev/dri"}}, {{"backend", QString(257, 'a')}},
+        {{"maxVram", 2048}}, {{"autoFit", "auto"}}, {{"vaeFormat", "sdxl"}},
+        {{"vaeTileOverlap", 2}}, {{"vaeTileSize", "big"}}, {{"vaeTiling", "on"}}};
+    for (const auto &options : invalid)
+        QVERIFY2(!validateAnimationParameters(options), QJsonDocument(options).toJson(QJsonDocument::Compact).constData());
+    // R5: a model default is any subset of the table, beside the two companion IDs.
+    auto defaults = AnimationOptions;
+    QVERIFY(validateModelOptions("animation", defaults));
+    defaults.insert("steps", 4);
+    defaults.insert("loraWeights", QJsonObject{{"highNoise", 1}});
+    QVERIFY(validateModelOptions("animation", defaults));
+    for (const auto &options : invalid) {
+        auto model = AnimationOptions;
+        for (auto it = options.begin(); it != options.end(); ++it) model.insert(it.key(), it.value());
+        QVERIFY(!validateModelOptions("animation", model));
+    }
+    QVERIFY(!validateModelOptions("animation", {{"steps", 4}}));
+    // Request-only options are never model defaults.
+    QVERIFY(!validateModelOptions("animation", {{"vaeModelId", "a"}, {"textEncoderModelId", "b"}, {"seed", 1}}));
+}
+
+void ServiceTest::animateReadsSdCliHelp_R3()
+{
+    const auto help = SdCliRunner::parseHelp(QString::fromUtf8(SdCliHelpText));
+    QCOMPARE(help.defaultFps, std::optional<int>(24));
+    QCOMPARE(help.defaultSteps, std::optional<int>(20));
+    QCOMPARE(help.choices.value("--sampling-method"), (QStringList{"euler", "euler_a", "heun", "dpm2", "dpm++2s_a", "dpm++2m", "lms"}));
+    QCOMPARE(help.choices.value("--high-noise-sampling-method"), help.choices.value("--sampling-method"));
+    QVERIFY(help.choices.value("--scheduler").contains("sgm_uniform"));
+    QCOMPARE(help.choices.value("--prediction").last(), QString("sefi_flow"));
+    QCOMPARE(help.choices.value("--type"), (QStringList{"f32", "f16", "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "q2_K", "q3_K", "q4_K"}));
+    QCOMPARE(help.choices.value("--sigmas"), QStringList{"qwen-image-2.1-turbo"});
+    using Nukleus::Protocol::validateAnimationParameters;
+    for (const auto &options : QList<QJsonObject>{{{"sampler", "dpm++2m"}}, {{"highNoiseSampler", "euler"}}, {{"scheduler", "simple"}},
+             {{"prediction", "flux_flow"}}, {{"weightType", "q8_0"}}, {{"sigmas", "qwen-image-2.1-turbo"}}, {{"sigmas", "1.5,0.5,0"}}})
+        QVERIFY(validateAnimationParameters(options, nullptr, &help.choices));
+    for (const auto &options : QList<QJsonObject>{{{"sampler", "dpm++3m"}}, {{"scheduler", "normal2"}}, {{"prediction", "x0"}},
+             {{"weightType", "q9_9"}}, {{"sigmas", "turbo"}}})
+        QVERIFY(!validateAnimationParameters(options, nullptr, &help.choices));
+}
+
+void ServiceTest::animateCountsBothSamplingPasses_R8()
+{
+    using Stage = Nukleus::GenerationProgressStage;
+    SdCliProgressParser parser;
+    QList<Nukleus::GenerationProgress> progress{parser.beginVideo(6)};
+    const auto feed = [&](const QString &line, bool partial = false) {
+        if (const auto value = partial ? parser.processPartialLine(line) : parser.processLine(line)) progress.append(*value);
+    };
+    if (const auto value = parser.starting()) progress.append(*value);
+    feed("loading diffusion model from '/models/wan_low.gguf'");
+    QCOMPARE(progress.last().stage, Stage::LoadingModel);
+    feed("  |###   | 1/3 - 9.00MB/s"); // Loading progress is not a sampling step.
+    feed("sampling using euler method");
+    feed("generate_video 480x832x41");
+    QCOMPARE(progress.last().stage, Stage::Sampling);
+    QCOMPARE(progress.last().currentStep, std::optional<int>(1));
+    QCOMPARE(progress.last().totalSteps, std::optional<int>(6));
+    // High-noise pass of 3 steps, then low-noise pass of 3 steps, counted as one run of 6.
+    for (const auto &stage : {QStringLiteral("sampling(high noise) completed, taking 3.00s"), QStringLiteral("sampling completed, taking 3.00s")}) {
+        for (int step = 1; step <= 3; ++step) {
+            feed(QStringLiteral("\r  |===> | %1/3 - 1.00s/it\x1b[K").arg(step), true);
+            feed(QStringLiteral("  |===> | %1/3 - 1.00s/it\x1b[K").arg(step));
+        }
+        feed(stage);
+    }
+    feed("generating latent video completed, taking 9.00s");
+    QCOMPARE(progress.last().stage, Stage::Decoding);
+    feed("  |#####| 2/4 - 1.00s/it"); // VAE tiling after sampling is not a sampling step.
+    QCOMPARE(progress.last().stage, Stage::Decoding);
+    feed("save result video to '/tmp/result.webm'");
+    QCOMPARE(progress.last().stage, Stage::Saving);
+    if (const auto value = parser.complete()) progress.append(*value);
+    QList<int> steps;
+    for (int i = 1; i < progress.size(); ++i) {
+        QVERIFY2(progress.at(i).percentage >= progress.at(i - 1).percentage, qPrintable(progress.at(i).statusText));
+        if (progress.at(i).currentStep && !steps.contains(*progress.at(i).currentStep)) steps.append(*progress.at(i).currentStep);
+        if (progress.at(i).totalSteps) QCOMPARE(progress.at(i).totalSteps, std::optional<int>(6));
+    }
+    QCOMPARE(steps, (QList<int>{1, 2, 3, 4, 5, 6}));
+    QCOMPARE(progress.last().percentage, 100);
+    QCOMPARE(progress.last().statusText, QString("Animation complete"));
+
+    // Without an expected total (a sigma preset), the counters give it; the second pass is assumed as long
+    // as the first until its counter arrives.
+    parser.beginVideo(std::nullopt, true);
+    QVERIFY(parser.processLine("generate_video 480x832x41"));
+    auto value = parser.processLine("  |===> | 1/2 - 1.00s/it");
+    QCOMPARE(value->currentStep, std::optional<int>(2));
+    QCOMPARE(value->totalSteps, std::optional<int>(4));
+    const int firstPass = parser.processLine("  |===> | 2/2 - 1.00s/it")->percentage;
+    QVERIFY(firstPass < 90);
+    QVERIFY(!parser.processLine("sampling(high noise) completed, taking 2.00s"));
+    value = parser.processLine("  |===> | 1/3 - 1.00s/it");
+    QCOMPARE(value->currentStep, std::optional<int>(4));
+    QCOMPARE(value->totalSteps, std::optional<int>(5));
+    QVERIFY(value->percentage >= firstPass);
+    value = parser.processLine("sampling completed, taking 3.00s");
+    QCOMPARE(value->currentStep, std::optional<int>(5));
+    QCOMPARE(value->percentage, 90);
+    // A single pass needs no estimate.
+    parser.beginVideo(std::nullopt, false);
+    QVERIFY(parser.processLine("generate_video 480x832x41"));
+    QCOMPARE(parser.processLine("  |===> | 1/3 - 1.00s/it")->totalSteps, std::optional<int>(3));
+}
+
+void ServiceTest::animateRunsSdCliWithModelFiles_R1_R2_R7_R10()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli fixture requires a POSIX shell.");
+#endif
+    AnimationFixture fixture;
+    QVERIFY(fixture.start());
+    // R1: the operation is listed once the sd-cli backend is ready.
+    fixture.send({{"type", "capabilities"}});
+    QTRY_VERIFY(!fixture.messages.isEmpty());
+    QVERIFY(fixture.messages.last().value("operations").toArray().contains("image.animate"));
+    fixture.messages.clear();
+
+    // R2, R10: a start image alone.
+    auto result = fixture.run("start-only", fixture.request());
+    QCOMPARE(result.value("type").toString(), QString("result"));
+    const auto uploads = fixture.of("start-only", "upload-required");
+    QCOMPARE(uploads.size(), 1);
+    QCOMPARE(uploads.first().value("inputRole").toString(), QString("start"));
+    QCOMPARE(uploads.first().value("inputIndex").toInt(), 0);
+    QVERIFY(!fixture.of("start-only", "queued").isEmpty());
+    QCOMPARE(result.value("operation").toString(), QString("image.animate"));
+    QCOMPARE(result.value("mimeType").toString(), QString("video/webm"));
+    QCOMPARE(result.value("frames").toInt(), 41); // As sd-cli generated them.
+    QCOMPARE(result.value("fps").toInt(), 24);    // sd-cli's default, from its --help.
+    QTRY_COMPARE(fixture.binaries.size(), 1);
+    QCOMPARE(fixture.binaries.last(), VideoBytes);
+    QVERIFY(!QJsonDocument(result).toJson().contains(fixture.directory.path().toUtf8()));
+    // R7: the model's own files and its companions, resolved by the service.
+    auto arguments = fixture.arguments();
+    QCOMPARE(arguments.mid(0, 2), (QStringList{"-M", "vid_gen"}));
+    const QDir models(fixture.models());
+    QCOMPARE(fixture.argument("--diffusion-model"), models.filePath("animation/wan_low.gguf"));
+    QCOMPARE(fixture.argument("--high-noise-diffusion-model"), models.filePath("animation/companions/wan_low.gguf/high-noise/wan_high.gguf"));
+    QCOMPARE(fixture.argument("--vae"), models.filePath("companion/wan_vae.safetensors"));
+    QCOMPARE(fixture.argument("--t5xxl"), models.filePath("companion/umt5.gguf"));
+    QCOMPARE(fixture.argument("--lora-model-dir"), models.filePath("animation/companions/wan_low.gguf/lora"));
+    QVERIFY(fixture.argument("-i").endsWith("/start.png"));
+    QVERIFY(!arguments.contains("--end-img"));
+    QCOMPARE(fixture.argument("-s"), QString("7"));
+    QVERIFY(fixture.argument("-o").endsWith("/result.webm"));
+
+    // R2: with hasEndImage, a second upload is the end image.
+    auto options = fixture.request({{"container", "webp"}, {"fps", 16}});
+    options.insert("hasEndImage", true);
+    const QByteArray jpeg = QByteArray("\xff\xd8\xff\xe0", 4) + "end frame";
+    result = fixture.run("with-end", options, jpeg);
+    QCOMPARE(result.value("type").toString(), QString("result"));
+    const auto endUpload = fixture.of("with-end", "upload-required").last();
+    QCOMPARE(endUpload.value("inputRole").toString(), QString("end"));
+    QCOMPARE(endUpload.value("inputIndex").toInt(), 1);
+    QVERIFY(fixture.argument("-i").endsWith("/start.png"));
+    QVERIFY(fixture.argument("--end-img").endsWith("/end.jpg"));
+    QVERIFY(fixture.argument("-o").endsWith("/result.webp"));
+    QCOMPARE(result.value("mimeType").toString(), QString("image/webp"));
+    QCOMPARE(result.value("fps").toInt(), 16);
+    QTRY_COMPARE(fixture.binaries.size(), 2);
+
+    // An end image that is not PNG or JPEG is refused.
+    fixture.submit("bad-end", options);
+    QVERIFY(!fixture.waitFor("bad-end", {"upload-required"}).isEmpty());
+    fixture.socket.sendBinaryMessage(PngImage);
+    QTRY_COMPARE(fixture.of("bad-end", "upload-required").size(), 2);
+    fixture.socket.sendBinaryMessage("GIF89a");
+    QCOMPARE(fixture.waitFor("bad-end", {"error"}).value("code").toString(), QString("invalid-image"));
+}
+
+void ServiceTest::animateResolvesOptionsAndLoras_R4_R6()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli fixture requires a POSIX shell.");
+#endif
+    AnimationFixture fixture;
+    QVERIFY(fixture.start());
+    auto defaults = AnimationOptions;
+    defaults.insert("steps", 4);
+    defaults.insert("cfgScale", 1);
+    defaults.insert("flowShift", 3.0);
+    defaults.insert("offloadToCpu", true);
+    defaults.insert("sampler", "euler");
+    defaults.insert("loraWeights", QJsonObject{{"highNoise", 0.75}});
+    fixture.send({{"type", "models.configure"}, {"id", fixture.modelId}, {"recommendedOptions", defaults}});
+    QTRY_VERIFY(!fixture.messages.isEmpty());
+    QCOMPARE(fixture.messages.last().value("type").toString(), QString("models.configure.completed"));
+
+    // R4: the request wins, the model fills what the request omits, and sd-cli's default applies to the rest.
+    auto result = fixture.run("resolved", fixture.request({{"steps", 6}, {"skipLayers", QJsonArray{7, 8}}, {"vaeTiling", false}}));
+    QCOMPARE(result.value("type").toString(), QString("result"));
+    QCOMPARE(fixture.argument("--steps"), QString("6"));
+    QCOMPARE(fixture.argument("--cfg-scale"), QString("1"));
+    QCOMPARE(fixture.argument("--flow-shift"), QString("3"));
+    QCOMPARE(fixture.argument("--sampling-method"), QString("euler"));
+    QCOMPARE(fixture.argument("--skip-layers"), QString("[7,8]"));
+    const auto arguments = fixture.arguments();
+    QVERIFY(arguments.contains("--offload-to-cpu"));
+    for (const auto &absent : {"--fps", "--video-frames", "--high-noise-steps", "--scheduler", "-W", "--vae-tiling", "--mmap", "-n"})
+        QVERIFY2(!arguments.contains(absent), absent);
+    // R6: both LoRAs apply to their stage; the request's weight wins, then the model's, else 1.
+    QCOMPARE(fixture.argument("-p"),
+             QString("she breathes slowly <lora:low_lightx2v:1> <lora:|high_noise|high_lightx2v:0.75>"));
+    QVERIFY(!QJsonDocument(result).toJson().contains("lora"));
+
+    result = fixture.run("low-off", fixture.request({{"loraWeights", QJsonObject{{"lowNoise", 0}, {"highNoise", 1.5}}}}));
+    QCOMPARE(result.value("type").toString(), QString("result"));
+    QCOMPARE(fixture.argument("-p"), QString("she breathes slowly <lora:|high_noise|high_lightx2v:1.5>"));
+    QVERIFY(fixture.arguments().contains("--lora-model-dir"));
+
+    result = fixture.run("no-lora", fixture.request({{"loraWeights", QJsonObject{{"lowNoise", 0}, {"highNoise", 0}}}}));
+    QCOMPARE(result.value("type").toString(), QString("result"));
+    QCOMPARE(fixture.argument("-p"), QString("she breathes slowly"));
+    QVERIFY(!fixture.arguments().contains("--lora-model-dir"));
+}
+
+void ServiceTest::animateRejectsInvalidRequestsBeforeUpload_R3_R6_R7()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli fixture requires a POSIX shell.");
+#endif
+    AnimationFixture fixture;
+    QVERIFY(fixture.start());
+    const auto rejected = [&](const QString &jobId, const QJsonObject &options, const QString &code) {
+        fixture.submit(jobId, options);
+        const auto reply = fixture.waitFor(jobId, {"error", "upload-required"});
+        return reply.value("type") == "error" && reply.value("code") == code && fixture.of(jobId, "upload-required").isEmpty();
+    };
+    int index = 0;
+    const auto id = [&index] { return QStringLiteral("invalid-%1").arg(++index); };
+    // R3: one per group, on the wire, before any upload.
+    for (const auto &parameters : QList<QJsonObject>{{{"unknown", 1}}, {{"width", 100}}, {{"videoFrames", "41"}},
+             {{"steps", 0}}, {{"cfgScale", "1"}}, {{"loraWeights", QJsonObject{{"lowNoise", 11}}}}, {{"cacheMode", "lru"}},
+             {{"threads", 2000}}, {{"backend", "a b"}}, {{"vaeTileOverlap", 2}},
+             {{"sampler", "dpm++3m"}}, {{"scheduler", "unknown"}}})
+        QVERIFY2(rejected(id(), fixture.request(parameters), "invalid-request"), QJsonDocument(parameters).toJson(QJsonDocument::Compact).constData());
+    auto options = fixture.request();
+    options.insert("strength", 0.5); // Parameters belong in options.parameters.
+    QVERIFY(rejected(id(), options, "invalid-request"));
+    for (const auto &[key, value] : {std::pair<QString, QJsonValue>{"prompt", "  "}, {"prompt", 1}, {"seed", -2}, {"seed", 1.5},
+             {"hasEndImage", "yes"}, {"negativePrompt", 3}, {"parameters", "steps=4"}}) {
+        options = fixture.request();
+        options.insert(key, value);
+        QVERIFY2(rejected(id(), options, "invalid-request"), qPrintable(key));
+    }
+    // R6: LoRAs come from the model, never from prompt tags.
+    options = fixture.request();
+    options.insert("prompt", "she waves <lora:other:1>");
+    QVERIFY(rejected(id(), options, "invalid-request"));
+    options = fixture.request();
+    options.insert("negativePrompt", "<LoRA:other:1>");
+    QVERIFY(rejected(id(), options, "invalid-request"));
+    // The model must be an installed animation model.
+    options = fixture.request();
+    options.insert("modelId", "image-generation:wan_low.gguf");
+    QVERIFY(rejected(id(), options, "model-unavailable"));
+    // Ping-pong and MP4 need the post-processing tool, which is not available yet.
+    QVERIFY(rejected(id(), fixture.request({{"pingPong", true}}), "backend-not-ready"));
+    QVERIFY(rejected(id(), fixture.request({{"container", "mp4"}}), "backend-not-ready"));
+    // R7: a model with a missing file fails before any upload.
+    QVERIFY(QFile::remove(QDir(fixture.models()).filePath("animation/companions/wan_low.gguf/high-noise/wan_high.gguf")));
+    QVERIFY(rejected(id(), fixture.request(), "model-files-missing"));
+    QVERIFY(!QFileInfo::exists(fixture.bin("sd-args")));
+}
+
+void ServiceTest::animateConfiguresModelDefaults_R5()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli fixture requires a POSIX shell.");
+#endif
+    AnimationFixture fixture;
+    QVERIFY(fixture.start());
+    const auto configure = [&](const QJsonObject &options) {
+        fixture.messages.clear();
+        fixture.send({{"type", "models.configure"}, {"id", fixture.modelId}, {"recommendedOptions", options}});
+        return QTest::qWaitFor([&] { return !fixture.messages.isEmpty(); }) ? fixture.messages.first() : QJsonObject();
+    };
+    auto subset = AnimationOptions;
+    subset.insert("videoFrames", 41);
+    subset.insert("highNoiseSteps", 4);
+    subset.insert("highNoiseSampler", "euler");
+    subset.insert("cacheMode", "easycache");
+    subset.insert("vaeTiling", true);
+    subset.insert("loraWeights", QJsonObject{{"lowNoise", 1}});
+    auto reply = configure(subset);
+    QCOMPARE(reply.value("type").toString(), QString("models.configure.completed"));
+    QCOMPARE(reply.value("model").toObject().value("recommendedOptions").toObject(), subset);
+    fixture.messages.clear();
+    fixture.send({{"type", "models.list"}});
+    QTRY_VERIFY(!fixture.messages.isEmpty());
+    QJsonObject listed;
+    for (const auto &category : fixture.messages.first().value("categories").toArray())
+        if (category.toObject().value("category") == "animation")
+            listed = category.toObject().value("models").toArray().first().toObject();
+    QCOMPARE(listed.value("recommendedOptions").toObject(), subset);
+    // Invalid defaults are refused, sd-cli names included, and the saved ones are kept.
+    for (const auto &[key, value] : {std::pair<QString, QJsonValue>{"steps", 0}, {"videoFrames", "41"}, {"prompt", "x"},
+             {"highNoiseSampler", "dpm++3m"}, {"seed", 1}}) {
+        auto options = subset;
+        options.insert(key, value);
+        reply = configure(options);
+        QCOMPARE(reply.value("type").toString(), QString("error"));
+        QCOMPARE(reply.value("code").toString(), QString("invalid-model-configure"));
+    }
+    QCOMPARE(ModelCatalog(fixture.models(), true).modelById(fixture.modelId)->recommendedOptions, subset);
+}
+
+void ServiceTest::animateReportsProgressAndFailures_R8_R9_R11()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli fixture requires a POSIX shell.");
+#endif
+    AnimationFixture fixture;
+    QVERIFY(fixture.start());
+    // R8: two passes of two steps count as one run of four.
+    auto result = fixture.run("progress", fixture.request({{"steps", 2}, {"highNoiseSteps", 2}}));
+    QCOMPARE(result.value("type").toString(), QString("result"));
+    QList<int> steps;
+    int percentage = 0;
+    QStringList stages;
+    for (const auto &message : fixture.of("progress", "progress")) {
+        const auto progress = message.value("progress").toObject();
+        QVERIFY(progress.value("percentage").toInt() >= percentage);
+        percentage = progress.value("percentage").toInt();
+        if (!stages.contains(progress.value("stage").toString())) stages.append(progress.value("stage").toString());
+        if (progress.contains("currentStep")) {
+            QCOMPARE(progress.value("totalSteps").toInt(), 4);
+            if (!steps.contains(progress.value("currentStep").toInt())) steps.append(progress.value("currentStep").toInt());
+        }
+    }
+    QCOMPARE(steps, (QList<int>{1, 2, 3, 4}));
+    QCOMPARE(stages, (QStringList{"preparing", "starting", "loading-model", "sampling", "decoding", "saving", "complete"}));
+    QCOMPARE(percentage, 100);
+
+    // R11: a failing sd-cli returns its command, exit code and stderr tail.
+    QVERIFY(writeFile(fixture.bin("fail"), "1"));
+    result = fixture.run("failing", fixture.request());
+    QCOMPARE(result.value("type").toString(), QString("error"));
+    QCOMPARE(result.value("code").toString(), QString("generation-failed"));
+    const auto detail = result.value("message").toString();
+    QVERIFY2(detail.contains("exit code 3"), qPrintable(detail));
+    QVERIFY(detail.contains("'-M' 'vid_gen'"));
+    QVERIFY(detail.contains("'she breathes slowly <lora:low_lightx2v:1> <lora:|high_noise|high_lightx2v:1>'"));
+    QVERIFY(detail.contains("fatal: the diffusion model could not be loaded"));
+    QVERIFY(QFile::remove(fixture.bin("fail")));
+
+    // R9: disconnecting drops the client's queued animation and stops its active one.
+    QVERIFY(writeFile(fixture.bin("hang"), "1"));
+    QVERIFY(QFile::remove(fixture.bin("pid")));
+    fixture.submit("active", fixture.request());
+    QVERIFY(!fixture.waitFor("active", {"upload-required"}).isEmpty());
+    fixture.socket.sendBinaryMessage(PngImage);
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(fixture.bin("pid")), 10000);
+    auto queued = fixture.request();
+    queued.insert("prompt", "second job");
+    fixture.submit("queued", queued);
+    QVERIFY(!fixture.waitFor("queued", {"upload-required"}).isEmpty());
+    fixture.socket.sendBinaryMessage(PngImage);
+    QVERIFY(!fixture.waitFor("queued", {"queue-position"}).isEmpty());
+    QFile pidFile(fixture.bin("pid"));
+    QVERIFY(pidFile.open(QIODevice::ReadOnly));
+    const QString process = "/proc/" + QString::fromUtf8(pidFile.readAll()).trimmed();
+    QVERIFY(QFileInfo::exists(process));
+    fixture.socket.close();
+    QTRY_VERIFY_WITH_TIMEOUT(!QFileInfo::exists(process), 10000);
+    QVERIFY(QFile::remove(fixture.bin("hang")));
+    QTest::qWait(500);
+    QVERIFY(!fixture.arguments().contains("second job"));
+}
+
+void ServiceTest::animateThroughSdk_R12()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The fake sd-cli fixture requires a POSIX shell.");
+#endif
+    AnimationFixture fixture;
+    QVERIFY(fixture.start());
+    Nukleus::ServiceClient client;
+    client.setConfiguration(fixture.endpoint(), {});
+    QVERIFY(!client.canAnimate());
+    client.connectToService();
+    QTRY_VERIFY(client.modelListAvailable());
+    QVERIFY(client.canAnimate());
+    QVERIFY(client.capabilities().imageAnimate);
+    QList<Nukleus::GenerationProgress> progress;
+    QList<Nukleus::AnimationResult> results;
+    connect(&client, &Nukleus::ServiceClient::generationProgressChanged, this,
+            [&](const QString &, const Nukleus::GenerationProgress &value) { progress.append(value); });
+    connect(&client, &Nukleus::ServiceClient::animationFinished, this,
+            [&](const Nukleus::AnimationResult &result) { results.append(result); });
+    Nukleus::AnimationRequest request;
+    request.modelId = fixture.modelId;
+    request.prompt = "she raises an arm";
+    request.negativePrompt = "blurry";
+    request.seed = 42;
+    request.startImage = PngImage;
+    request.endImage = PngImage;
+    request.parameters = {{"steps", 2}, {"highNoiseSteps", 2}, {"fps", 16}, {"videoFrames", 41}};
+    // Requests the client can tell are invalid are not sent.
+    auto invalid = request;
+    invalid.startImage.clear();
+    QVERIFY(client.submitAnimation(invalid).isEmpty());
+    invalid = request;
+    invalid.modelId = "image-generation:test.gguf";
+    QVERIFY(client.submitAnimation(invalid).isEmpty());
+    const QString jobId = client.submitAnimation(request);
+    QVERIFY(!jobId.isEmpty());
+    QTRY_COMPARE_WITH_TIMEOUT(results.size(), 1, 10000);
+    QVERIFY(results.first().succeeded);
+    QCOMPARE(results.first().jobId, jobId);
+    QCOMPARE(results.first().videoData, VideoBytes);
+    QCOMPARE(results.first().mimeType, QString("video/webm"));
+    QCOMPARE(results.first().frames, 41);
+    QCOMPARE(results.first().fps, 16);
+    QVERIFY(std::any_of(progress.cbegin(), progress.cend(), [](const auto &value) {
+        return value.stage == Nukleus::GenerationProgressStage::Sampling && value.currentStep == 4 && value.totalSteps == 4;
+    }));
+    QCOMPARE(fixture.argument("-n"), QString("blurry"));
+    QCOMPARE(fixture.argument("-s"), QString("42"));
+    QVERIFY(fixture.arguments().contains("--end-img"));
+
+    // A failure reaches animationFinished too.
+    QVERIFY(writeFile(fixture.bin("fail"), "1"));
+    QVERIFY(!client.submitAnimation(request).isEmpty());
+    QTRY_COMPARE_WITH_TIMEOUT(results.size(), 2, 10000);
+    QVERIFY(!results.last().succeeded);
+    QCOMPARE(results.last().errorCode, QString("generation-failed"));
 }

@@ -102,6 +102,32 @@ struct ImageGenerationRequest
     QString qualityId;
 };
 
+// An image.animate request: a short video from a start image, and optionally an end image.
+struct AnimationRequest
+{
+    QString modelId; // An installed animation model.
+    QString prompt;  // Nonblank; LoRA tags are not accepted (see loraWeights).
+    QString negativePrompt;
+    int seed = -1; // -1 picks a random seed.
+    QByteArray startImage; // PNG or JPEG.
+    QByteArray endImage;   // Optional PNG or JPEG.
+    // Options of image.animate's table (Nukleus::Protocol::animationOptions()); each one left out uses
+    // the model's default, else sd-cli's own.
+    QJsonObject parameters;
+};
+
+struct AnimationResult
+{
+    QString jobId;
+    bool succeeded = false;
+    QByteArray videoData;
+    QString mimeType; // video/webm, image/webp or video/x-msvideo.
+    int frames = 0;
+    int fps = 0;
+    QString errorCode;
+    QString message;
+};
+
 struct ImageUpscaleRequest
 {
     QByteArray sourceImageData;
@@ -133,6 +159,7 @@ struct ServiceCapabilities
     QStringList textChatEngines; // Ready text.chat engines: "server", "completion".
     bool chatModelControl = false; // text.chat.load and text.chat.unload.
     bool textChatImages = false; // text.chat accepts images for LLMs with an MMPROJ.
+    bool imageAnimate = false; // image.animate turns an image into a video with an animation model.
 };
 
 // Result of text.chat.load (load true) or text.chat.unload (load false).
@@ -220,6 +247,8 @@ Q_DECLARE_METATYPE(Nukleus::ModelInstall)
 Q_DECLARE_METATYPE(Nukleus::ImageGenerationRequest)
 Q_DECLARE_METATYPE(Nukleus::ImageUpscaleRequest)
 Q_DECLARE_METATYPE(Nukleus::ImageJobResult)
+Q_DECLARE_METATYPE(Nukleus::AnimationRequest)
+Q_DECLARE_METATYPE(Nukleus::AnimationResult)
 Q_DECLARE_METATYPE(Nukleus::PromptEnhancementRequest)
 Q_DECLARE_METATYPE(Nukleus::PromptEnhancementResult)
 Q_DECLARE_METATYPE(Nukleus::TextChatRequest)

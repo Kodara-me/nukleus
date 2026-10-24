@@ -3,7 +3,9 @@
 #include <QDebug>
 #include <QFileInfo>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QTimer>
+#include <nukleus/ModelOptions.h>
 
 #include <algorithm>
 
@@ -90,6 +92,52 @@ QString SdCliRunner::executablePath() const
     return m_executablePath;
 }
 
+SdCliHelp SdCliRunner::parseHelp(const QString &help)
+{
+    const QStringList lines = help.split(QLatin1Char('\n'));
+    // An option's description: its own line and the indented continuation lines that follow it.
+    const auto description = [&lines](const QString &flag) -> QString {
+        const QRegularExpression start(QStringLiteral("^\\s*(-\\w, )?%1(\\s|$)").arg(QRegularExpression::escape(flag)));
+        for (qsizetype i = 0; i < lines.size(); ++i) {
+            if (!start.match(lines.at(i)).hasMatch()) continue;
+            QString text = lines.at(i);
+            for (qsizetype next = i + 1; next < lines.size(); ++next) {
+                const QString line = lines.at(next).trimmed();
+                if (line.isEmpty() || line.startsWith(QLatin1Char('-'))) break;
+                text += QLatin1Char(' ') + line;
+            }
+            return text.simplified();
+        }
+        return {};
+    };
+    const auto names = [](const QString &list) {
+        QStringList result;
+        for (QString name : list.split(QLatin1Char(','), Qt::SkipEmptyParts)) {
+            name = name.trimmed();
+            while (name.endsWith(QLatin1Char('.'))) name.chop(1);
+            if (!name.isEmpty()) result.append(name);
+        }
+        return result;
+    };
+    static const QRegularExpression oneOf(QStringLiteral("one of \\[([^\\]]*)\\]"));
+    static const QRegularExpression examples(QStringLiteral("examples: ([^)]*)\\)"));
+    static const QRegularExpression presets(QStringLiteral("preset: (.*)$"));
+    static const QRegularExpression numberDefault(QStringLiteral("\\(default: (\\d+)\\)"));
+    SdCliHelp result;
+    for (const QString &flag : Nukleus::Protocol::animationHelpChoiceFlags()) {
+        const QString text = description(flag);
+        QRegularExpressionMatch match = oneOf.match(text);
+        if (!match.hasMatch()) match = examples.match(text);
+        if (!match.hasMatch()) match = presets.match(text);
+        if (match.hasMatch()) result.choices.insert(flag, names(match.captured(1)));
+    }
+    const auto fps = numberDefault.match(description(QStringLiteral("--fps")));
+    if (fps.hasMatch()) result.defaultFps = fps.captured(1).toInt();
+    const auto steps = numberDefault.match(description(QStringLiteral("--steps")));
+    if (steps.hasMatch()) result.defaultSteps = steps.captured(1).toInt();
+    return result;
+}
+
 void SdCliRunner::runHelp()
 {
     start(RequestType::Help, {QStringLiteral("--help")});
@@ -140,6 +188,24 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
     emit generationProgressChanged(m_progressParser.begin(request.steps));
     logGenerationStart(request, arguments);
     return start(RequestType::Generation, arguments, request.outputPath);
+}
+
+bool SdCliRunner::runVideo(const QStringList &arguments, const QString &outputPath, std::optional<int> totalSteps, bool twoPasses)
+{
+    if (m_requestType != RequestType::None || m_executablePath.isEmpty()) {
+        return false;
+    }
+
+    m_memoryFailure = false;
+    m_standardOutput.clear();
+    m_standardError.clear();
+    m_pendingStandardOutput.clear();
+    m_pendingStandardError.clear();
+    m_generationElapsed.start();
+    emit generationProgressChanged(m_progressParser.beginVideo(totalSteps, twoPasses));
+    qInfo().noquote() << QStringLiteral("[Nukleus][sd-cli] Starting image-to-video generation");
+    qInfo().noquote() << QStringLiteral("[Nukleus][sd-cli] Command:\n%1").arg(commandLine(arguments));
+    return start(RequestType::Generation, arguments, outputPath);
 }
 
 bool SdCliRunner::runUpscale(const QStringList &arguments, const QString &outputPath)

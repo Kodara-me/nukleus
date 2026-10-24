@@ -254,7 +254,7 @@ when provided, the object must contain exactly the category's complete fields:
 | llm-chat | `temperature`: number 0–2; `topP`: number >0 and ≤1; `contextLength`: integer 256–131072; `maxTokens`: integer 1–contextLength; optional booleans `canBeTextEncoder`, `defaultPromptEnhancer`, `defaultPromptTranslator` and `defaultImageDescriber` (default false) |
 | upscaler | No options: empty object only. No explicit-content classification. |
 | companion | `subtype`: exactly `vae`, `mmproj` or `t5xxl`; MMPROJ requires GGUF; T5-XXL requires GGUF or safetensors. |
-| animation | Required for new installs: `vaeModelId` (an installed `vae` companion) and `textEncoderModelId` (an installed `t5xxl` companion), both nonblank strings, and no other field. |
+| animation | Required for new installs: `vaeModelId` (an installed `vae` companion) and `textEncoderModelId` (an installed `t5xxl` companion), both nonblank strings; plus any subset of the [image.animate option table](#animating-an-image-imageanimate) as model defaults, validated as in requests. Unlike other recommendations, these defaults are applied to `image.animate` jobs. |
 
 Samplers: empty (Automatic), `euler`, `euler_a`, `heun`, `dpm2`, `dpm++2m`, `lcm`.
 Schedulers: empty (Automatic), `discrete`, `karras`, `exponential`, `ays`,
@@ -579,3 +579,135 @@ deleted nor lose a file. Display names and the explicit-content classification
 follow the image-generation rules. SDK `ModelInfo` exposes
 `ModelCategory::Animation` and `missingFiles`; `installModel` and
 `configureModel` accept the category.
+
+## Animating an image (image.animate)
+
+`capabilities.operations` includes `image.animate` when the sd-cli backend is
+ready. A client submits an installed animation model, a nonblank prompt and a
+PNG or JPEG start image, and optionally an end image; the service runs
+`sd-cli -M vid_gen` and returns a short video.
+
+```json
+{"type":"submit","operation":"image.animate","jobId":"anim-1","options":{"modelId":"animation:wan2.2_i2v_low_noise_14B_Q4_K_M.gguf","prompt":"she breathes slowly","seed":-1,"hasEndImage":false,"parameters":{"videoFrames":41,"steps":4,"highNoiseSteps":4,"cfgScale":1,"highNoiseCfgScale":1}}}
+{"type":"upload-required","jobId":"anim-1","inputRole":"start","inputIndex":0}
+{"type":"queued","jobId":"anim-1"}
+{"type":"running","jobId":"anim-1"}
+{"type":"progress","jobId":"anim-1","progress":{"stage":"sampling","currentStep":5,"totalSteps":8,"percentage":61,"statusText":"Sampling video 5 / 8"}}
+{"type":"result","jobId":"anim-1","operation":"image.animate","mimeType":"video/webm","frames":41,"fps":16}
+```
+
+The result message is followed by one binary frame holding the video.
+
+**Request.** `options` holds `modelId` (an installed `animation` model),
+`prompt` (required, nonblank), `negativePrompt` (string), `seed` (integer -1 to
+2147483647, default -1, random), `hasEndImage` (boolean, default false) and
+`parameters` (object). Every other option sits in `parameters`. A prompt or
+negative prompt containing `<lora:` is rejected: the model's LoRAs are applied
+by the service (below). An unknown key, a wrong type or an out-of-range value
+fails with `invalid-request` before any upload is requested; a model whose
+`missingFiles` is not empty fails with `model-files-missing`, and an unknown
+model with `model-unavailable`. `pingPong` true and `container` `mp4` fail with
+`backend-not-ready` until the post-processing tool is supported.
+
+**Uploads.** The service sends `upload-required` with `inputRole` `start` and
+`inputIndex` 0, then, with `hasEndImage` true, `inputRole` `end` and `inputIndex`
+1. Each answer is one binary frame holding a PNG or JPEG image; any other format
+fails with `invalid-image`. The start image is passed as `-i`, the end image as
+`--end-img`.
+
+**Options.** The `highNoise…` options apply to the high-noise pass; the others
+to the low-noise (main) pass. The table lives in the Protocol target
+(`Nukleus::Protocol::animationOptions()`), shared by request validation and
+model defaults.
+
+| Group | Option | sd-cli flag | Accepted values |
+| --- | --- | --- | --- |
+| Video | `width`, `height` | `-W`, `-H` | integers 64–4096, multiples of 16 |
+| Video | `videoFrames` | `--video-frames` | integer 1–1024 |
+| Video | `fps` | `--fps` | integer 1–120 |
+| Video | `container` | output extension | `webm` (default), `webp`, `avi`, `mp4` (not available yet) |
+| Video | `compressionQuality` | `--compression-quality` | integer 0–100 |
+| Video | `pingPong` | none | boolean (true is not available yet) |
+| Sampling | `steps`, `highNoiseSteps` | `--steps`, `--high-noise-steps` | integer 1–200; `highNoiseSteps` also -1 (automatic split) |
+| Sampling | `cfgScale`, `highNoiseCfgScale` | `--cfg-scale`, `--high-noise-cfg-scale` | finite number 0–100 |
+| Sampling | `imgCfgScale`, `highNoiseImgCfgScale` | `--img-cfg-scale`, `--high-noise-img-cfg-scale` | finite number 0–100 |
+| Sampling | `guidance`, `highNoiseGuidance` | `--guidance`, `--high-noise-guidance` | finite number 0–100 |
+| Sampling | `sampler`, `highNoiseSampler` | `--sampling-method`, `--high-noise-sampling-method` | a method listed by sd-cli's `--help` |
+| Sampling | `scheduler` | `--scheduler` | a scheduler listed by sd-cli's `--help` |
+| Sampling | `sigmas` | `--sigmas` | comma-separated finite numbers, or a preset listed by `--help` |
+| Sampling | `eta`, `highNoiseEta` | `--eta`, `--high-noise-eta` | finite number 0–10 |
+| Sampling | `flowShift` | `--flow-shift` | finite number 0–100 |
+| Sampling | `moeBoundary` | `--moe-boundary` | finite number 0–1 |
+| Sampling | `strength` | `--strength` | finite number 0–1 |
+| Sampling | `slgScale`, `highNoiseSlgScale` | `--slg-scale`, `--high-noise-slg-scale` | finite number 0–100 |
+| Sampling | `skipLayers`, `highNoiseSkipLayers` | `--skip-layers`, `--high-noise-skip-layers` | array of 1–64 integers 0–255 |
+| Sampling | `skipLayerStart`, `skipLayerEnd`, `highNoiseSkipLayerStart`, `highNoiseSkipLayerEnd` | matching `--…skip-layer-start/end` | finite number 0–1 |
+| Sampling | `extraSampleArgs` | `--extra-sample-args` | key=value list |
+| Sampling | `rng`, `samplerRng` | `--rng`, `--sampler-rng` | `std_default`, `cuda`, `cpu` |
+| Sampling | `prediction` | `--prediction` | a type listed by `--help` |
+| LoRA | `loraWeights` | `<lora:…:W>` tags | object with optional `lowNoise`, `highNoise`: finite numbers -10–10 |
+| LoRA | `loraApplyMode` | `--lora-apply-mode` | `auto`, `immediately`, `at_runtime` |
+| Cache | `cacheMode` | `--cache-mode` | `easycache`, `ucache`, `dbcache`, `taylorseer`, `cache-dit`, `spectrum` |
+| Cache | `cacheOption` | `--cache-option` | key=value list |
+| Cache | `scmMask`, `scmPolicy` | `--scm-mask`, `--scm-policy` | comma-separated 0/1; `dynamic` or `static` |
+| Memory | `offloadToCpu`, `mmap`, `eagerLoad`, `disablePrefetch`, `disableSegmentedCompute` | matching flags | boolean (flag passed when true) |
+| Memory | `flashAttention`, `convDirect` | `--flash-attn`, `--conv-direct` | `on`, `off`, `auto` or module assignments |
+| Memory | `autoFit`, `batchedCfg` | `--auto-fit`, `--batched-cfg` | `on`, `off` |
+| Memory | `maxVram` | `--max-vram` | number of GiB (-1024–1024) or device assignments |
+| Memory | `backend`, `paramsBackend`, `splitMode` | `--backend`, `--params-backend`, `--split-mode` | device or module assignments |
+| Memory | `threads` | `-t` | integer -1–1024 |
+| Memory | `conditioningCacheSize` | `--conditioning-cache-size` | integer 0–64 |
+| Memory | `weightType` | `--type` | a type listed by `--help` |
+| Memory | `vaeFormat` | `--vae-format` | `auto`, `flux`, `sd3`, `flux2`, `wan` |
+| Memory | `linearScale`, `attnScale` | `--linear-scale`, `--attn-scale` | finite number 0–100 |
+| VAE tiling | `vaeTiling`, `temporalTiling` | `--vae-tiling`, `--temporal-tiling` | boolean (flag passed when true) |
+| VAE tiling | `vaeTileSize`, `vaeRelativeTileSize` | `--vae-tile-size`, `--vae-relative-tile-size` | `S` or `WxH` |
+| VAE tiling | `vaeTileOverlap` | `--vae-tile-overlap` | finite number 0–1 |
+| VAE tiling | `extraTilingArgs` | `--extra-tiling-args` | key=value list |
+
+Free-form strings (key=value lists, assignments, sizes) are at most 256 bytes of
+`[A-Za-z0-9_.,=:&+-]`, so none can name a file or a network endpoint; each is
+passed as one argument. Names listed by sd-cli's `--help` are checked against
+the installed sd-cli, read once by the service. Options that name files or
+endpoints, or belong to other sd-cli modes, are not offered.
+
+**Defaults.** For each option absent from the request, the service uses the
+model's value from `recommendedOptions`; when the model has none either, the
+sd-cli flag is omitted so that sd-cli's own default applies. Only `container`
+(`webm`) and `seed` (-1) have service defaults. This is an exception, for
+`image.animate` only, to the rule that recommended options are never applied to
+jobs. `loraWeights` resolves per stage.
+
+**Files and LoRAs.** The service passes the model's files (`--diffusion-model`,
+`--high-noise-diffusion-model` when attached), its shared companions (`--vae`,
+`--t5xxl`) and, when a LoRA applies, `--lora-model-dir`. Each attached LoRA
+applies to its stage with the weight from the request's `loraWeights`, else the
+model's, else 1: the service appends `<lora:NAME:W>` (low-noise) or
+`<lora:|high_noise|NAME:W>` (high-noise) to the prompt it passes to sd-cli,
+where NAME is the LoRA file name without its extension. A weight of 0 leaves
+the LoRA out. Results never echo the tags.
+
+**Queue, progress and cancellation.** Animation jobs share the FIFO with image
+jobs (`queued`, `queue-position`, `running`) and unload llama-server first.
+`progress` messages follow the run (`preparing`, `starting`, `loading-model`,
+`sampling`, `decoding`, `saving`, `complete`). The sampling step counts both
+noise passes, from 1 to their total (`steps` plus `highNoiseSteps` when both
+are set, `steps` split between the passes when `highNoiseSteps` is -1, the
+numeric `sigmas` count minus one), with a percentage that never decreases;
+without a `steps` option, sd-cli's default from `--help` is used. When the
+submitting client disconnects, its queued animations are dropped and its active
+one is stopped, as for image jobs; there is no per-job cancel message.
+
+**Result.** `result` carries `operation` `image.animate`, `mimeType`
+(`video/webm`, `image/webp` or `video/x-msvideo`), `frames` (the frame count
+sd-cli generated, which it may align to the model) and `fps` (the option, else
+sd-cli's default from `--help`), followed by one binary frame. A failure returns
+`generation-failed` with the sd-cli command, its exit code and up to 4096
+trailing stderr characters, as for image generation.
+
+**SDK.** `ServiceClient::canAnimate()` reports the capability
+(`ServiceCapabilities::imageAnimate`). `submitAnimation(AnimationRequest)` sends
+the model ID, prompts, seed, start image, optional end image and a `QJsonObject`
+of parameters, and uploads the images when asked. Progress arrives through
+`generationProgressChanged`; `animationFinished(AnimationResult)` carries the
+video bytes, `mimeType`, `frames` and `fps`, or the error code and message.

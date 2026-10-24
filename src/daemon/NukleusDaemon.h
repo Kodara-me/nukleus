@@ -4,6 +4,7 @@
 #include <nukleus/ServiceProtocol.h>
 
 #include "LlamaServerRunner.h"
+#include "SdCliRunner.h"
 
 #include <QElapsedTimer>
 #include <QHostAddress>
@@ -58,7 +59,18 @@ public:
     quint16 serverPort() const;
 
 private:
-    enum class Operation { Generate, Upscale, Edit, PromptEnhance, TextChat, TextChatLoad, TextChatUnload };
+    enum class Operation { Generate, Upscale, Edit, PromptEnhance, TextChat, TextChatLoad, TextChatUnload, Animate };
+    // An image.animate job's sd-cli run, resolved at submission; the uploads and output complete its arguments.
+    struct AnimationPlan
+    {
+        QStringList arguments;
+        QStringList files; // Model files the job reads, protected from deletion while it is pending.
+        std::optional<int> totalSteps;
+        bool twoPasses = false; // A high-noise pass runs before the low-noise one.
+        QString container;
+        int frames = 0;
+        int fps = 0;
+    };
     // A routed generation's submitted prompts, returned without preset prefixes.
     struct RoutedPrompts
     {
@@ -100,6 +112,12 @@ private:
     QStringList builtInChatTemplates(const QString &executable) const;
     void submitTextChat(QWebSocket* socket, const QJsonObject& message, Operation operation);
     void submitTextChatUnload(QWebSocket* socket, const QJsonObject& message);
+    void submitAnimation(QWebSocket *socket, const QJsonObject &message);
+    void sendAnimationResult(const Job &job, const SdCliGenerationResult &result);
+    // sd-cli's --help, read once per executable; nullopt when it cannot be read.
+    std::optional<SdCliHelp> sdCliHelp() const;
+    // Checks the names of animation options listed by sd-cli's --help (samplers, schedulers, ...).
+    bool validAnimationNames(const QJsonObject &parameters, QString *error) const;
     void startTextChat();
     void handleLlmFinished(int exitCode, QProcess::ExitStatus status);
     void handleLlamaServerFinished(const LlamaServerReply &reply);
@@ -130,4 +148,5 @@ private:
     std::unique_ptr<LlamaServerRunner> m_llamaServer;
     QElapsedTimer m_activeJobClock;
     mutable QHash<QString, QStringList> m_chatTemplates; // Built-in chat template names per llama.cpp executable.
+    mutable std::optional<SdCliHelp> m_sdCliHelp;
 };

@@ -351,6 +351,31 @@ QString ServiceClient::unloadChatModel()
     return jobId;
 }
 
+bool ServiceClient::canAnimate() const
+{
+    return m_authenticated && m_capabilities.imageAnimate;
+}
+
+QString ServiceClient::submitAnimation(const AnimationRequest &request)
+{
+    if (!canAnimate() || !containsModel(request.modelId, ModelCategory::Animation)
+        || request.prompt.trimmed().isEmpty() || request.startImage.isEmpty()) return {};
+    const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    PendingJob job;
+    job.animation = true;
+    // The service asks for the start image (index 0), then the end image (index 1).
+    job.inputImages = {request.startImage};
+    if (!request.endImage.isEmpty()) job.inputImages.append(request.endImage);
+    m_pendingJobs.insert(jobId, job);
+    QJsonObject options{{"modelId", request.modelId}, {"prompt", request.prompt}, {"seed", request.seed},
+                        {"hasEndImage", !request.endImage.isEmpty()}};
+    if (!request.negativePrompt.isEmpty()) options.insert("negativePrompt", request.negativePrompt);
+    if (!request.parameters.isEmpty()) options.insert("parameters", request.parameters);
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"type", "submit"}, {"jobId", jobId}, {"operation", "image.animate"}, {"options", options}}).toJson(QJsonDocument::Compact)));
+    return jobId;
+}
+
 QString ServiceClient::submit(ImageOperation operation, const QJsonObject &options, const QList<QByteArray> &inputImages)
 {
     QString modelId = options.value("modelId").toString();
@@ -403,7 +428,7 @@ void ServiceClient::handleTextMessage(const QString &message)
             operations.contains("image.edit"), operations.contains("prompt.enhance"), operations.contains("model-routing"),
             operations.contains("text.chat"), chatEngines,
             operations.contains("text.chat.load") && operations.contains("text.chat.unload"),
-            operations.contains("text.chat.images")});
+            operations.contains("text.chat.images"), operations.contains("image.animate")});
         if (m_capabilities.modelRouting) requestModelRouting();
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
@@ -582,6 +607,12 @@ void ServiceClient::handleTextMessage(const QString &message)
             return;
         }
         auto &job = m_pendingJobs[jobId];
+        if (job.animation && object.value("operation") != "image.animate") {
+            failJob(jobId, "invalid-result", tr("The service returned an invalid animation result"));
+            return;
+        }
+        job.frames = object.value("frames").toInt();
+        job.fps = object.value("fps").toInt();
         job.mimeType = object.value(QStringLiteral("mimeType")).toString();
         job.prompt = object.value(QStringLiteral("prompt")).toString();
         job.negativePrompt = object.value(QStringLiteral("negativePrompt")).toString();
@@ -595,7 +626,8 @@ void ServiceClient::handleBinaryMessage(const QByteArray &data)
     const QString jobId = m_resultJobs.dequeue();
     const PendingJob job = m_pendingJobs.take(jobId);
     emit jobStateChanged(jobId, JobState::Completed, -1);
-    emit imageJobFinished({jobId, job.operation, true, data, job.mimeType, {}, {}, job.prompt, job.negativePrompt});
+    if (job.animation) emit animationFinished({jobId, true, data, job.mimeType, job.frames, job.fps, {}, {}});
+    else emit imageJobFinished({jobId, job.operation, true, data, job.mimeType, {}, {}, job.prompt, job.negativePrompt});
 }
 
 void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
@@ -606,7 +638,8 @@ void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
         && m_capabilities.textChat == capabilities.textChat
         && m_capabilities.textChatEngines == capabilities.textChatEngines
         && m_capabilities.chatModelControl == capabilities.chatModelControl
-        && m_capabilities.textChatImages == capabilities.textChatImages) return;
+        && m_capabilities.textChatImages == capabilities.textChatImages
+        && m_capabilities.imageAnimate == capabilities.imageAnimate) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
 }
@@ -671,6 +704,7 @@ void ServiceClient::failJob(const QString &jobId, const QString &errorCode, cons
         result.message = message;
         emit chatModelFinished(result);
     }
+    else if (job.animation) emit animationFinished({jobId, false, {}, {}, 0, 0, errorCode, message});
     else emit imageJobFinished({jobId, job.operation, false, {}, job.mimeType, errorCode, message});
 }
 

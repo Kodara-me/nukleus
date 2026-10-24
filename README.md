@@ -294,7 +294,8 @@ keeping the Kira content theme. Window movement/resizing is handled by the OS;
 verify actual decorations on each target desktop in addition to offscreen tests.
 
 Generation requests remain caller-controlled: recommendedOptions are never applied
-implicitly. The daemon validates option types/ranges before queueing, omits
+implicitly, except for `image.animate`, which uses an animation model's defaults for the
+options a request omits (see [Animating an image](#animating-an-image)). The daemon validates option types/ranges before queueing, omits
 Automatic sampler/scheduler flags and preserves CFG precision. Installed VAE
 companions are resolved on the server and passed to both text-to-image and
 image-to-image jobs without exposing filesystem paths.
@@ -434,6 +435,27 @@ nukleus-manager attach animation:wan2.2_i2v_low_noise_14B_Q4_K_M.gguf --vae-mode
 
 `--vae-model` and `--text-encoder-model` are required for `add`; on `attach`,
 either one replaces that companion and keeps the other.
+
+### Animating an image
+
+`image.animate` turns a PNG or JPEG start image, and optionally an end image,
+into a short video with an installed animation model, through
+`sd-cli -M vid_gen`. A request carries the model ID, a prompt, an optional
+negative prompt and seed, and a `parameters` object holding any sd-cli video
+option of the [option table](docs/protocol-v3.md#animating-an-image-imageanimate):
+size, frame count, fps, container (`webm`, `webp`, `avi`), steps, guidance and
+sampler for each noise pass, flow shift, LoRA weights, cache, memory and VAE
+tiling options. Each option the request leaves out comes from the model's
+`recommendedOptions`, else is left to sd-cli's own default; this is the one
+operation that applies recommendations to jobs. The model's LoRAs are added to
+the prompt by the service with their stage and weight (`loraWeights`, default 1,
+0 leaves one out). Jobs share the FIFO with image jobs, report the same
+`progress` messages with the sampling step counted across both noise passes,
+and stop when their client disconnects. The result is the video bytes with its
+MIME type, frame count and fps. SDK clients use `canAnimate()`,
+`submitAnimation(AnimationRequest)` and `animationFinished(AnimationResult)`.
+Ping-pong loops and MP4 output are not available yet and fail with
+`backend-not-ready`.
 Removed model directories and existing identity files are retained on disk.
 Rebuild SDK consumers and deploy the updated Service alongside the updated clients.
 

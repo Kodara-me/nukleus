@@ -16,12 +16,12 @@
 - The daemon always listens on `127.0.0.1`; a configured LAN IPv4 address adds a second listener on the same port. Loopback authentication is tokenless; LAN authentication remains token-protected.
 - Preserve protocol v3 unless an explicit compatibility slice changes it. Canvas and other clients select opaque model IDs and submit work; Canvas may expose installation only for explicitly curated packages through the SDK, while the local manager remains the general model-management UI.
 - CMake installs the daemon to `libexec/nukleus/` and the manager to `bin/` under the selected prefix; the shell installer remains authoritative for systemd deployment and configuration.
-- CMake also installs SDK headers and static libraries and generates the `NukleusSdk` package. The SDK supports image operations.
+- CMake also installs SDK headers and static libraries and generates the `NukleusSdk` package. The SDK supports image operations, image.animate included.
 - Use `$XDG_DATA_HOME/nukleus/models/` with `upscale/`, `llm/`, `companion/` and `animation/` subdirectories. Generation models in the root also serve image.edit with reference-image conditioning. Never overwrite installed model files. Keep the legacy-root migration safe and non-merging.
 - `--models-dir`/`--config-dir` (always together) select the split layout: weights in `models-dir/{generation,upscale,llm,companion,animation}/` and the catalogue (`<category>.json` in the former metadata.json format, plus `model-routing.json`) in `config-dir/catalog/`. The weight tree may be shared with other applications and is never named after this service. `scripts/migrate-nukleus-storage.sh` copies a legacy tree into it without modifying the source or merging into non-empty destinations.
 - Linux systemd deployment keeps the `nukleus` account, `/etc/nukleus`, `/var/lib/nukleus`, `/run/nukleus`, and fixed port `9384`. Installer `--models-dir`/`--config-dir` store `NUKLEUS_MODELS_DIR`/`NUKLEUS_CONFIG_DIR` in nukleus.conf, preserved by updates, and render `RequiresMountsFor=` and `ReadWritePaths=` for the weight tree and catalogue only. A storage tree with a non-root group is shared: the service joins that group and directories receive setgid group write without recursive chown. The token remains in `/etc/nukleus`.
 - Nukleus was formerly Kira Service. Keep the rename migrations move-only and non-merging: the installer renames the `kira-service` account/group in place and moves `/etc/kira-service`, `/var/lib/kira-service` and `data/kira-service`, rewriting `KIRA_SERVICE_*` keys; the daemon renames `$XDG_DATA_HOME/kira-service`; the manager copies legacy `Kira Service Manager` settings only into empty settings. Refuse when both old and new locations exist.
-- Shared VAE and LLM text encoders are assigned by opaque IDs; LLM MMPROJ uses a shared companion ID. Never copy/delete shared weights with a primary model. Keep legacy companionUrl, companionFileName, companionUrls/companionFiles and string metadata compatible without restoring removed CLIP/image-level mmproj controls or execution arguments. Legacy VAE/LLM attachments remain fallbacks. Existing attachment operations never redownload or overwrite the primary. Stage files and publish metadata atomically; cancellation/failure preserves an existing primary and recommendations. Do not perform SHA-256 download checks. Diffusion models use --diffusion-model and checkpoints use --model. Validate generation values/types before queuing, omit automatic sampler/scheduler flags, and preserve numeric precision. Never auto-apply numeric recommendedOptions to jobs.
+- Shared VAE and LLM text encoders are assigned by opaque IDs; LLM MMPROJ uses a shared companion ID. Never copy/delete shared weights with a primary model. Keep legacy companionUrl, companionFileName, companionUrls/companionFiles and string metadata compatible without restoring removed CLIP/image-level mmproj controls or execution arguments. Legacy VAE/LLM attachments remain fallbacks. Existing attachment operations never redownload or overwrite the primary. Stage files and publish metadata atomically; cancellation/failure preserves an existing primary and recommendations. Do not perform SHA-256 download checks. Diffusion models use --diffusion-model and checkpoints use --model. Validate generation values/types before queuing, omit automatic sampler/scheduler flags, and preserve numeric precision. Never auto-apply numeric recommendedOptions to jobs, except for image.animate (below).
 - Build and run CTest after each slice. Keep README and CONTRIBUTING accurate.
 - Missing image-generation dimensions/steps use GenerationRequest defaults (1024×1024, 28), while supplied invalid values remain errors. Keep absent CFG at 7 and automatic backend choices omitted. An external VAE remains optional for complete checkpoints; never substitute numeric defaults for missing model weights.
 
@@ -98,7 +98,8 @@ never overwrite weights and keep companions scoped to the final primary name.
   all requested files and metadata are saved. Errors preserve entered fields for retry.
 - Protocol v3 adds optional recommendedOptions, models.configure, and owned
   models.install.cancel. Keep old client calls and enum states source-compatible.
-  Options are recommendations only; do not silently change execution arguments.
+  Options are recommendations only; do not silently change execution arguments
+  (image.animate is the one exception, below).
 - ModelOptions in the Protocol target owns category defaults and validation.
   Image generation use square resolution, steps, CFG, sampler, scheduler,
   capability flags, shared VAE/text encoder IDs and an optional promptFormat
@@ -339,3 +340,28 @@ re-attach missing ones. CLI add/attach accept --high-noise, --lora-low-noise,
 --lora-high-noise, --vae-model and --text-encoder-model (both IDs required for
 add; one on attach keeps the other). The CLI lives in src/manager/ManagerCli.cpp
 so UI tests run it against their fake service.
+
+image.animate runs `sd-cli -M vid_gen` on an installed animation model through
+the shared FIFO, unloading llama-server first. Its option table lives in the
+Protocol target (`animationOptions()`), shared by request validation and model
+defaults: request-only fields (modelId, prompt, negativePrompt, seed,
+hasEndImage) sit in `options`, every sd-cli option in `options.parameters`.
+Unknown keys, wrong types and out-of-range values fail with invalid-request
+before any upload; free-form values are at most 256 bytes of
+`[A-Za-z0-9_.,=:&+-]` so none names a file or host, and names listed by sd-cli's
+`--help` (samplers, schedulers, prediction, weight types, sigma presets) are
+checked against it, read once. Each option resolves from the request, then the
+model's recommendedOptions, then is omitted so sd-cli's default applies; only
+container (webm) and seed (-1) have service defaults. This is the one exception
+to never applying recommendations to jobs. Animation models accept any subset of
+the table beside vaeModelId/textEncoderModelId. Prompts with `<lora:` are
+rejected; the service appends the model's LoRA tags per stage (`<lora:NAME:W>`,
+`<lora:|high_noise|NAME:W>`, weight from loraWeights, else the model's, else 1;
+0 leaves it out). A model with missingFiles fails with model-files-missing.
+Uploads are PNG/JPEG: `start` (index 0), then `end` (index 1) with hasEndImage.
+SdCliProgressParser's video mode counts both sampling passes as one running
+step and ignores counters before `generate_video` and after sampling. Results
+carry mimeType, frames (from sd-cli's `generate_video WxHxT` line) and fps,
+then the video bytes; failures return the command and stderr tail. pingPong
+true and container mp4 fail with backend-not-ready until their tasks land.
+Tests use the fake sd-cli script and never run the real one.

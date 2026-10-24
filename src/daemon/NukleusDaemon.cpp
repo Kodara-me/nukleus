@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <limits>
 #include <optional>
+#include <tuple>
 #include <utility>
 #include <nukleus/ModelOptions.h>
 #include <QFile>
@@ -294,6 +295,7 @@ struct NukleusDaemon::Submission
     QPointer<QWebSocket> client;
     int expectedInputs = 1;
     QList<QByteArray> inputs;
+    std::optional<AnimationPlan> animation;
 };
 
 struct NukleusDaemon::Job
@@ -313,6 +315,7 @@ struct NukleusDaemon::Job
     std::unique_ptr<QTemporaryDir> directory = std::make_unique<QTemporaryDir>();
     QStringList inputPaths;
     QString outputPath;
+    std::optional<AnimationPlan> animation;
 };
 
 NukleusDaemon::NukleusDaemon(NukleusConfiguration configuration, QObject *parent)
@@ -530,14 +533,16 @@ void NukleusDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     const bool textChat = operationName == QStringLiteral("text.chat");
     const bool textChatLoad = operationName == QStringLiteral("text.chat.load");
     const bool textChatUnload = operationName == QStringLiteral("text.chat.unload");
+    const bool animate = operationName == QStringLiteral("image.animate");
     QJsonObject options = message.value(QStringLiteral("options")).toObject();
     const QString jobId = message.value(QStringLiteral("jobId")).toString();
     bool duplicateId = jobForId(jobId) != nullptr;
     for (const auto &pending : m_pendingUploads) {
         duplicateId = duplicateId || pending->id == jobId;
     }
-    if ((!generate && !upscale && !edit && !promptEnhance && !textChat && !textChatLoad && !textChatUnload)
+    if ((!generate && !upscale && !edit && !promptEnhance && !textChat && !textChatLoad && !textChatUnload && !animate)
         || jobId.isEmpty() || duplicateId) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid job request"), jobId); return; }
+    if (animate) { submitAnimation(socket, message); return; }
     if (promptEnhance) { submitPromptEnhancement(socket, message); return; }
     if (textChat || textChatLoad) { submitTextChat(socket, message, textChat ? Operation::TextChat : Operation::TextChatLoad); return; }
     if (textChatUnload) { submitTextChatUnload(socket, message); return; }
@@ -825,8 +830,13 @@ void NukleusDaemon::installModel(QWebSocket *socket, const QJsonObject &message)
         }
         request.recommendedOptions = message.value("recommendedOptions").toObject();
     }
-    m_installClients.insert(installId, socket);
     QString error;
+    if (*category == ModelCategory::Animation && request.recommendedOptions
+        && !validAnimationNames(*request.recommendedOptions, &error)) {
+        send(socket, {{"type", "error"}, {"code", "invalid-model-install"}, {"message", error}, {"installId", installId}});
+        return;
+    }
+    m_installClients.insert(installId, socket);
     if (!m_models->install(request, &error)) {
         m_installClients.remove(installId);
         send(socket, {{QStringLiteral("type"), QStringLiteral("error")}, {QStringLiteral("code"), QStringLiteral("invalid-model-install")},
@@ -857,6 +867,10 @@ void NukleusDaemon::configureModel(QWebSocket *socket, const QJsonObject &messag
     }
     const std::optional<QString> mmprojModelId = message.contains("mmprojModelId")
         ? std::optional<QString>(message.value("mmprojModelId").toString()) : std::nullopt;
+    if (id.startsWith("animation:") && !validAnimationNames(message.value("recommendedOptions").toObject(), &error)) {
+        send(socket, {{"type", "error"}, {"code", "invalid-model-configure"}, {"id", id}, {"message", error}});
+        return;
+    }
     if (!message.value("recommendedOptions").isObject() || !m_models->configure(id, message.value("recommendedOptions").toObject(), &error, explicitContent, displayName, mmprojModelId)) {
         send(socket, {{"type", "error"}, {"code", "invalid-model-configure"}, {"id", id}, {"message", error.isEmpty() ? tr("Recommended options must be an object") : error}});
         return;
@@ -930,7 +944,8 @@ void NukleusDaemon::deleteModel(QWebSocket *socket, const QJsonObject &message)
 bool NukleusDaemon::modelInUse(const QString &path) const
 {
     const auto usesModel = [&path](const auto &job) {
-        return job && (job->modelPath == path || job->vaePath == path || job->llmPath == path || job->llmVisionPath == path);
+        return job && (job->modelPath == path || job->vaePath == path || job->llmPath == path || job->llmVisionPath == path
+                       || (job->animation && job->animation->files.contains(path)));
     };
     if (usesModel(m_activeJob)) return true;
     for (const auto &job : m_queue) {
@@ -952,15 +967,17 @@ void NukleusDaemon::processBinaryMessage(QWebSocket* socket, const QByteArray& d
         return;
     }
     const bool chat = submission->operation == Operation::TextChat;
-    if (chat && chatImageMimeType(data).isEmpty()) {
+    const bool animation = submission->operation == Operation::Animate;
+    if ((chat || animation) && chatImageMimeType(data).isEmpty()) {
         m_pendingUploads.remove(socket);
-        sendError(socket, "invalid-image", tr("Chat images must be PNG or JPEG"), submission->id);
+        sendError(socket, "invalid-image", chat ? tr("Chat images must be PNG or JPEG")
+                                                : tr("Animation images must be PNG or JPEG"), submission->id);
         return;
     }
     submission->inputs.append(data);
     if (submission->inputs.size() < submission->expectedInputs) {
         send(socket, {{QStringLiteral("type"), QStringLiteral("upload-required")}, {QStringLiteral("jobId"), submission->id},
-            {"inputRole", chat ? "image" : "reference"}, {"inputIndex", int(submission->inputs.size())}});
+            {"inputRole", chat ? "image" : animation ? "end" : "reference"}, {"inputIndex", int(submission->inputs.size())}});
         return;
     }
     m_pendingUploads.remove(socket);
@@ -980,10 +997,14 @@ void NukleusDaemon::processBinaryMessage(QWebSocket* socket, const QByteArray& d
     job->clipLPath = submission->clipLPath;
     job->clipGPath = submission->clipGPath;
     job->diffusionModel = submission->diffusionModel;
+    job->animation = submission->animation;
     job->client = socket;
     for (int index = 0; index < submission->inputs.size(); ++index) {
         const QByteArray &bytes = submission->inputs.at(index);
-        const QString path = job->directory->filePath(index == 0 ? QStringLiteral("input.png") : QStringLiteral("input-%1.png").arg(index + 1));
+        const QString animationName = QStringLiteral("%1.%2").arg(index == 0 ? "start" : "end",
+            chatImageMimeType(bytes) == QStringLiteral("image/jpeg") ? "jpg" : "png");
+        const QString path = job->directory->filePath(animation ? animationName
+            : index == 0 ? QStringLiteral("input.png") : QStringLiteral("input-%1.png").arg(index + 1));
         QFile input(path);
         if (!job->directory->isValid() || !input.open(QIODevice::WriteOnly) || input.write(bytes) != bytes.size()) {
             sendError(socket, "storage-error", tr("Could not save image upload"), job->id);
@@ -1040,6 +1061,18 @@ void NukleusDaemon::runActiveJob()
         startTextChat();
         return;
     }
+    if (m_activeJob->operation == Operation::Animate) {
+        const auto &plan = *m_activeJob->animation;
+        m_activeJob->outputPath = m_activeJob->directory->filePath(QStringLiteral("result.") + plan.container);
+        QStringList arguments = plan.arguments + QStringList{"-i", m_activeJob->inputPaths.value(0)};
+        if (m_activeJob->inputPaths.size() > 1) arguments += {"--end-img", m_activeJob->inputPaths.at(1)};
+        arguments += {"-o", m_activeJob->outputPath};
+        if (!m_sdRunner || !m_sdRunner->runVideo(arguments, m_activeJob->outputPath, plan.totalSteps, plan.twoPasses)) {
+            sendError(m_activeJob->client, "start-failed", tr("Could not start animation"), m_activeJob->id);
+            m_activeJob.reset(); startNextJob();
+        }
+        return;
+    }
     if (m_activeJob->operation == Operation::Generate || m_activeJob->operation == Operation::Edit) {
         m_activeJob->outputPath = m_activeJob->directory->filePath(QStringLiteral("result.png"));
         GenerationRequest request;
@@ -1073,6 +1106,11 @@ void NukleusDaemon::handleGenerationFinished(const SdCliGenerationResult &result
 {
     if (!m_activeJob) return;
     const auto job = m_activeJob;
+    if (job->operation == Operation::Animate) {
+        sendAnimationResult(*job, result);
+        m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
+        return;
+    }
     if (!result.succeeded || !QFileInfo(job->outputPath).isFile()) {
         QString detail = tr("Image generation failed (exit code %1)").arg(result.exitCode);
         detail += tr("\nCommand:\n%1").arg(m_sdRunner->commandLine(result.arguments));
@@ -1137,6 +1175,7 @@ void NukleusDaemon::sendCapabilities(QWebSocket *socket) const
         operations.append(QStringLiteral("image.generate"));
         operations.append(QStringLiteral("image.upscale"));
         operations.append(QStringLiteral("image.edit"));
+        operations.append(QStringLiteral("image.animate"));
     }
     if (isPromptEnhancementReady()) operations.append("prompt.enhance");
     const auto chatEngines = readyTextChatEngines();
@@ -1603,6 +1642,212 @@ std::shared_ptr<NukleusDaemon::Job> NukleusDaemon::jobForId(const QString &id) c
     if (m_activeJob && m_activeJob->id == id) return m_activeJob;
     for (const auto &job : m_queue) if (job->id == id) return job;
     return {};
+}
+
+std::optional<SdCliHelp> NukleusDaemon::sdCliHelp() const
+{
+    if (m_sdCliHelp || !m_sdRunner) return m_sdCliHelp;
+    QProcess help;
+    help.setProcessChannelMode(QProcess::MergedChannels);
+    help.start(m_sdRunner->executablePath(), {"--help"});
+    const bool finished = help.waitForFinished(10000);
+    if (!finished) help.kill();
+    const auto parsed = finished ? SdCliRunner::parseHelp(QString::fromUtf8(help.readAll())) : SdCliHelp();
+    // An unreadable help text is not cached, so a later request can retry.
+    if (parsed.choices.isEmpty()) return std::nullopt;
+    m_sdCliHelp = parsed;
+    return m_sdCliHelp;
+}
+
+bool NukleusDaemon::validAnimationNames(const QJsonObject &parameters, QString *error) const
+{
+    bool listedNames = false;
+    for (const auto &option : Nukleus::Protocol::animationOptions())
+        listedNames = listedNames || (!option.choicesFlag.isEmpty() && parameters.contains(option.key));
+    // Without sd-cli, the names were only checked for safe characters; jobs check them again before running.
+    if (!listedNames || !m_sdRunner) return true;
+    const auto help = sdCliHelp();
+    if (!help) {
+        if (error) *error = tr("Could not read the names accepted by sd-cli");
+        return false;
+    }
+    auto names = parameters; // A model's defaults also hold its companion IDs.
+    names.remove("vaeModelId");
+    names.remove("textEncoderModelId");
+    return Nukleus::Protocol::validateAnimationParameters(names, error, &help->choices);
+}
+
+void NukleusDaemon::submitAnimation(QWebSocket *socket, const QJsonObject &message)
+{
+    const QString jobId = message.value("jobId").toString();
+    const QJsonObject options = message.value("options").toObject();
+    const QJsonObject parameters = options.value("parameters").toObject();
+    const auto invalid = [&](const QString &detail) { sendError(socket, "invalid-request", detail, jobId); };
+    for (const auto &key : options.keys())
+        if (!Nukleus::Protocol::animationRequestOptions().contains(key)) { invalid(tr("Unknown animation option: %1").arg(key)); return; }
+    const auto mentionsLora = [&options](const QString &key) {
+        return options.value(key).toString().contains(QStringLiteral("<lora:"), Qt::CaseInsensitive);
+    };
+    if (!message.value("options").isObject() || !options.value("modelId").isString()
+        || !options.value("prompt").isString() || options.value("prompt").toString().trimmed().isEmpty()
+        || (options.contains("negativePrompt") && !options.value("negativePrompt").isString())
+        || !validNumber(options, "seed", -1, std::numeric_limits<int>::max(), true, false)
+        || (options.contains("hasEndImage") && !options.value("hasEndImage").isBool())
+        || (options.contains("parameters") && !options.value("parameters").isObject())) {
+        invalid(tr("Invalid animation request"));
+        return;
+    }
+    // LoRAs are the model's own, applied by the service with their weights.
+    if (mentionsLora("prompt") || mentionsLora("negativePrompt")) {
+        invalid(tr("Prompts cannot contain LoRA tags; use loraWeights"));
+        return;
+    }
+    QString error;
+    if (!Nukleus::Protocol::validateAnimationParameters(parameters, &error)) { invalid(error); return; }
+    if (!isImageReady()) {
+        sendError(socket, "backend-not-ready", tr("The requested service backend is unavailable"), jobId);
+        return;
+    }
+    const auto model = m_models->model(ModelCategory::Animation, options.value("modelId").toString());
+    if (!model) { sendError(socket, "model-unavailable", tr("The requested model is unavailable"), jobId); return; }
+    const auto vae = m_models->modelById(model->recommendedOptions.value("vaeModelId").toString());
+    const auto textEncoder = m_models->modelById(model->recommendedOptions.value("textEncoderModelId").toString());
+    if (!model->missingFiles.isEmpty() || !vae || !textEncoder) {
+        sendError(socket, "model-files-missing",
+                  tr("The model's files are missing: %1").arg(model->missingFiles.join(QStringLiteral(", "))), jobId);
+        return;
+    }
+    // Each option comes from the request, else from the model's defaults, else is left to sd-cli
+    // (an exception, for image.animate only, to recommendations never being applied to jobs).
+    QJsonObject effective = model->recommendedOptions;
+    effective.remove("vaeModelId");
+    effective.remove("textEncoderModelId");
+    QJsonObject loraWeights = effective.value("loraWeights").toObject();
+    for (auto it = parameters.begin(); it != parameters.end(); ++it) effective.insert(it.key(), it.value());
+    const auto requestedWeights = parameters.value("loraWeights").toObject();
+    for (auto it = requestedWeights.begin(); it != requestedWeights.end(); ++it) loraWeights.insert(it.key(), it.value());
+    effective.remove("loraWeights");
+    if (!validAnimationNames(effective, &error)) {
+        sendError(socket, m_sdCliHelp ? "invalid-request" : "backend-not-ready", error, jobId);
+        return;
+    }
+    if (effective.value("pingPong").toBool()) {
+        sendError(socket, "backend-not-ready", tr("Ping-pong loops are unavailable"), jobId);
+        return;
+    }
+    const QString container = effective.value("container").toString(QStringLiteral("webm"));
+    if (container == QStringLiteral("mp4")) {
+        sendError(socket, "backend-not-ready", tr("MP4 output is unavailable"), jobId);
+        return;
+    }
+    if (m_pendingUploads.contains(socket)) {
+        sendError(socket, "upload-in-progress", tr("Finish the pending image upload before submitting another job"), jobId);
+        return;
+    }
+    if (m_queue.size() >= MaximumQueuedJobs) { sendError(socket, "queue-full", tr("The service queue is full"), jobId); return; }
+
+    const QDir modelDirectory(QFileInfo(model->filePath).absolutePath());
+    const auto attached = [&](const QString &role) {
+        const auto name = model->companionFiles.value(role).toString();
+        return name.isEmpty() ? QString() : modelDirectory.filePath(name);
+    };
+    AnimationPlan plan;
+    plan.container = container;
+    const QString highNoise = attached("high-noise");
+    QStringList arguments{"-M", "vid_gen", "--diffusion-model", model->filePath};
+    if (!highNoise.isEmpty()) arguments += {"--high-noise-diffusion-model", highNoise};
+    arguments += {"--vae", vae->filePath, "--t5xxl", textEncoder->filePath};
+    plan.files = QStringList{model->filePath, highNoise, vae->filePath, textEncoder->filePath};
+    // Each attached LoRA applies to its stage, by file name without extension, unless its weight is 0.
+    QString prompt = options.value("prompt").toString();
+    QString loraDirectory;
+    for (const auto &[role, key, stage] : {std::tuple{QStringLiteral("lora-low-noise"), QStringLiteral("lowNoise"), QString()},
+                                           std::tuple{QStringLiteral("lora-high-noise"), QStringLiteral("highNoise"), QStringLiteral("|high_noise|")}}) {
+        const QString path = attached(role);
+        const double weight = loraWeights.value(key).toDouble(1.0);
+        if (path.isEmpty() || weight == 0) continue;
+        prompt += QStringLiteral(" <lora:%1%2:%3>").arg(stage, QFileInfo(path).completeBaseName(), QString::number(weight, 'g', 15));
+        loraDirectory = QFileInfo(path).absolutePath();
+        plan.files.append(path);
+    }
+    plan.files.removeAll(QString());
+    if (!loraDirectory.isEmpty()) arguments += {"--lora-model-dir", loraDirectory};
+    arguments += {"-p", prompt};
+    if (!options.value("negativePrompt").toString().isEmpty()) arguments += {"-n", options.value("negativePrompt").toString()};
+    arguments += {"-s", QString::number(options.value("seed").toInt(-1))};
+    using Kind = Nukleus::Protocol::AnimationOptionKind;
+    for (const auto &option : Nukleus::Protocol::animationOptions()) {
+        const QJsonValue value = effective.value(option.key);
+        if (option.flag.isEmpty() || value.isUndefined()) continue;
+        if (option.kind == Kind::Flag) {
+            if (value.toBool()) arguments.append(option.flag);
+        } else if (option.kind == Kind::IntegerList) {
+            QStringList layers;
+            for (const auto &layer : value.toArray()) layers.append(QString::number(layer.toInt()));
+            arguments += {option.flag, QStringLiteral("[%1]").arg(layers.join(QLatin1Char(',')))};
+        } else if (option.kind == Kind::Integer) {
+            arguments += {option.flag, QString::number(value.toInt())};
+        } else if (value.isDouble()) {
+            arguments += {option.flag, QString::number(value.toDouble(), 'g', 15)};
+        } else {
+            arguments += {option.flag, value.toString()};
+        }
+    }
+    plan.arguments = arguments;
+    // sd-cli samples steps + high-noise steps when both are set, and splits steps between the passes when the
+    // high-noise count is automatic; numeric sigmas fix the total. Without a steps option, sd-cli's default
+    // applies; a sigma preset leaves the total to its counters.
+    static const QRegularExpression sigmaList("^-?[0-9]+(\\.[0-9]+)?(,-?[0-9]+(\\.[0-9]+)?)*$");
+    const QString sigmas = effective.value("sigmas").toString();
+    const auto help = effective.contains("steps") ? std::nullopt : sdCliHelp();
+    const std::optional<int> steps = effective.contains("steps") ? std::optional<int>(effective.value("steps").toInt())
+                                                                 : help ? help->defaultSteps : std::nullopt;
+    plan.twoPasses = !highNoise.isEmpty();
+    if (sigmaList.match(sigmas).hasMatch() && sigmas.count(QLatin1Char(',')) > 0) plan.totalSteps = int(sigmas.count(QLatin1Char(',')));
+    else if (steps && sigmas.isEmpty())
+        plan.totalSteps = *steps + (highNoise.isEmpty() ? 0 : std::max(0, effective.value("highNoiseSteps").toInt(-1)));
+    plan.frames = effective.value("videoFrames").toInt(0);
+    plan.fps = effective.contains("fps") ? effective.value("fps").toInt() : 0;
+
+    auto submission = std::make_shared<Submission>();
+    submission->id = jobId;
+    submission->operation = Operation::Animate;
+    submission->options = options;
+    submission->modelPath = model->filePath;
+    submission->client = socket;
+    submission->expectedInputs = options.value("hasEndImage").toBool() ? 2 : 1;
+    submission->animation = plan;
+    m_pendingUploads.insert(socket, submission);
+    send(socket, {{"type", "upload-required"}, {"jobId", jobId}, {"inputRole", "start"}, {"inputIndex", 0}});
+}
+
+void NukleusDaemon::sendAnimationResult(const Job &job, const SdCliGenerationResult &result)
+{
+    if (!result.succeeded || !QFileInfo(job.outputPath).isFile()) {
+        QString detail = tr("Animation failed (exit code %1)").arg(result.exitCode);
+        detail += tr("\nCommand:\n%1").arg(m_sdRunner->commandLine(result.arguments));
+        const QString diagnostic = result.standardError.trimmed().right(4096);
+        if (!diagnostic.isEmpty()) detail += tr("\nBackend error:\n%1").arg(diagnostic);
+        sendError(job.client, "generation-failed", detail, job.id);
+        return;
+    }
+    QFile output(job.outputPath);
+    const QByteArray bytes = output.open(QIODevice::ReadOnly) ? output.readAll() : QByteArray();
+    if (bytes.isEmpty()) { sendError(job.client, "result-read-failed", tr("Could not read the generated video"), job.id); return; }
+    const auto &plan = *job.animation;
+    // sd-cli may align the frame count to the model (4n + 1 for Wan); it logs the count it generates.
+    static const QRegularExpression generated("generate_video \\d+x\\d+x(\\d+)");
+    auto match = generated.match(result.standardOutput);
+    if (!match.hasMatch()) match = generated.match(result.standardError);
+    const int frames = match.hasMatch() ? match.captured(1).toInt() : plan.frames;
+    // Without an fps option, sd-cli uses the default its --help states (24 in the versions documented so far).
+    const auto help = plan.fps > 0 ? std::nullopt : sdCliHelp();
+    const int fps = plan.fps > 0 ? plan.fps : help && help->defaultFps ? *help->defaultFps : 24;
+    const QString mimeType = plan.container == QStringLiteral("webp") ? QStringLiteral("image/webp")
+        : plan.container == QStringLiteral("avi") ? QStringLiteral("video/x-msvideo") : QStringLiteral("video/webm");
+    send(job.client, {{"type", "result"}, {"jobId", job.id}, {"operation", "image.animate"},
+                      {"mimeType", mimeType}, {"frames", frames}, {"fps", fps}});
+    if (job.client) job.client->sendBinaryMessage(bytes);
 }
 
 void NukleusDaemon::deleteCompanion(QWebSocket* socket, const QJsonObject& message)
