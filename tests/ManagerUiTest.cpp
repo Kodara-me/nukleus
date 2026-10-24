@@ -76,8 +76,14 @@ class ManagerUiTest final : public QObject
             if (message.value("type") == "models.install") requests.append(message);
         return requests;
     }
+    static QJsonObject merged(QJsonObject base, const QJsonObject &extra)
+    {
+        for (auto it = extra.begin(); it != extra.end(); ++it) base.insert(it.key(), it.value());
+        return base;
+    }
     // An animation model with an attached high-noise model and a missing low-noise LoRA, and its two companions.
-    static QJsonArray animationCatalogue()
+    // `defaults` are video options already saved on the model, such as ones set through the API.
+    static QJsonArray animationCatalogue(const QJsonObject &defaults = {})
     {
         const QJsonObject vae{{"id", "companion:wan_2.1_vae.safetensors"}, {"fileName", "wan_2.1_vae.safetensors"},
             {"displayName", "Wan VAE"}, {"recommendedOptions", QJsonObject{{"subtype", "vae"}}}};
@@ -85,7 +91,7 @@ class ManagerUiTest final : public QObject
             {"displayName", "UMT5-XXL"}, {"recommendedOptions", QJsonObject{{"subtype", "t5xxl"}}}};
         const QJsonObject wan{{"id", "animation:wan-low.gguf"}, {"fileName", "wan-low.gguf"}, {"displayName", "Wan 2.2"},
             {"bytes", 20}, {"explicitContent", false}, {"modelType", "diffusion"},
-            {"recommendedOptions", QJsonObject{{"vaeModelId", vae.value("id")}, {"textEncoderModelId", encoder.value("id")}}},
+            {"recommendedOptions", merged(QJsonObject{{"vaeModelId", vae.value("id")}, {"textEncoderModelId", encoder.value("id")}}, defaults)},
             {"companionFiles", QJsonObject{{"high-noise", "companions/wan-low.gguf/high-noise/wan-high.gguf"},
                                            {"lora-low-noise", "companions/wan-low.gguf/lora/low.safetensors"}}},
             {"missingFiles", QJsonArray{"lora-low-noise"}}};
@@ -953,6 +959,155 @@ class ManagerUiTest final : public QObject
         QVERIFY(!refreshed.first().data(Qt::UserRole + 5).toBool());
         QCOMPARE(refreshed.first().data().toString(), QString("Low-noise LoRA: low.safetensors"));
         window.close();
+    }
+    // Opens the Manager on the fixture's animation model and returns its options form.
+    ModelOptionsWidget *openAnimationModel(ManageModelsWindow &window, ManagerServiceClient &client)
+    {
+        window.show();
+        if (!QTest::qWaitFor([&] { return client.models("animation").size() == 1; }, 5000)) return nullptr;
+        auto *tree = window.findChild<Ardoise::TreeView *>("installedModelsTree");
+        const auto root = tree->model()->index(0, 0);
+        for (int row = 0; row < tree->model()->rowCount(root); ++row) {
+            const auto branch = tree->model()->index(row, 0, root);
+            if (branch.data(Qt::UserRole + 2) == "animation") tree->setCurrentIndex(tree->model()->index(0, 0, branch));
+        }
+        auto *form = window.findChild<ModelOptionsWidget *>();
+        return form && form->isVisible() ? form : nullptr;
+    }
+    QJsonObject lastConfigureOptions() const
+    {
+        for (auto it = m_messages.crbegin(); it != m_messages.crend(); ++it)
+            if (it->value("type") == "models.configure") return it->value("recommendedOptions").toObject();
+        return {{"missing", true}};
+    }
+    int configureCount() const
+    {
+        int count = 0;
+        for (const auto &message : m_messages) count += message.value("type") == "models.configure";
+        return count;
+    }
+    void animationFormGroupsOptionsAndPairsHighNoise_R13()
+    {
+        m_extraCategories = animationCatalogue();
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        ManageModelsWindow window(nullptr, &client);
+        auto *form = openAnimationModel(window, client);
+        QVERIFY(form);
+        // Every option of the shared table has a field, and the groups appear in the table's order.
+        for (const auto &option : Nukleus::Protocol::animationOptions()) {
+            if (option.key == "loraWeights") {
+                QVERIFY(form->findChild<QLineEdit *>("loraWeights.lowNoise"));
+                QVERIFY(form->findChild<QLineEdit *>("loraWeights.highNoise"));
+            } else
+                QVERIFY2(form->findChild<QWidget *>(option.key), qPrintable(option.key));
+        }
+        QStringList headings;
+        for (const auto *label : form->findChildren<QLabel *>())
+            if (label->objectName().startsWith("group")) headings.append(label->objectName());
+        QCOMPARE(headings, (QStringList{"groupVideo", "groupSampling", "groupLoRA", "groupCache", "groupMemory", "groupVAEtiling"}));
+        // A high-noise option shares its row with its low-noise counterpart.
+        for (const auto &[low, high] : {std::pair{"steps", "highNoiseSteps"}, {"cfgScale", "highNoiseCfgScale"},
+                                       {"sampler", "highNoiseSampler"}, {"skipLayers", "highNoiseSkipLayers"},
+                                       {"loraWeights.lowNoise", "loraWeights.highNoise"}})
+            QCOMPARE(form->findChild<QWidget *>(low)->parentWidget(), form->findChild<QWidget *>(high)->parentWidget());
+        // The model has no defaults: every field is empty and the form saves nothing but the companions.
+        for (auto *line : form->findChildren<QLineEdit *>()) QVERIFY2(line->text().isEmpty(), qPrintable(line->objectName()));
+        QCOMPARE(form->options().keys().size(), 2);
+    }
+    void animationFormShowsSavesAndClearsDefaults_R13()
+    {
+        m_extraCategories = animationCatalogue({{"steps", 4}, {"highNoiseSteps", 4}, {"cfgScale", 1}, {"fps", 16},
+                                                {"width", 480}, {"offloadToCpu", true}, {"pingPong", false},
+                                                {"sampler", "euler"}, {"container", "mp4"}, {"skipLayers", QJsonArray{7, 8}},
+                                                {"loraWeights", QJsonObject{{"highNoise", 0.5}}}});
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        ManageModelsWindow window(nullptr, &client);
+        auto *form = openAnimationModel(window, client);
+        QVERIFY(form);
+        // Saved options appear in their fields, the others stay empty.
+        QCOMPARE(form->findChild<QLineEdit *>("steps")->text(), QString("4"));
+        QCOMPARE(form->findChild<QLineEdit *>("highNoiseSteps")->text(), QString("4"));
+        QCOMPARE(form->findChild<QLineEdit *>("cfgScale")->text(), QString("1"));
+        QCOMPARE(form->findChild<QLineEdit *>("width")->text(), QString("480"));
+        QCOMPARE(form->findChild<QLineEdit *>("sampler")->text(), QString("euler"));
+        QCOMPARE(form->findChild<QLineEdit *>("skipLayers")->text(), QString("7,8"));
+        QCOMPARE(form->findChild<QLineEdit *>("loraWeights.highNoise")->text(), QString("0.5"));
+        QCOMPARE(form->findChild<QComboBox *>("container")->currentText(), QString("mp4"));
+        QCOMPARE(form->findChild<QComboBox *>("offloadToCpu")->currentText(), QString("Yes"));
+        QCOMPARE(form->findChild<QComboBox *>("pingPong")->currentText(), QString("No"));
+        QVERIFY(form->findChild<QLineEdit *>("flowShift")->text().isEmpty());
+        QVERIFY(form->findChild<QLineEdit *>("loraWeights.lowNoise")->text().isEmpty());
+        QVERIFY(!form->findChild<QComboBox *>("mmap")->currentData().isValid());
+        auto *save = window.findChild<QPushButton *>("saveOptions");
+        QVERIFY(!save->isEnabled());
+        // Fill one field, clear another, and save: only the filled options are sent, with the companions.
+        form->findChild<QLineEdit *>("flowShift")->setText("3");
+        form->findChild<QLineEdit *>("cfgScale")->clear();
+        form->findChild<QComboBox *>("pingPong")->setCurrentIndex(0);
+        QTRY_VERIFY(save->isEnabled());
+        QVERIFY(form->findChild<QLabel *>("optionsError")->text().isEmpty());
+        save->click();
+        QTRY_COMPARE(configureCount(), 1);
+        QCOMPARE(lastConfigureOptions(),
+                 (QJsonObject{{"vaeModelId", "companion:wan_2.1_vae.safetensors"}, {"textEncoderModelId", "companion:umt5-xxl.gguf"},
+                              {"steps", 4}, {"highNoiseSteps", 4}, {"fps", 16}, {"width", 480}, {"offloadToCpu", true},
+                              {"sampler", "euler"}, {"container", "mp4"}, {"skipLayers", QJsonArray{7, 8}},
+                              {"loraWeights", QJsonObject{{"highNoise", 0.5}}}, {"flowShift", 3}}));
+    }
+    void animationFormKeepsApiDefaultsAcrossASave_R13()
+    {
+        // Defaults set through the API, outside the form's usual values, must survive a save that edits something else.
+        const QJsonObject api{{"videoFrames", 41}, {"highNoiseSampler", "euler"}, {"sigmas", "1,0.5,0"}, {"eta", 0.25},
+                              {"scmMask", "1,0,1"}, {"flashAttention", "on"}, {"maxVram", 12.5}, {"threads", -1},
+                              {"vaeTileSize", "64x64"}, {"loraWeights", QJsonObject{{"lowNoise", 1.5}, {"highNoise", 0}}},
+                              {"autoFit", "off"}, {"temporalTiling", true}, {"cacheMode", "easycache"}};
+        m_extraCategories = animationCatalogue(api);
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        ManageModelsWindow window(nullptr, &client);
+        auto *form = openAnimationModel(window, client);
+        QVERIFY(form);
+        auto *name = window.findChild<QLineEdit *>("modelDisplayName");
+        name->setText("Wan 2.2 renamed");
+        auto *save = window.findChild<QPushButton *>("saveOptions");
+        QTRY_VERIFY(save->isEnabled());
+        save->click();
+        QTRY_COMPARE(configureCount(), 1);
+        QCOMPARE(lastConfigureOptions(), merged({{"vaeModelId", "companion:wan_2.1_vae.safetensors"},
+                                                 {"textEncoderModelId", "companion:umt5-xxl.gguf"}}, api));
+    }
+    void animationFormRejectsInvalidValuesAndSendsNothing_R13()
+    {
+        m_extraCategories = animationCatalogue();
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        ManageModelsWindow window(nullptr, &client);
+        auto *form = openAnimationModel(window, client);
+        QVERIFY(form);
+        auto *save = window.findChild<QPushButton *>("saveOptions");
+        auto *error = form->findChild<QLabel *>("optionsError");
+        for (const auto &[key, value] : {std::pair{"fps", "500"}, {"width", "100"}, {"cfgScale", "abc"}, {"moeBoundary", "1.5"},
+                                         {"skipLayers", "1,x"}, {"vaeTileSize", "../x"}}) {
+            auto *field = form->findChild<QLineEdit *>(key);
+            field->setText(value);
+            QVERIFY2(!error->text().isEmpty(), key);
+            QVERIFY2(error->text().contains(key), qPrintable(error->text()));
+            QVERIFY2(!form->isValid(), key);
+            QVERIFY2(!save->isEnabled(), key);
+            save->click();
+            field->clear();
+            QVERIFY2(error->text().isEmpty(), key);
+        }
+        QTest::qWait(100);
+        QCOMPARE(configureCount(), 0);
+        // Once corrected, the same form saves.
+        form->findChild<QLineEdit *>("fps")->setText("24");
+        QTRY_VERIFY(save->isEnabled());
+        save->click();
+        QTRY_COMPARE(configureCount(), 1);
+        QCOMPARE(lastConfigureOptions().value("fps").toInt(), 24);
     }
     void animationFormInstallsCompanionsBeforeModel_R11()
     {

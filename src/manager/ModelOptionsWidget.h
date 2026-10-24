@@ -5,6 +5,7 @@
 #include "ManagerServiceClient.h"
 class QFormLayout;
 class QCheckBox;
+class QLabel;
 
 class ModelOptionsWidget final : public QWidget
 {
@@ -26,6 +27,12 @@ class ModelOptionsWidget final : public QWidget
     void optionsChanged();
 
   private:
+    // Animation models: one optional field per option of image.animate's table, grouped as the table is.
+    void addAnimationDefaults(const QJsonObject &values);
+    QJsonObject animationParameters() const;
+    void animationFieldChanged();
+    QMap<QString, QWidget *> m_animationFields;
+    QLabel *m_animationError = nullptr;
     bool m_offersNewCompanions = false;
     QCheckBox* m_explicitContent = nullptr;
     QString m_category;

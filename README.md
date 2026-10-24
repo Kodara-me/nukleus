@@ -422,6 +422,16 @@ installation; companions already installed stay in the catalogue and can be
 selected again. **Optional files…** attaches or removes the high-noise model and
 the LoRAs of an installed model, and attaches again a file reported missing.
 
+The options panel of an animation model also edits its default video options,
+grouped as Video, Sampling, LoRA, Cache, Memory and VAE tiling, with each
+high-noise option beside its low-noise counterpart. Every field may be left
+empty: an empty field means no model default, so a job falls back to sd-cli's
+own default for it. Save writes the filled fields only, with the VAE and text
+encoder IDs; a value outside its range shows a message and blocks Save.
+
+Removed model directories and existing identity files are retained on disk.
+Rebuild SDK consumers and deploy the updated Service alongside the updated clients.
+
 ```sh
 nukleus-manager add https://example.com/umt5-xxl-encoder-Q8_0.gguf --category companion --companion-type t5xxl --display-name "UMT5-XXL"
 nukleus-manager add https://example.com/wan2.2_i2v_low_noise_14B_Q4_K_M.gguf --category animation --display-name "Wan 2.2 I2V" \
@@ -456,8 +466,6 @@ MIME type, frame count and fps. SDK clients use `canAnimate()`,
 `submitAnimation(AnimationRequest)` and `animationFinished(AnimationResult)`.
 Ping-pong loops and MP4 output are not available yet and fail with
 `backend-not-ready`.
-Removed model directories and existing identity files are retained on disk.
-Rebuild SDK consumers and deploy the updated Service alongside the updated clients.
 
 ## Shared companions and model forms
 
