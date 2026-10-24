@@ -7,6 +7,8 @@
 #include "../src/manager/ServiceConnectionDialog.h"
 #include "../src/manager/ManagerServiceClient.h"
 #include "../src/manager/ManagerSettings.h"
+#include "../src/manager/ManagerCli.h"
+#include <QCommandLineParser>
 #include "../src/manager/ModelOptionsWidget.h"
 #include <Ardoise/Theme.h>
 #include <Ardoise/TreeView.h>
@@ -46,15 +48,16 @@ class ManagerUiTest final : public QObject
     QList<QJsonObject> m_messages;
     QJsonObject m_saved;
     QString m_requiredToken;
+    // Categories listed after the image-generation fixture, and whether installs complete on their own.
+    QJsonArray m_extraCategories;
+    bool m_completeInstalls = false;
     void send(const QJsonObject &object)
     {
         m_peer->sendTextMessage(QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact)));
     }
     void listModels()
     {
-        send({{"type", "models.list.result"},
-              {"categories",
-               QJsonArray{QJsonObject{
+        QJsonArray categories{QJsonObject{
                    {"category", "image-generation"},
                    {"models", QJsonArray{QJsonObject{{"id", "image-generation:test.gguf"},
                                                      {"name", "Test model"}, {"displayName", "Test model"},
@@ -62,7 +65,39 @@ class ManagerUiTest final : public QObject
                                                      {"bytes", 10},
                                                      {"companionFileName", "companions/test.gguf/vae.gguf"},
                                                      {"companionRole", "vae"},
-                                                     {"recommendedOptions", m_saved}}}}}}}});
+                                                     {"recommendedOptions", m_saved}}}}}};
+        for (const auto &category : m_extraCategories) categories.append(category);
+        send({{"type", "models.list.result"}, {"categories", categories}});
+    }
+    QList<QJsonObject> installRequests() const
+    {
+        QList<QJsonObject> requests;
+        for (const auto &message : m_messages)
+            if (message.value("type") == "models.install") requests.append(message);
+        return requests;
+    }
+    // An animation model with an attached high-noise model and a missing low-noise LoRA, and its two companions.
+    static QJsonArray animationCatalogue()
+    {
+        const QJsonObject vae{{"id", "companion:wan_2.1_vae.safetensors"}, {"fileName", "wan_2.1_vae.safetensors"},
+            {"displayName", "Wan VAE"}, {"recommendedOptions", QJsonObject{{"subtype", "vae"}}}};
+        const QJsonObject encoder{{"id", "companion:umt5-xxl.gguf"}, {"fileName", "umt5-xxl.gguf"},
+            {"displayName", "UMT5-XXL"}, {"recommendedOptions", QJsonObject{{"subtype", "t5xxl"}}}};
+        const QJsonObject wan{{"id", "animation:wan-low.gguf"}, {"fileName", "wan-low.gguf"}, {"displayName", "Wan 2.2"},
+            {"bytes", 20}, {"explicitContent", false}, {"modelType", "diffusion"},
+            {"recommendedOptions", QJsonObject{{"vaeModelId", vae.value("id")}, {"textEncoderModelId", encoder.value("id")}}},
+            {"companionFiles", QJsonObject{{"high-noise", "companions/wan-low.gguf/high-noise/wan-high.gguf"},
+                                           {"lora-low-noise", "companions/wan-low.gguf/lora/low.safetensors"}}},
+            {"missingFiles", QJsonArray{"lora-low-noise"}}};
+        return {QJsonObject{{"category", "companion"}, {"models", QJsonArray{vae, encoder}}},
+                QJsonObject{{"category", "animation"}, {"models", QJsonArray{wan}}}};
+    }
+    int runCli(const QStringList &arguments)
+    {
+        QCommandLineParser parser;
+        ManagerCli::addOptions(parser);
+        if (!parser.parse(QStringList{"nukleus-manager"} + arguments)) return -1;
+        return ManagerCli::run(parser, m_server.serverPort());
     }
   private slots:
     void imageCapabilitiesAndSharedEncoderChoices()
@@ -419,9 +454,14 @@ class ManagerUiTest final : public QObject
                                 }
                                 else if (object.value("type") == "models.list")
                                     listModels();
-                                else if (object.value("type") == "models.install")
+                                else if (object.value("type") == "models.install") {
                                     send({{"type", "models.install.accepted"},
                                           {"installId", object.value("installId")}});
+                                    if (m_completeInstalls)
+                                        send({{"type", "models.install.completed"}, {"installId", object.value("installId")},
+                                              {"model", QJsonObject{{"id", object.value("id").toString(
+                                                  object.value("category").toString() + ":installed.gguf")}}}});
+                                }
                                 else if (object.value("type") == "models.install.cancel")
                                     send({{"type", "models.install.canceled"},
                                           {"installId", object.value("installId")}});
@@ -432,6 +472,8 @@ class ManagerUiTest final : public QObject
     {
         m_messages.clear();
         m_requiredToken.clear();
+        m_extraCategories = {};
+        m_completeInstalls = false;
         m_saved = Nukleus::Protocol::defaultModelOptions("image-generation");
         QSettings().clear();
     }
@@ -635,7 +677,7 @@ class ManagerUiTest final : public QObject
         QVERIFY(tree);
         QCOMPARE(tree->model()->rowCount(), 1);
         auto root = tree->model()->index(0, 0);
-        QCOMPARE(tree->model()->rowCount(root), 4);
+        QCOMPARE(tree->model()->rowCount(root), 5);
         auto branch = tree->model()->index(1, 0, root);
         auto model = tree->model()->index(0, 0, branch);
         tree->setCurrentIndex(model);
@@ -850,6 +892,317 @@ class ManagerUiTest final : public QObject
             QVERIFY(
                 preview.grab().save(qEnvironmentVariable("NUKLEUS_MANAGER_SCREENSHOT_DIR") + "/add-model.png"));
         }
+    }
+    void animationBranchListsFilesAndMissingFiles_R10()
+    {
+        m_extraCategories = animationCatalogue();
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        ManageModelsWindow window(nullptr, &client);
+        window.show();
+        QTRY_COMPARE(client.models("animation").size(), 1);
+        auto *tree = window.findChild<Ardoise::TreeView *>("installedModelsTree");
+        const auto root = tree->model()->index(0, 0);
+        QModelIndex branch;
+        for (int row = 0; row < tree->model()->rowCount(root); ++row)
+            if (tree->model()->index(row, 0, root).data(Qt::UserRole + 2) == "animation") branch = tree->model()->index(row, 0, root);
+        QVERIFY(branch.isValid());
+        QCOMPARE(branch.data().toString(), QString("Animation"));
+        QCOMPARE(tree->model()->rowCount(branch), 1);
+        const auto model = tree->model()->index(0, 0, branch);
+        QCOMPARE(model.data().toString(), QString("Wan 2.2"));
+        QCOMPARE(model.data(Qt::UserRole + 1).toString(), QString("animation:wan-low.gguf"));
+        QHash<QString, QModelIndex> files;
+        for (int row = 0; row < tree->model()->rowCount(model); ++row) {
+            const auto file = tree->model()->index(row, 0, model);
+            files.insert(file.data(Qt::UserRole + 4).toString(), file);
+        }
+        QCOMPARE(files.size(), 4);
+        QCOMPARE(files.value("high-noise").data().toString(), QString("High-noise model: wan-high.gguf"));
+        QVERIFY(!files.value("high-noise").data(Qt::UserRole + 5).toBool());
+        QCOMPARE(files.value("lora-low-noise").data().toString(), QString("Low-noise LoRA: missing (low.safetensors)"));
+        QVERIFY(files.value("lora-low-noise").data(Qt::UserRole + 5).toBool());
+        QCOMPARE(files.value("vae").data().toString(), QString("VAE: Wan VAE"));
+        QCOMPARE(files.value("text-encoder").data().toString(), QString("Text encoder: UMT5-XXL"));
+        QVERIFY(!files.contains("lora-high-noise"));
+        // The T5-XXL companion has its own group in the Companion branch.
+        QVERIFY(!tree->model()->match(root, Qt::UserRole + 3, "t5xxl", 1, Qt::MatchExactly | Qt::MatchRecursive).isEmpty());
+        tree->setCurrentIndex(model);
+        bool missingShown = false;
+        for (auto *label : window.findChildren<QLabel *>()) missingShown = missingShown || label->text().contains("Missing files: Low-noise LoRA");
+        QVERIFY(missingShown);
+        QVERIFY(window.findChild<QPushButton *>("attachModelFiles")->isEnabled());
+        auto *form = window.findChild<ModelOptionsWidget *>();
+        QCOMPARE(form->findChild<QComboBox *>("vaeModelId")->currentData().toString(), QString("companion:wan_2.1_vae.safetensors"));
+        auto *encoder = form->findChild<QComboBox *>("textEncoderModelId");
+        QCOMPARE(encoder->currentData().toString(), QString("companion:umt5-xxl.gguf"));
+        QCOMPARE(encoder->count(), 2);
+        QVERIFY(form->isValid());
+        // A model with every file present is not marked.
+        auto catalogue = animationCatalogue();
+        auto animation = catalogue.at(1).toObject();
+        auto wan = animation.value("models").toArray().at(0).toObject();
+        wan.insert("missingFiles", QJsonArray{});
+        animation.insert("models", QJsonArray{wan});
+        catalogue.replace(1, animation);
+        m_extraCategories = catalogue;
+        client.requestModels();
+        QTRY_VERIFY(client.models("animation").value(0).missingFiles.isEmpty());
+        const auto refreshed = tree->model()->match(tree->model()->index(0, 0), Qt::UserRole + 4, "lora-low-noise", 1, Qt::MatchExactly | Qt::MatchRecursive);
+        QVERIFY(!refreshed.isEmpty());
+        QVERIFY(!refreshed.first().data(Qt::UserRole + 5).toBool());
+        QCOMPARE(refreshed.first().data().toString(), QString("Low-noise LoRA: low.safetensors"));
+        window.close();
+    }
+    void animationFormInstallsCompanionsBeforeModel_R11()
+    {
+        auto catalogue = animationCatalogue();
+        m_extraCategories = QJsonArray{catalogue.at(0)};
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        client.connectToService();
+        QTRY_COMPARE(client.models("companion").size(), 2);
+        AddModelDialog dialog(&client, "animation");
+        dialog.show();
+        auto *start = dialog.findChild<QPushButton *>("startDownload");
+        auto *vae = dialog.findChild<QComboBox *>("vaeModelId");
+        auto *encoder = dialog.findChild<QComboBox *>("textEncoderModelId");
+        auto *newVae = dialog.findChild<QLineEdit *>("newVaeUrl");
+        QVERIFY(dialog.findChild<QLineEdit *>("highNoiseUrl")->isVisible());
+        QVERIFY(dialog.findChild<QLineEdit *>("loraLowNoiseUrl")->isVisible());
+        QVERIFY(dialog.findChild<QLineEdit *>("loraHighNoiseUrl")->isVisible());
+        QVERIFY(!dialog.findChild<QComboBox *>("modelType")->isVisible());
+        QVERIFY(!newVae->isVisible());
+        // VAE: the installed VAE or a new one; text encoder: only T5-XXL companions.
+        QCOMPARE(vae->count(), 3);
+        QCOMPARE(encoder->count(), 3);
+        QCOMPARE(encoder->itemData(1).toString(), QString("companion:umt5-xxl.gguf"));
+        dialog.findChild<QLineEdit *>("modelDisplayName")->setText("Wan 2.2 I2V");
+        dialog.findChild<QLineEdit *>("modelUrl")->setText("https://example.test/wan-low.gguf");
+        dialog.findChild<QLineEdit *>("highNoiseUrl")->setText("https://example.test/wan-high.gguf");
+        QVERIFY(!start->isEnabled());
+        vae->setCurrentIndex(vae->findData(ModelOptionsWidget::newCompanionId()));
+        encoder->setCurrentIndex(1);
+        QVERIFY(newVae->isVisible());
+        QVERIFY(!dialog.findChild<QLineEdit *>("newTextEncoderUrl")->isVisible());
+        QVERIFY(!start->isEnabled());
+        newVae->setText("https://example.test/wan_2.2_vae.safetensors");
+        QVERIFY(start->isEnabled());
+        m_messages.clear();
+        start->click();
+        QTRY_COMPARE(installRequests().size(), 1);
+        const auto companion = installRequests().first();
+        QCOMPARE(companion.value("category").toString(), QString("companion"));
+        QCOMPARE(companion.value("url").toString(), QString("https://example.test/wan_2.2_vae.safetensors"));
+        QCOMPARE(companion.value("recommendedOptions").toObject(), (QJsonObject{{"subtype", "vae"}}));
+        QCOMPARE(companion.value("displayName").toString(), QString("wan_2.2_vae"));
+        QTRY_VERIFY(dialog.findChild<QLabel *>("installStatus")->text().startsWith("Step 1 of 2"));
+        send({{"type", "models.install.completed"}, {"installId", companion.value("installId")},
+              {"model", QJsonObject{{"id", "companion:wan_2.2_vae.safetensors"}}}});
+        QTRY_COMPARE(installRequests().size(), 2);
+        const auto model = installRequests().last();
+        QCOMPARE(model.value("category").toString(), QString("animation"));
+        QCOMPARE(model.value("url").toString(), QString("https://example.test/wan-low.gguf"));
+        QCOMPARE(model.value("displayName").toString(), QString("Wan 2.2 I2V"));
+        QCOMPARE(model.value("modelType").toString(), QString("diffusion"));
+        QCOMPARE(model.value("recommendedOptions").toObject(),
+                 (QJsonObject{{"vaeModelId", "companion:wan_2.2_vae.safetensors"}, {"textEncoderModelId", "companion:umt5-xxl.gguf"}}));
+        QCOMPARE(model.value("companionUrls").toObject(), (QJsonObject{{"high-noise", "https://example.test/wan-high.gguf"}}));
+        QVERIFY(!model.value("explicitContent").toBool(true));
+        QTRY_VERIFY(dialog.findChild<QLabel *>("installStatus")->text().startsWith("Step 2 of 2"));
+        QVERIFY(!newVae->isVisible());
+        QSignalSpy installed(&dialog, &AddModelDialog::modelInstalled);
+        send({{"type", "models.install.completed"}, {"installId", model.value("installId")},
+              {"model", QJsonObject{{"id", "animation:wan-low.gguf"}}}});
+        QTRY_VERIFY(!dialog.isVisible());
+        QCOMPARE(dialog.result(), int(QDialog::Accepted));
+        QCOMPARE(installed.value(0).value(0).toString(), QString("animation:wan-low.gguf"));
+        // The model is then listed with both companion IDs.
+        m_extraCategories = catalogue;
+        client.requestModels();
+        QTRY_COMPARE(client.models("animation").size(), 1);
+        QCOMPARE(client.models("animation").first().recommendedOptions.value("textEncoderModelId").toString(), QString("companion:umt5-xxl.gguf"));
+
+        // Closing the form during the model installation cancels it; the new companion stays installed.
+        AddModelDialog closing(&client, "animation");
+        closing.show();
+        closing.findChild<QLineEdit *>("modelDisplayName")->setText("Wan 2.2 TI2V");
+        closing.findChild<QLineEdit *>("modelUrl")->setText("https://example.test/ti2v.gguf");
+        auto *closingEncoder = closing.findChild<QComboBox *>("textEncoderModelId");
+        closing.findChild<QComboBox *>("vaeModelId")->setCurrentIndex(1);
+        closingEncoder->setCurrentIndex(closingEncoder->findData(ModelOptionsWidget::newCompanionId()));
+        closing.findChild<QLineEdit *>("newTextEncoderUrl")->setText("https://example.test/umt5-q4.gguf");
+        m_messages.clear();
+        closing.findChild<QPushButton *>("startDownload")->click();
+        QTRY_COMPARE(installRequests().size(), 1);
+        QCOMPARE(installRequests().first().value("recommendedOptions").toObject(), (QJsonObject{{"subtype", "t5xxl"}}));
+        send({{"type", "models.install.completed"}, {"installId", installRequests().first().value("installId")},
+              {"model", QJsonObject{{"id", "companion:umt5-q4.gguf"}}}});
+        QTRY_COMPARE(installRequests().size(), 2);
+        const QString second = installRequests().last().value("installId").toString();
+        QCOMPARE(installRequests().last().value("recommendedOptions").toObject().value("textEncoderModelId").toString(),
+                 QString("companion:umt5-q4.gguf"));
+        QTRY_VERIFY(client.installs().last().state == ManagedInstallState::Accepted);
+        closing.close();
+        QTRY_VERIFY(!closing.isVisible());
+        QVERIFY(std::any_of(m_messages.cbegin(), m_messages.cend(), [&](const QJsonObject &message) {
+            return message.value("type") == "models.install.cancel" && message.value("installId") == second;
+        }));
+        QCOMPARE(client.installs().last().state, ManagedInstallState::Canceled);
+        QVERIFY(std::none_of(m_messages.cbegin(), m_messages.cend(), [](const QJsonObject &message) {
+            return message.value("type") == "models.delete";
+        }));
+    }
+    void animationFormRetriesModelWithoutReinstallingCompanion_R11()
+    {
+        m_extraCategories = QJsonArray{animationCatalogue().at(0)};
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        client.connectToService();
+        QTRY_COMPARE(client.models("companion").size(), 2);
+        AddModelDialog dialog(&client, "animation");
+        dialog.show();
+        dialog.findChild<QLineEdit *>("modelDisplayName")->setText("Wan");
+        dialog.findChild<QLineEdit *>("modelUrl")->setText("https://example.test/wan.gguf");
+        auto *vae = dialog.findChild<QComboBox *>("vaeModelId");
+        vae->setCurrentIndex(vae->findData(ModelOptionsWidget::newCompanionId()));
+        dialog.findChild<QComboBox *>("textEncoderModelId")->setCurrentIndex(1);
+        dialog.findChild<QLineEdit *>("newVaeUrl")->setText("https://example.test/vae.safetensors");
+        auto *start = dialog.findChild<QPushButton *>("startDownload");
+        m_messages.clear();
+        start->click();
+        QTRY_COMPARE(installRequests().size(), 1);
+        send({{"type", "models.install.completed"}, {"installId", installRequests().first().value("installId")},
+              {"model", QJsonObject{{"id", "companion:vae.safetensors"}}}});
+        QTRY_COMPARE(installRequests().size(), 2);
+        send({{"type", "error"}, {"installId", installRequests().last().value("installId")}, {"message", "Network failed"}});
+        QTRY_VERIFY(start->isEnabled());
+        QCOMPARE(dialog.findChild<QLabel *>("installStatus")->text(), QString("Network failed"));
+        QCOMPARE(vae->currentData().toString(), QString("companion:vae.safetensors"));
+        start->click();
+        QTRY_COMPARE(installRequests().size(), 3);
+        QCOMPARE(installRequests().last().value("category").toString(), QString("animation"));
+        QCOMPARE(installRequests().last().value("recommendedOptions").toObject().value("vaeModelId").toString(),
+                 QString("companion:vae.safetensors"));
+        dialog.close();
+        QTRY_VERIFY(!dialog.isVisible());
+    }
+    void animationOptionalFilesAttachAndRemove_R12()
+    {
+        m_extraCategories = animationCatalogue();
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        client.connectToService();
+        QTRY_COMPARE(client.models("animation").size(), 1);
+        AddModelDialog dialog(&client, "animation", nullptr, "animation:wan-low.gguf");
+        dialog.show();
+        auto *highNoise = dialog.findChild<QLineEdit *>("highNoiseUrl");
+        auto *loraLow = dialog.findChild<QLineEdit *>("loraLowNoiseUrl");
+        auto *loraHigh = dialog.findChild<QLineEdit *>("loraHighNoiseUrl");
+        auto *start = dialog.findChild<QPushButton *>("startDownload");
+        QVERIFY(!dialog.findChild<QLineEdit *>("modelUrl")->isVisible());
+        QVERIFY(!dialog.findChild<QLineEdit *>("companionUrl")->isVisible());
+        QVERIFY(!dialog.findChild<QLineEdit *>("newVaeUrl")->isVisible());
+        QVERIFY(highNoise->isVisible() && !highNoise->isEnabled());
+        QVERIFY(dialog.findChild<QPushButton *>("highNoiseUrlRemove")->isVisible());
+        QVERIFY(loraLow->isEnabled());
+        QVERIFY(loraLow->placeholderText().startsWith("Missing"));
+        QVERIFY(loraHigh->isEnabled());
+        QVERIFY(!dialog.findChild<QPushButton *>("loraHighNoiseUrlRemove")->isVisible());
+        QVERIFY(!start->isEnabled());
+        QTimer::singleShot(0, &dialog, [] {
+            auto *question = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+            QVERIFY(question);
+            question->button(QMessageBox::Yes)->click();
+        });
+        m_messages.clear();
+        dialog.findChild<QPushButton *>("highNoiseUrlRemove")->click();
+        QTRY_VERIFY(!m_messages.isEmpty());
+        QCOMPARE(m_messages.last().value("type").toString(), QString("models.companion.delete"));
+        QCOMPARE(m_messages.last().value("id").toString(), QString("animation:wan-low.gguf"));
+        QCOMPARE(m_messages.last().value("role").toString(), QString("high-noise"));
+        send({{"type", "models.companion.delete.completed"}, {"id", "animation:wan-low.gguf"}, {"role", "high-noise"}});
+        QTRY_VERIFY(highNoise->isEnabled());
+        QVERIFY(!dialog.findChild<QPushButton *>("highNoiseUrlRemove")->isVisible());
+        loraHigh->setText("https://example.test/high_lightx2v.safetensors");
+        loraLow->setText("https://example.test/low_lightx2v.safetensors");
+        QVERIFY(start->isEnabled());
+        m_messages.clear();
+        start->click();
+        QTRY_COMPARE(installRequests().size(), 1);
+        const auto request = installRequests().first();
+        QCOMPARE(request.value("category").toString(), QString("animation"));
+        QCOMPARE(request.value("id").toString(), QString("animation:wan-low.gguf"));
+        QVERIFY(request.value("url").toString().isEmpty());
+        QCOMPARE(request.value("modelType").toString(), QString("diffusion"));
+        QVERIFY(!request.contains("recommendedOptions"));
+        QVERIFY(!request.contains("displayName"));
+        QVERIFY(!request.contains("explicitContent"));
+        QCOMPARE(request.value("companionUrls").toObject(),
+                 (QJsonObject{{"lora-high-noise", "https://example.test/high_lightx2v.safetensors"},
+                              {"lora-low-noise", "https://example.test/low_lightx2v.safetensors"}}));
+        send({{"type", "models.install.completed"}, {"installId", request.value("installId")},
+              {"model", QJsonObject{{"id", "animation:wan-low.gguf"}}}});
+        QTRY_VERIFY(!dialog.isVisible());
+        QCOMPARE(dialog.result(), int(QDialog::Accepted));
+    }
+    void cliAddsAndAttachesAnimationModels_R13()
+    {
+        m_extraCategories = animationCatalogue();
+        m_completeInstalls = true;
+        QCOMPARE(runCli({"add", "https://example.test/wan-low.gguf", "--category", "animation", "--display-name", "Wan",
+                         "--vae-model", "companion:wan_2.1_vae.safetensors", "--text-encoder-model", "companion:umt5-xxl.gguf",
+                         "--high-noise", "https://example.test/wan-high.gguf",
+                         "--lora-low-noise", "https://example.test/low.safetensors",
+                         "--lora-high-noise", "https://example.test/high.safetensors"}), 0);
+        QCOMPARE(installRequests().size(), 1);
+        auto request = installRequests().last();
+        QCOMPARE(request.value("category").toString(), QString("animation"));
+        QCOMPARE(request.value("url").toString(), QString("https://example.test/wan-low.gguf"));
+        QCOMPARE(request.value("displayName").toString(), QString("Wan"));
+        QCOMPARE(request.value("modelType").toString(), QString("diffusion"));
+        QCOMPARE(request.value("recommendedOptions").toObject(),
+                 (QJsonObject{{"vaeModelId", "companion:wan_2.1_vae.safetensors"}, {"textEncoderModelId", "companion:umt5-xxl.gguf"}}));
+        QCOMPARE(request.value("companionUrls").toObject(),
+                 (QJsonObject{{"high-noise", "https://example.test/wan-high.gguf"},
+                              {"lora-low-noise", "https://example.test/low.safetensors"},
+                              {"lora-high-noise", "https://example.test/high.safetensors"}}));
+
+        // Each file option on attach, alone or together.
+        for (const auto &files : QList<QStringList>{{"--high-noise", "https://example.test/h.gguf"},
+                                                    {"--lora-low-noise", "https://example.test/l.safetensors"},
+                                                    {"--lora-high-noise", "https://example.test/hl.safetensors"}}) {
+            m_messages.clear();
+            QCOMPARE(runCli(QStringList{"attach", "animation:wan-low.gguf"} + files), 0);
+            QCOMPARE(installRequests().size(), 1);
+            request = installRequests().last();
+            QCOMPARE(request.value("id").toString(), QString("animation:wan-low.gguf"));
+            QVERIFY(request.value("url").toString().isEmpty());
+            QVERIFY(!request.contains("recommendedOptions"));
+            QCOMPARE(request.value("companionUrls").toObject(), (QJsonObject{{files.first().mid(2), files.last()}}));
+        }
+
+        // A companion ID on attach replaces that companion and keeps the other.
+        m_messages.clear();
+        QCOMPARE(runCli({"attach", "animation:wan-low.gguf", "--vae-model", "companion:other-vae.safetensors"}), 0);
+        QCOMPARE(installRequests().size(), 1);
+        QCOMPARE(installRequests().last().value("recommendedOptions").toObject(),
+                 (QJsonObject{{"vaeModelId", "companion:other-vae.safetensors"}, {"textEncoderModelId", "companion:umt5-xxl.gguf"}}));
+        m_messages.clear();
+        QCOMPARE(runCli({"attach", "animation:wan-low.gguf", "--text-encoder-model", "companion:other-t5.gguf"}), 0);
+        QCOMPARE(installRequests().last().value("recommendedOptions").toObject(),
+                 (QJsonObject{{"vaeModelId", "companion:wan_2.1_vae.safetensors"}, {"textEncoderModelId", "companion:other-t5.gguf"}}));
+
+        // Rejected before connecting.
+        m_messages.clear();
+        QCOMPARE(runCli({"add", "https://example.test/wan.gguf", "--category", "animation", "--display-name", "Wan",
+                         "--vae-model", "companion:wan_2.1_vae.safetensors"}), 2);
+        QCOMPARE(runCli({"add", "https://example.test/image.gguf", "--category", "image-generation", "--display-name", "Image",
+                         "--lora-low-noise", "https://example.test/low.safetensors"}), 2);
+        QCOMPARE(runCli({"attach", "image-generation:test.gguf", "--high-noise", "https://example.test/h.gguf"}), 2);
+        QCOMPARE(runCli({"attach", "animation:wan-low.gguf", "--vae", "https://example.test/vae.safetensors"}), 2);
+        QCOMPARE(runCli({"attach", "animation:wan-low.gguf"}), 2);
+        QVERIFY(installRequests().isEmpty());
     }
 };
 QTEST_MAIN(ManagerUiTest)

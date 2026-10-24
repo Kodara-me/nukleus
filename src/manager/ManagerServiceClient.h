@@ -29,6 +29,8 @@ struct ManagedModelInfo
     QList<Nukleus::PromptStyle> styles;
     QString displayName;
     QString mmprojModelId;
+    // Animation models: roles whose file or shared companion is absent.
+    QStringList missingFiles;
     QString displayLabel() const { return displayName.trimmed().isEmpty() ? fileName : displayName.trimmed(); }
 };
 
@@ -116,5 +118,6 @@ private:
     QList<ManagedModelInfo> m_upscaleModels;
     QList<ManagedModelInfo> m_llmChatModels;
     QList<ManagedModelInfo> m_companionModels;
+    QList<ManagedModelInfo> m_animationModels;
     QList<ManagedInstall> m_installs;
 };

@@ -407,14 +407,40 @@ VAE and the T5-XXL text encoder are shared companions selected by ID
 (`vaeModelId`, `textEncoderModelId`, both required). One `models.install`
 downloads the model and its attachments; optional files can be attached or
 removed later without downloading the model again. `models.list` reports the
-roles whose file or companion is absent in `missingFiles`. The Manager does not
-offer the category yet; see [the protocol](docs/protocol-v3.md#animation-models).
+roles whose file or companion is absent in `missingFiles`; see
+[the protocol](docs/protocol-v3.md#animation-models).
+
+In the Manager, the Animation branch lists each model with its attached files
+and its VAE and text encoder, and marks every missing one. The add form takes
+the diffusion model, the optional high-noise model and LoRAs (URL or
+**Browse…**), and for the VAE and the text encoder either an installed companion
+of the right subtype or **New from URL or file…**. On **Start download**, the
+Manager installs each new companion first (named after its file), then the model
+with their IDs, one installation at a time. Closing the form cancels the running
+installation; companions already installed stay in the catalogue and can be
+selected again. **Optional files…** attaches or removes the high-noise model and
+the LoRAs of an installed model, and attaches again a file reported missing.
+
+```sh
+nukleus-manager add https://example.com/umt5-xxl-encoder-Q8_0.gguf --category companion --companion-type t5xxl --display-name "UMT5-XXL"
+nukleus-manager add https://example.com/wan2.2_i2v_low_noise_14B_Q4_K_M.gguf --category animation --display-name "Wan 2.2 I2V" \
+    --vae-model companion:wan_2.1_vae.safetensors --text-encoder-model companion:umt5-xxl-encoder-Q8_0.gguf \
+    --high-noise https://example.com/wan2.2_i2v_high_noise_14B_Q4_K_M.gguf \
+    --lora-low-noise https://example.com/low_noise_lightx2v_4step.safetensors \
+    --lora-high-noise https://example.com/high_noise_lightx2v_4step.safetensors
+nukleus-manager attach animation:wan2.2_i2v_low_noise_14B_Q4_K_M.gguf --lora-high-noise https://example.com/high_noise_lightx2v_4step.safetensors
+nukleus-manager attach animation:wan2.2_i2v_low_noise_14B_Q4_K_M.gguf --vae-model companion:other_vae.safetensors
+```
+
+`--vae-model` and `--text-encoder-model` are required for `add`; on `attach`,
+either one replaces that companion and keeps the other.
 Removed model directories and existing identity files are retained on disk.
 Rebuild SDK consumers and deploy the updated Service alongside the updated clients.
 
 ## Shared companions and model forms
 
-Companion entries are grouped as VAE and MMPROJ (vision projector) in Manager.
+Companion entries are grouped as VAE, MMPROJ (vision projector) and T5-XXL
+(animation text encoder) in Manager.
 Install them with their own required names. VAE supports safetensors, ckpt and
 GGUF; MMPROJ supports GGUF. LLM forms replace the optional mmproj URL with a
 dropdown of installed MMPROJ entries, plus None. Save persists the selected ID;

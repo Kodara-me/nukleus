@@ -16,10 +16,17 @@ class ModelOptionsWidget final : public QWidget
     bool isValid() const;
     bool explicitContent() const;
     void setModels(const QList<ManagedModelInfo>& models);
+    // Adds a "New from URL or file" choice to the shared companion selectors of an
+    // animation model; options() then holds newCompanionId() for that key.
+    void setOffersNewCompanions(bool offers);
+    static QString newCompanionId() { return QStringLiteral("new:"); }
+    // Selects a shared model by ID in the selector of key, kept across catalogue refreshes.
+    void selectModel(const QString &key, const QString &id);
   signals:
     void optionsChanged();
 
   private:
+    bool m_offersNewCompanions = false;
     QCheckBox* m_explicitContent = nullptr;
     QString m_category;
     QFormLayout *m_form;

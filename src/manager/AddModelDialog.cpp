@@ -29,6 +29,7 @@ bool validUrl(const QString &text)
     return url.isValid() && url.scheme() == "https" && !url.host().isEmpty() && url.userInfo().isEmpty() &&
            !url.hasFragment() && !url.fileName().isEmpty();
 }
+bool optionalUrl(const QLineEdit *field) { return field->text().trimmed().isEmpty() || validUrl(field->text()); }
 QString bytesText(qint64 bytes) { return QObject::tr("%1 MiB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1); }
 } // namespace
 AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &category, QWidget *parent, const QString &existingModelId)
@@ -46,6 +47,7 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     columns->setSpacing(24);
     auto *content = new QWidget(body);
     auto *form = new QFormLayout(content);
+    m_form = form;
     form->setContentsMargins(0, 0, 0, 0);
     m_displayName = new QLineEdit(content);
     m_displayName->setObjectName("modelDisplayName");
@@ -84,22 +86,30 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
         });
         return row;
     };
+    const auto sourceField = [content](const QString &name, const QString &placeholder) {
+        auto *field = new QLineEdit(content);
+        field->setObjectName(name);
+        field->setPlaceholderText(placeholder);
+        return field;
+    };
     form->setAlignment(Qt::AlignTop);
     form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     m_category = new QComboBox(content);
     m_category->setObjectName("modelCategory");
     for (const auto &item : QList<QPair<QString, QString>>{{tr("Image generation"), "image-generation"},
+                                                           {tr("Animation"), "animation"},
                                                            {tr("Upscaler"), "upscaler"},
                                                            {tr("LLM"), "llm-chat"}, {tr("Companion"), "companion"}})
         m_category->addItem(item.first, item.second);
     if (!category.isEmpty())
         m_category->setCurrentIndex(m_category->findData(category));
-    m_url = new QLineEdit(content);
-    m_url->setObjectName("modelUrl");
-    m_url->setPlaceholderText("https://example.com/model.gguf");
-    m_companion = new QLineEdit(content);
-    m_companion->setObjectName("companionUrl");
-    m_companion->setPlaceholderText(tr("Optional HTTPS companion URL"));
+    m_url = sourceField("modelUrl", "https://example.com/model.gguf");
+    m_companion = sourceField("companionUrl", tr("Optional HTTPS companion URL"));
+    m_highNoise = sourceField("highNoiseUrl", tr("Optional high-noise diffusion model"));
+    m_loraLowNoise = sourceField("loraLowNoiseUrl", tr("Optional low-noise stage LoRA"));
+    m_loraHighNoise = sourceField("loraHighNoiseUrl", tr("Optional high-noise stage LoRA"));
+    m_newVae = sourceField("newVaeUrl", tr("URL or file of the VAE to install"));
+    m_newTextEncoder = sourceField("newTextEncoderUrl", tr("URL or file of the T5-XXL text encoder to install"));
     m_companionLabel = new QLabel(content);
     m_mmprojSelection = new QComboBox(content);
     m_mmprojSelection->setObjectName("llmMmprojCompanion");
@@ -109,10 +119,15 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
         m_mmprojSelection->setProperty("selectedModelId", m_mmprojSelection->currentData());
     });
     connect(m_client, &ManagerServiceClient::modelsChanged, this, &AddModelDialog::refreshCompanions);
-    refreshCompanions();
     form->addRow(tr("Category:"), m_category);
-    form->addRow(tr("Model URL or file:"), sourceRow(m_url));
+    m_urlLabel = new QLabel(tr("Model URL or file:"), content);
+    form->addRow(m_urlLabel, sourceRow(m_url));
     form->addRow(m_companionLabel, sourceRow(m_companion));
+    form->addRow(tr("High-noise model:"), sourceRow(m_highNoise));
+    form->addRow(tr("Low-noise LoRA:"), sourceRow(m_loraLowNoise));
+    form->addRow(tr("High-noise LoRA:"), sourceRow(m_loraHighNoise));
+    form->addRow(tr("New VAE:"), sourceRow(m_newVae));
+    form->addRow(tr("New text encoder:"), sourceRow(m_newTextEncoder));
     m_modelType = new QComboBox(content);
     m_modelType->setObjectName("modelType");
     m_modelType->addItem(tr("Complete checkpoint"), "checkpoint");
@@ -126,8 +141,10 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     auto *heading = new QLabel(tr("Recommended options"), recommendations);
     optionsLayout->addWidget(heading);
     m_options = new ModelOptionsWidget(recommendations);
+    m_options->setOffersNewCompanions(m_existingModelId.isEmpty());
     optionsLayout->addWidget(m_options);
     optionsLayout->addStretch();
+    refreshCompanions();
     columns->addWidget(content, 1);
     columns->addWidget(recommendations, 1);
     layout->addLayout(columns, 1);
@@ -149,8 +166,8 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     layout->addLayout(buttons);
     connect(m_category, &QComboBox::currentIndexChanged, this, &AddModelDialog::updateCategory);
     connect(m_displayName, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
-    connect(m_url, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
-    connect(m_companion, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
+    for (auto *field : {m_url, m_companion, m_highNoise, m_loraLowNoise, m_loraHighNoise, m_newVae, m_newTextEncoder})
+        connect(field, &QLineEdit::textChanged, this, &AddModelDialog::updateActions);
     connect(m_options, &ModelOptionsWidget::optionsChanged, this, &AddModelDialog::updateActions);
     connect(m_start, &QPushButton::clicked, this, &AddModelDialog::startInstall);
     connect(m_cancel, &QPushButton::clicked, this, &AddModelDialog::reject);
@@ -158,8 +175,10 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     connect(m_client, &ManagerServiceClient::companionDeleted, this, [this](const QString& id, const QString& role) {
         if (id != m_existingModelId) return;
         m_attachedFiles.remove(role);
+        m_missingFiles.removeAll(role);
         m_pendingRemoval.clear();
-        if (roleFor(m_companion) == role) { m_companion->clear(); m_companion->setPlaceholderText({}); }
+        for (auto *field : QList<QLineEdit*>{m_companion} + animationFiles())
+            if (roleFor(field) == role) { field->clear(); field->setPlaceholderText({}); }
         m_status->setText(tr("Companion removed. Choose a replacement file or URL."));
         updateActions();
     });
@@ -173,36 +192,50 @@ AddModelDialog::AddModelDialog(ManagerServiceClient *client, const QString &cate
     });
     updateCategory();
     if (!m_existingModelId.isEmpty()) {
-        m_url->hide();
-        form->labelForField(m_url->parentWidget())->hide();
         recommendations->hide();
         for (const auto &model : m_client->models(category)) {
             if (model.id != m_existingModelId) continue;
             m_attachedFiles = model.companionFiles;
+            m_missingFiles = model.missingFiles;
             if (!model.companionFileName.isEmpty()) m_attachedFiles.insert(model.companionRole, model.companionFileName);
             m_modelType->setCurrentIndex(m_modelType->findData(model.modelType));
         }
-        const QList<QPair<QString, QLineEdit*>> fields{{roleFor(m_companion), m_companion}};
-        for (const auto &field : fields)
-            if (m_attachedFiles.contains(field.first)) field.second->setPlaceholderText(tr("Already attached: %1").arg(m_attachedFiles.value(field.first).toString().section('/', -1)));
+        for (auto *field : QList<QLineEdit*>{m_companion} + animationFiles()) {
+            const QString role = roleFor(field);
+            if (!m_attachedFiles.contains(role)) continue;
+            const QString name = m_attachedFiles.value(role).toString().section('/', -1);
+            field->setPlaceholderText(m_missingFiles.contains(role) ? tr("Missing: %1").arg(name)
+                                                                    : tr("Already attached: %1").arg(name));
+        }
         updateActions();
     }
+}
+bool AddModelDialog::isAnimation() const { return m_category->currentData().toString() == "animation"; }
+QList<QLineEdit*> AddModelDialog::animationFiles() const { return {m_highNoise, m_loraLowNoise, m_loraHighNoise}; }
+void AddModelDialog::showRow(QLineEdit *field, bool visible)
+{
+    field->parentWidget()->setVisible(visible);
+    if (auto *label = m_form->labelForField(field->parentWidget())) label->setVisible(visible);
 }
 void AddModelDialog::updateCategory()
 {
     const QString category = m_category->currentData().toString();
     m_companion->clear();
     const bool supports = category == "image-generation" && !m_existingModelId.isEmpty();
-    m_companion->setVisible(supports);
-    m_companionLabel->setVisible(supports);
     m_companionLabel->setText(tr("Optional VAE URL:"));
+    showRow(m_companion, supports);
+    const bool animation = category == "animation";
+    m_urlLabel->setText(animation ? tr("Diffusion model URL or file:") : tr("Model URL or file:"));
+    for (auto *field : animationFiles()) {
+        if (!animation) field->clear();
+        showRow(field, animation);
+    }
     m_mmprojSelection->setVisible(category == "llm-chat");
     m_mmprojSelectionLabel->setVisible(category == "llm-chat");
     m_recommendations->setVisible(category != "upscaler");
     const bool image = category == "image-generation";
     m_modelType->setVisible(image);
     m_modelTypeLabel->setVisible(image);
-    m_companion->parentWidget()->setVisible(supports);
     m_modelType->setCurrentIndex(0);
     m_options->setOptions(category);
     m_options->setModels(m_client->models("companion") + m_client->models("llm-chat"));
@@ -211,52 +244,117 @@ void AddModelDialog::updateCategory()
 void AddModelDialog::updateActions()
 {
     const bool busy = m_busy || !m_pendingRemoval.isEmpty();
-    m_category->setEnabled(!busy && m_existingModelId.isEmpty());
+    const bool adding = m_existingModelId.isEmpty();
+    const bool animation = isAnimation();
+    const QJsonObject options = m_options->options();
+    const bool newVae = animation && adding && options.value("vaeModelId") == ModelOptionsWidget::newCompanionId();
+    const bool newTextEncoder = animation && adding && options.value("textEncoderModelId") == ModelOptionsWidget::newCompanionId();
+    showRow(m_newVae, newVae);
+    showRow(m_newTextEncoder, newTextEncoder);
+    m_category->setEnabled(!busy && adding);
     m_url->setEnabled(!busy);
     m_displayName->setEnabled(!busy);
-    m_companion->setEnabled(!busy && !m_attachedFiles.contains(roleFor(m_companion)));
-    for (auto* field : {m_url, m_companion}) {
+    const auto attachable = [this](QLineEdit *field) {
+        const QString role = roleFor(field);
+        return !m_attachedFiles.contains(role) || m_missingFiles.contains(role);
+    };
+    for (auto *field : QList<QLineEdit*>{m_companion} + animationFiles())
+        field->setEnabled(!busy && attachable(field));
+    for (auto *field : {m_newVae, m_newTextEncoder}) field->setEnabled(!busy);
+    for (auto* field : {m_url, m_companion, m_highNoise, m_loraLowNoise, m_loraHighNoise, m_newVae, m_newTextEncoder}) {
         field->parentWidget()->findChild<QPushButton*>(field->objectName() + "Browse")->setEnabled(field->isEnabled());
         auto* remove = field->parentWidget()->findChild<QPushButton*>(field->objectName() + "Remove");
-        remove->setVisible(!m_existingModelId.isEmpty() && m_attachedFiles.contains(roleFor(field)));
+        remove->setVisible(!adding && !roleFor(field).isEmpty() && m_attachedFiles.contains(roleFor(field)));
         remove->setEnabled(!busy && m_client->isAuthenticated());
     }
-    m_url->parentWidget()->setVisible(m_existingModelId.isEmpty());
+    showRow(m_url, adding);
     m_modelType->setEnabled(!busy);
     m_options->setEnabled(!busy);
-    m_displayName->setEnabled(!busy);
     m_mmprojSelection->setEnabled(!busy);
-    m_start->setEnabled(!busy && m_client->isAuthenticated() && (!m_existingModelId.isEmpty() || validUrl(m_url->text())) &&
-        (!m_existingModelId.isEmpty() || !m_displayName->text().trimmed().isEmpty()) &&
-                        (m_category->currentData() == "upscaler" || m_companion->text().trimmed().isEmpty() ||
-                         validUrl(m_companion->text())) &&
-                        m_options->isValid());
+    bool files = true;
+    for (auto *field : QList<QLineEdit*>{m_companion} + animationFiles()) files = files && optionalUrl(field);
+    bool anyFile = false;
+    for (auto *field : animationFiles()) anyFile = anyFile || !field->text().trimmed().isEmpty();
+    m_start->setEnabled(!busy && m_client->isAuthenticated() && files
+        && (adding ? validUrl(m_url->text()) && !m_displayName->text().trimmed().isEmpty() && m_options->isValid()
+                   : !animation || anyFile)
+        && (!newVae || validUrl(m_newVae->text())) && (!newTextEncoder || validUrl(m_newTextEncoder->text())));
     m_cancel->setEnabled(!m_canceling);
 }
 void AddModelDialog::startInstall()
 {
-    m_installId.clear();
+    m_pendingCompanions.clear();
+    if (isAnimation() && m_existingModelId.isEmpty()) {
+        // New shared companions are installed first, each in its own installation, then the model with their IDs.
+        const QJsonObject options = m_options->options();
+        for (const auto &key : {QString("vaeModelId"), QString("textEncoderModelId")})
+            if (options.value(key) == ModelOptionsWidget::newCompanionId()) m_pendingCompanions.append(key);
+    }
+    m_step = 0;
+    m_stepCount = m_pendingCompanions.size() + 1;
     m_busy = true;
-    m_status->setText(tr("Requesting installation…"));
     m_progress->show();
     m_progress->setRange(0, 0);
+    startNextStep();
+}
+void AddModelDialog::startNextStep()
+{
+    m_installId.clear();
+    m_installingCompanion.clear();
+    ++m_step;
+    m_status->setText(tr("Requesting installation…"));
     updateActions();
-    QJsonObject files;
-    m_installId = m_client->installModel(m_category->currentData().toString(), QUrl(m_url->text().trimmed()),
-        QUrl(m_companion->text().trimmed()), m_existingModelId.isEmpty() ? m_options->options() : QJsonObject{},
-        files, m_modelType->isHidden() ? QString("checkpoint") : m_modelType->currentData().toString(), m_existingModelId,
-        m_existingModelId.isEmpty() && m_category->currentData().toString() != "upscaler" && m_category->currentData().toString() != "companion"
-            ? std::optional<bool>(m_options->explicitContent()) : std::nullopt,
-        m_existingModelId.isEmpty() ? std::optional<QString>(m_displayName->text()) : std::nullopt,
-        m_category->currentData().toString() == "llm-chat" ? std::optional<QString>(m_mmprojSelection->currentData().toString()) : std::nullopt);
-    if (m_installId.isEmpty())
+    const bool started = m_pendingCompanions.isEmpty() ? startModelInstall() : startCompanionInstall(m_pendingCompanions.first());
+    if (!started)
     {
         m_busy = false;
+        m_progress->hide();
         m_status->setText(tr("Could not start installation."));
         updateActions();
     }
     else
         updateProgress();
+}
+bool AddModelDialog::startCompanionInstall(const QString &key)
+{
+    const bool vae = key == "vaeModelId";
+    const QUrl source((vae ? m_newVae : m_newTextEncoder)->text().trimmed());
+    // A companion installed from the form is named after its file; it can be renamed in the model list.
+    const QString name = QFileInfo(source.fileName()).completeBaseName();
+    m_installingCompanion = key;
+    m_installId = m_client->installModel("companion", source, {}, QJsonObject{{"subtype", vae ? "vae" : "t5xxl"}}, {},
+        QStringLiteral("checkpoint"), {}, std::nullopt, name.isEmpty() ? source.fileName() : name);
+    return !m_installId.isEmpty();
+}
+bool AddModelDialog::startModelInstall()
+{
+    const QString category = m_category->currentData().toString();
+    const bool animation = category == "animation";
+    QJsonObject files;
+    if (animation)
+        for (auto *field : animationFiles())
+            if (!field->text().trimmed().isEmpty()) files.insert(roleFor(field), field->text().trimmed());
+    const QString modelType = animation ? QStringLiteral("diffusion")
+        : m_modelType->isHidden() ? QStringLiteral("checkpoint") : m_modelType->currentData().toString();
+    const bool classified = category != "upscaler" && category != "companion";
+    m_installId = m_client->installModel(category, QUrl(m_url->text().trimmed()),
+        QUrl(m_companion->text().trimmed()), m_existingModelId.isEmpty() ? m_options->options() : QJsonObject{},
+        files, modelType, m_existingModelId,
+        m_existingModelId.isEmpty() && classified ? std::optional<bool>(m_options->explicitContent()) : std::nullopt,
+        m_existingModelId.isEmpty() ? std::optional<QString>(m_displayName->text()) : std::nullopt,
+        category == "llm-chat" ? std::optional<QString>(m_mmprojSelection->currentData().toString()) : std::nullopt);
+    return !m_installId.isEmpty();
+}
+QString AddModelDialog::fileRoleLabel(const QString &role) const
+{
+    if (m_installingCompanion == "vaeModelId") return tr("VAE");
+    if (m_installingCompanion == "textEncoderModelId") return tr("text encoder");
+    if (role == "primary") return isAnimation() ? tr("diffusion model") : tr("model");
+    if (role == "companion") return tr("companion");
+    if (role == "high-noise") return tr("high-noise model");
+    if (role == "lora-low-noise") return tr("low-noise LoRA");
+    if (role == "lora-high-noise") return tr("high-noise LoRA");
+    return role;
 }
 void AddModelDialog::updateProgress()
 {
@@ -266,6 +364,15 @@ void AddModelDialog::updateProgress()
             continue;
         if (install.state == ManagedInstallState::Completed)
         {
+            if (!m_installingCompanion.isEmpty())
+            {
+                // The companion is now installed: the model refers to it, and a retry will not install it again.
+                const QString key = m_pendingCompanions.takeFirst();
+                (key == "vaeModelId" ? m_newVae : m_newTextEncoder)->clear();
+                m_options->selectModel(key, install.modelId);
+                startNextStep();
+                return;
+            }
             m_busy = false;
             emit modelInstalled(install.modelId);
             accept();
@@ -287,15 +394,16 @@ void AddModelDialog::updateProgress()
             updateActions();
             return;
         }
+        const QString step = m_stepCount > 1 ? tr("Step %1 of %2: ").arg(m_step).arg(m_stepCount) : QString();
         if (m_canceling)
             m_status->setText(tr("Canceling installation…"));
         else if (install.state == ManagedInstallState::Verifying)
-            m_status->setText(tr("Finalizing installation…"));
+            m_status->setText(step + tr("Finalizing installation…"));
         else if (install.state == ManagedInstallState::Downloading)
         {
-            m_status->setText(
+            m_status->setText(step +
                 tr("Downloading %1: %2%3")
-                    .arg(install.fileRole == "primary" ? tr("model") : install.fileRole == "companion" ? tr("companion") : install.fileRole,
+                    .arg(fileRoleLabel(install.fileRole),
                          bytesText(install.bytesDownloaded),
                          install.totalBytes ? tr(" / %1").arg(bytesText(*install.totalBytes)) : QString()));
             if (install.totalBytes && *install.totalBytes > 0)
@@ -306,6 +414,8 @@ void AddModelDialog::updateProgress()
             else
                 m_progress->setRange(0, 0);
         }
+        else if (!step.isEmpty())
+            m_status->setText(step + tr("Requesting installation…"));
         updateActions();
         return;
     }
@@ -341,6 +451,9 @@ QString AddModelDialog::roleFor(QLineEdit* field) const
         const QString category = m_category->currentData().toString();
         return category == "llm-chat" ? "mmproj" : "vae";
     }
+    if (field == m_highNoise) return QStringLiteral("high-noise");
+    if (field == m_loraLowNoise) return QStringLiteral("lora-low-noise");
+    if (field == m_loraHighNoise) return QStringLiteral("lora-high-noise");
     return {};
 }
 

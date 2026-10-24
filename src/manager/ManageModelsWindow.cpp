@@ -28,8 +28,52 @@ namespace
 {
 const QList<QPair<QString, QString>> categories{{"llm-chat", "LLM"},
                                                 {"image-generation", "Image generation"},
+                                                {"animation", "Animation"},
                                                 {"upscaler", "Upscaler"}, {"companion", "Companion"}};
 QString sizeText(qint64 bytes) { return QObject::tr("%1 MiB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1); }
+QString animationRoleLabel(const QString &role)
+{
+    if (role == "primary") return QObject::tr("Diffusion model");
+    if (role == "high-noise") return QObject::tr("High-noise model");
+    if (role == "lora-low-noise") return QObject::tr("Low-noise LoRA");
+    if (role == "lora-high-noise") return QObject::tr("High-noise LoRA");
+    if (role == "vae") return QObject::tr("VAE");
+    if (role == "text-encoder") return QObject::tr("Text encoder");
+    return role;
+}
+// Children of an animation model: its attached files and shared companions, each absent one marked missing.
+QList<QStandardItem*> animationFileItems(const ManagedModelInfo &model, const QList<ManagedModelInfo> &companions)
+{
+    QList<QStandardItem*> items;
+    const auto add = [&](const QString &role, const QString &file) {
+        const bool missing = model.missingFiles.contains(role);
+        auto *item = new QStandardItem(missing
+            ? QObject::tr("%1: missing%2").arg(animationRoleLabel(role), file.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(file))
+            : QStringLiteral("%1: %2").arg(animationRoleLabel(role), file));
+        item->setEditable(false);
+        item->setData(model.id, Qt::UserRole + 1);
+        item->setData(QStringLiteral("animation"), Qt::UserRole + 2);
+        item->setData(role, Qt::UserRole + 4);
+        item->setData(missing, Qt::UserRole + 5);
+        if (missing) {
+            item->setIcon(Ardoise::IconProvider::icon(Ardoise::Icon::Info, Ardoise::IconTone::Danger));
+            item->setToolTip(QObject::tr("This file is missing: the model cannot be used until it is attached again."));
+        }
+        items.append(item);
+    };
+    if (model.missingFiles.contains("primary")) add("primary", model.fileName);
+    for (const auto &role : {QString("high-noise"), QString("lora-low-noise"), QString("lora-high-noise")})
+        if (model.companionFiles.contains(role) || model.missingFiles.contains(role))
+            add(role, QFileInfo(model.companionFiles.value(role).toString()).fileName());
+    const auto companionLabel = [&](const QString &id) {
+        for (const auto &companion : companions)
+            if (companion.id == id) return companion.displayLabel();
+        return id;
+    };
+    add("vae", companionLabel(model.recommendedOptions.value("vaeModelId").toString()));
+    add("text-encoder", companionLabel(model.recommendedOptions.value("textEncoderModelId").toString()));
+    return items;
+}
 } // namespace
 ManageModelsWindow::ManageModelsWindow(QWidget *parent, ManagerServiceClient *client)
     : Ardoise::MainWindow(parent), m_client(client ? client : new ManagerServiceClient(this))
@@ -236,8 +280,9 @@ void ManageModelsWindow::populateModels()
         root->appendRow(branch);
         QHash<QString, QStandardItem*> subtypeBranches;
         if (category.first == "companion") {
-            for (const auto& subtype : {QString("vae"), QString("mmproj")}) {
-                auto* group = new QStandardItem(subtype == "vae" ? tr("VAE") : tr("MMPROJ (vision projector)"));
+            for (const auto& subtype : {QString("vae"), QString("mmproj"), QString("t5xxl")}) {
+                auto* group = new QStandardItem(subtype == "vae" ? tr("VAE")
+                    : subtype == "mmproj" ? tr("MMPROJ (vision projector)") : tr("T5-XXL (animation text encoder)"));
                 group->setEditable(false);
                 group->setIcon(Ardoise::IconProvider::icon(Ardoise::Icon::Folder));
                 group->setData(category.first, Qt::UserRole + 2);
@@ -256,6 +301,12 @@ void ManageModelsWindow::populateModels()
             item->setToolTip(model.fileName);
             auto* destination = subtypeBranches.value(model.recommendedOptions.value("subtype").toString(), branch);
             destination->appendRow(item);
+            if (category.first == "animation") {
+                if (!model.missingFiles.isEmpty())
+                    item->setIcon(Ardoise::IconProvider::icon(Ardoise::Icon::File, Ardoise::IconTone::Danger));
+                for (auto *file : animationFileItems(model, m_client->models("companion"))) item->appendRow(file);
+                continue;
+            }
             auto files = model.companionFiles;
             if (!model.companionFileName.isEmpty()) files.insert(model.companionRole, model.companionFileName);
             for (auto it = files.begin(); it != files.end(); ++it) {
@@ -324,9 +375,12 @@ void ManageModelsWindow::showSelection(const QString &id)
             m_originalMmproj = model.mmprojModelId;
             m_mmproj->setProperty("selectedModelId", m_originalMmproj);
             refreshCompanions();
+            QStringList missing;
+            for (const auto &role : model.missingFiles) missing.append(animationRoleLabel(role));
             m_details->setText(
                 tr("%1\n%2 · %3")
-                    .arg(model.displayLabel(), model.fileName, sizeText(model.fileSize)));
+                    .arg(model.displayLabel(), model.fileName, sizeText(model.fileSize))
+                + (missing.isEmpty() ? QString() : tr("\nMissing files: %1").arg(missing.join(QStringLiteral(", ")))));
         }
     updateActions();
 }
@@ -378,7 +432,7 @@ void ManageModelsWindow::updateActions()
     m_mmproj->setEnabled(m_client->isAuthenticated() && !m_saving && m_selectedId.startsWith("llm-chat:"));
     m_add->setEnabled(m_client->isAuthenticated() && !m_saving);
     m_attach->setEnabled(m_client->isAuthenticated() && !m_saving &&
-        (m_selectedId.startsWith("image-generation:")));
+        (m_selectedId.startsWith("image-generation:") || m_selectedId.startsWith("animation:")));
     m_delete->setEnabled(m_client->modelListAvailable() && m_client->isAuthenticated() && !m_saving &&
                          !m_selectedId.isEmpty());
     m_save->setEnabled(m_client->modelListAvailable() && m_client->isAuthenticated() && !m_saving &&

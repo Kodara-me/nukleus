@@ -117,10 +117,16 @@ void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &
         integer("contextLength", tr("Context length:"), 256, 131072);
         integer("maxTokens", tr("Maximum tokens:"), 1, 131072);
     }
+    else if (category == "animation")
+    {
+        modelChoice("vaeModelId", tr("VAE:"));
+        modelChoice("textEncoderModelId", tr("Text encoder (T5-XXL):"));
+    }
     else if (category == "companion") {
         auto* subtype = new QComboBox(this);
         subtype->addItem(tr("VAE"), "vae");
         subtype->addItem(tr("MMPROJ (vision projector)"), "mmproj");
+        subtype->addItem(tr("T5-XXL (animation text encoder)"), "t5xxl");
         subtype->setCurrentIndex(subtype->findData(values.value("subtype").toString()));
         connect(subtype, &QComboBox::currentIndexChanged, this, &ModelOptionsWidget::optionsChanged);
         add("subtype", tr("Type:"), subtype);
@@ -137,10 +143,14 @@ void ModelOptionsWidget::setModels(const QList<ManagedModelInfo>& models)
         const auto selected = field->property("selectedModelId").toString();
         field->clear();
         field->addItem(tr("None"), QString());
+        const bool animation = m_category == "animation";
         for (const auto &model : m_models)
             if ((key == "vaeModelId" && model.id.startsWith("companion:") && model.recommendedOptions.value("subtype") == "vae")
-                || (key == "textEncoderModelId" && model.id.startsWith("llm-chat:") && model.recommendedOptions.value("canBeTextEncoder").toBool()))
+                || (key == "textEncoderModelId" && !animation && model.id.startsWith("llm-chat:") && model.recommendedOptions.value("canBeTextEncoder").toBool())
+                || (key == "textEncoderModelId" && animation && model.id.startsWith("companion:") && model.recommendedOptions.value("subtype") == "t5xxl"))
                 field->addItem(model.displayLabel(), model.id);
+        if (animation && m_offersNewCompanions)
+            field->addItem(tr("New from URL or file…"), newCompanionId());
         int index = field->findData(selected);
         if (index < 0 && !selected.isEmpty()) {
             field->addItem(tr("Unavailable: %1").arg(selected), selected);
@@ -148,6 +158,19 @@ void ModelOptionsWidget::setModels(const QList<ManagedModelInfo>& models)
         }
         field->setCurrentIndex(qMax(0, index));
     }
+}
+void ModelOptionsWidget::setOffersNewCompanions(bool offers)
+{
+    m_offersNewCompanions = offers;
+    setModels(m_models);
+}
+void ModelOptionsWidget::selectModel(const QString &key, const QString &id)
+{
+    auto *field = qobject_cast<QComboBox*>(m_fields.value(key));
+    if (!field) return;
+    field->setProperty("selectedModelId", id);
+    setModels(m_models);
+    emit optionsChanged();
 }
 QJsonObject ModelOptionsWidget::options() const
 {

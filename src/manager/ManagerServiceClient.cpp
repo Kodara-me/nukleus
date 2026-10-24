@@ -75,7 +75,7 @@ ManagerServiceClient::ManagerServiceClient(QObject *parent, quint16 localPort)
         m_supportsRouting = false;
         m_routing.reset();
         emit modelRoutingChanged();
-        m_generationModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_companionModels.clear();
+        m_generationModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_companionModels.clear(); m_animationModels.clear();
         failActiveInstalls(tr("Service connection was closed"));
         emit modelsChanged();
         if (!m_openingConnection) {
@@ -125,6 +125,7 @@ QList<ManagedModelInfo> ManagerServiceClient::models(const QString &category) co
     if (category == QStringLiteral("upscaler")) return m_upscaleModels;
     if (category == "companion") return m_companionModels;
     if (category == QStringLiteral("llm-chat")) return m_llmChatModels;
+    if (category == QStringLiteral("animation")) return m_animationModels;
     return {};
 }
 QList<ManagedInstall> ManagerServiceClient::installs() const { return m_installs; }
@@ -240,7 +241,7 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
     }
     if (type == QStringLiteral("authenticated")) { m_connectionTimeout.stop(); m_authenticated = true; requestModels(); emit serviceStateChanged(QStringLiteral("connected"), tr("Connected to service")); return; }
     if (type == QStringLiteral("models.list.result")) {
-        m_generationModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_companionModels.clear();
+        m_generationModels.clear(); m_upscaleModels.clear(); m_llmChatModels.clear(); m_companionModels.clear(); m_animationModels.clear();
         for (const QJsonValue &categoryValue : object.value(QStringLiteral("categories")).toArray()) {
             const QJsonObject category = categoryValue.toObject(); QList<ManagedModelInfo> *modelsForCategory = nullptr;
             const QString name = category.value(QStringLiteral("category")).toString();
@@ -248,6 +249,7 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
             else if (name == QStringLiteral("upscaler")) modelsForCategory = &m_upscaleModels;
             else if (name == "companion") modelsForCategory = &m_companionModels;
             else if (name == QStringLiteral("llm-chat")) modelsForCategory = &m_llmChatModels;
+            else if (name == QStringLiteral("animation")) modelsForCategory = &m_animationModels;
             if (!modelsForCategory) continue;
             for (const QJsonValue &modelValue : category.value(QStringLiteral("models")).toArray()) {
                 const QJsonObject model = modelValue.toObject();
@@ -256,7 +258,8 @@ void ManagerServiceClient::handleTextMessage(const QString &message)
                     model.value(QStringLiteral("companionFileName")).toString(),
                                  model.value(QStringLiteral("companionRole")).toString(), model.value("recommendedOptions").toObject(),
                     model.value("companionFiles").toObject(), model.value("modelType").toString("checkpoint"), model.value("explicitContent").toBool(false),
-                    Nukleus::Protocol::promptStylesFromJson(model.value("styles")).value_or(QList<Nukleus::PromptStyle>{}), model.value("displayName").toString().trimmed(), model.value("mmprojModelId").toString()});
+                    Nukleus::Protocol::promptStylesFromJson(model.value("styles")).value_or(QList<Nukleus::PromptStyle>{}), model.value("displayName").toString().trimmed(), model.value("mmprojModelId").toString(),
+                    model.value(QStringLiteral("missingFiles")).toVariant().toStringList()});
             }
         }
         m_modelListAvailable = true; emit modelsChanged(); return;

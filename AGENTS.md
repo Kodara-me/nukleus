@@ -117,7 +117,7 @@ never overwrite weights and keep companions scoped to the final primary name.
   (imageCount, uploaded like edit inputs) shown before the last user message's text;
   the SDK sends TextChatRequest::images when canChatWithImages(). Clip Skip has no configuration control. Upscalers have no
   recommended options or explicit-content control. Companion models expose only
-  their VAE/mmproj subtype; hide unrelated fields and recommendations hints.
+  their VAE/mmproj/T5-XXL subtype; hide unrelated fields and recommendations hints.
 - Preserve legacy metadata.json companion strings and untouched entries when
   adding object entries. Write atomically with QSaveFile; reject mutation on
   unreadable metadata. Keep existing models without recommendations usable.
@@ -325,4 +325,17 @@ with an absent file; a role whose file is missing may be attached again.
 Shared companions are never deleted with the model; assigned ones (installed or
 pending) cannot be deleted or retyped. Display name and explicitContent follow
 image-generation rules. No job uses the category yet (image.animate comes
-separately), and the Manager does not offer it yet.
+separately).
+
+The Manager's Animation branch lists each model's attached files and shared
+VAE/text encoder, marking those in missingFiles. Its add form takes the
+diffusion model, optional high-noise model and LoRAs (URL or Browse), and selects
+the VAE and T5-XXL companions among installed ones or "New from URL or file":
+new companions install first through the ordinary companion installation (named
+after their file), then the model with their IDs, in sequence through the single
+install slot. Closing the form cancels the running installation; installed
+companions stay. Optional files attach/remove high-noise and LoRA roles and
+re-attach missing ones. CLI add/attach accept --high-noise, --lora-low-noise,
+--lora-high-noise, --vae-model and --text-encoder-model (both IDs required for
+add; one on attach keeps the other). The CLI lives in src/manager/ManagerCli.cpp
+so UI tests run it against their fake service.

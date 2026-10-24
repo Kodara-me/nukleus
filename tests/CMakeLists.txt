@@ -76,6 +76,8 @@ add_executable(nukleus-manager-ui-test
     ../src/manager/ManagerServiceClient.h
     ../src/manager/ManagerSettings.cpp
     ../src/manager/ManagerSettings.h
+    ../src/manager/ManagerCli.cpp
+    ../src/manager/ManagerCli.h
 )
 set_target_properties(nukleus-manager-ui-test PROPERTIES AUTORCC ON)
 target_link_libraries(nukleus-manager-ui-test PRIVATE Nukleus::Protocol Ardoise::Widgets Qt6::Widgets Qt6::Test Qt6::WebSockets)

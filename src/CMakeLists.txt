@@ -31,6 +31,8 @@ target_link_libraries(nukleusd PRIVATE Nukleus::Protocol Qt6::Network Qt6::WebSo
 add_executable(nukleus-manager
     manager/resources.qrc
     manager/nukleus-manager-main.cpp
+    manager/ManagerCli.h
+    manager/ManagerCli.cpp
     manager/ModelOptionsWidget.h
     manager/ModelOptionsWidget.cpp
     manager/AddModelDialog.h
