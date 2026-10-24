@@ -429,9 +429,6 @@ empty: an empty field means no model default, so a job falls back to sd-cli's
 own default for it. Save writes the filled fields only, with the VAE and text
 encoder IDs; a value outside its range shows a message and blocks Save.
 
-Removed model directories and existing identity files are retained on disk.
-Rebuild SDK consumers and deploy the updated Service alongside the updated clients.
-
 ```sh
 nukleus-manager add https://example.com/umt5-xxl-encoder-Q8_0.gguf --category companion --companion-type t5xxl --display-name "UMT5-XXL"
 nukleus-manager add https://example.com/wan2.2_i2v_low_noise_14B_Q4_K_M.gguf --category animation --display-name "Wan 2.2 I2V" \
@@ -445,6 +442,9 @@ nukleus-manager attach animation:wan2.2_i2v_low_noise_14B_Q4_K_M.gguf --vae-mode
 
 `--vae-model` and `--text-encoder-model` are required for `add`; on `attach`,
 either one replaces that companion and keeps the other.
+
+Removed model directories and existing identity files are retained on disk.
+Rebuild SDK consumers and deploy the updated Service alongside the updated clients.
 
 ### Animating an image
 

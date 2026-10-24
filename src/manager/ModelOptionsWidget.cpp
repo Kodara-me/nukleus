@@ -230,7 +230,7 @@ QString optionLabel(const QString &key)
             words += QLatin1Char(' ');
         words += letter.toLower();
     }
-    words[0] = words[0].toUpper();
+    // Acronyms are replaced while the words are still lowercase, so one that starts the label matches too.
     for (const auto &[word, acronym] : {std::pair{"Cfg", "CFG"}, std::pair{"Vae", "VAE"}, std::pair{"Slg", "SLG"},
                                         std::pair{"Rng", "RNG"}, std::pair{"Scm", "SCM"}, std::pair{"Lora", "LoRA"}})
         words.replace(QString::fromLatin1(word).toLower(), QString::fromLatin1(acronym));
@@ -361,7 +361,11 @@ void ModelOptionsWidget::addAnimationDefaults(const QJsonObject &values)
         if (option.group != group)
         {
             group = option.group;
-            auto *heading = new QLabel(QStringLiteral("<b>%1</b>").arg(tr(group.toUtf8().constData())), this);
+            static const QHash<QString, const char *> groupNames{
+                {"Video", QT_TR_NOOP("Video")},       {"Sampling", QT_TR_NOOP("Sampling")}, {"LoRA", QT_TR_NOOP("LoRA")},
+                {"Cache", QT_TR_NOOP("Cache")},       {"Memory", QT_TR_NOOP("Memory")},     {"VAE tiling", QT_TR_NOOP("VAE tiling")}};
+            const char *groupName = groupNames.value(group, nullptr);
+            auto *heading = new QLabel(QStringLiteral("<b>%1</b>").arg(groupName ? tr(groupName) : group), this);
             heading->setObjectName("group" + QString(group).remove(QLatin1Char(' ')));
             heading->setContentsMargins(0, 8, 0, 0);
             m_form->addRow(heading);
@@ -399,6 +403,10 @@ void ModelOptionsWidget::addAnimationDefaults(const QJsonObject &values)
     m_animationError->setTextFormat(Qt::PlainText);
     m_animationError->setStyleSheet("color: #d9534f;");
     m_form->addRow(m_animationError);
+    // A saved default that is already invalid explains why Save is disabled, without an edit first.
+    QString error;
+    if (!Nukleus::Protocol::validateAnimationParameters(animationParameters(), &error))
+        m_animationError->setText(error);
 }
 
 QJsonObject ModelOptionsWidget::animationParameters() const

@@ -1011,6 +1011,12 @@ class ManagerUiTest final : public QObject
                                        {"sampler", "highNoiseSampler"}, {"skipLayers", "highNoiseSkipLayers"},
                                        {"loraWeights.lowNoise", "loraWeights.highNoise"}})
             QCOMPARE(form->findChild<QWidget *>(low)->parentWidget(), form->findChild<QWidget *>(high)->parentWidget());
+        // Acronyms keep their case even when they start the label.
+        QStringList labels;
+        for (const auto *label : form->findChildren<QLabel *>()) labels.append(label->text());
+        for (const auto &expected : {"CFG scale:", "VAE tiling:", "RNG:", "SCM mask:", "SLG scale:", "LoRA apply mode:", "Video frames:"})
+            QVERIFY2(labels.contains(expected), expected);
+        QVERIFY(form->findChild<QLabel *>("optionsError")->text().isEmpty());
         // The model has no defaults: every field is empty and the form saves nothing but the companions.
         for (auto *line : form->findChildren<QLineEdit *>()) QVERIFY2(line->text().isEmpty(), qPrintable(line->objectName()));
         QCOMPARE(form->options().keys().size(), 2);
@@ -1077,6 +1083,17 @@ class ManagerUiTest final : public QObject
         QTRY_COMPARE(configureCount(), 1);
         QCOMPARE(lastConfigureOptions(), merged({{"vaeModelId", "companion:wan_2.1_vae.safetensors"},
                                                  {"textEncoderModelId", "companion:umt5-xxl.gguf"}}, api));
+    }
+    void animationFormExplainsAnInvalidSavedDefault_R13()
+    {
+        m_extraCategories = animationCatalogue({{"fps", 500}});
+        ManagerServiceClient client(nullptr, m_server.serverPort());
+        client.setAutomaticReconnect(false);
+        ManageModelsWindow window(nullptr, &client);
+        auto *form = openAnimationModel(window, client);
+        QVERIFY(form);
+        QVERIFY(form->findChild<QLabel *>("optionsError")->text().contains("fps"));
+        QVERIFY(!window.findChild<QPushButton *>("saveOptions")->isEnabled());
     }
     void animationFormRejectsInvalidValuesAndSendsNothing_R13()
     {
