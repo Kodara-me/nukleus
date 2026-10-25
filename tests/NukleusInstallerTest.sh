@@ -229,3 +229,122 @@ if "$project_root/scripts/install-nukleus.sh" --root "$legacy_root" --binary "$s
 fi
 grep -q 'Both kira-service and nukleus deployments exist' "$legacy_root/error"
 [[ -d "$legacy_root/etc/kira-service" && -f "$legacy_config" ]]
+
+# Storage groups are resolved by id: a group id with no name stops the
+# installer before any change. The test seam derives storage groups from the
+# staged trees, and a mocked getent hides the name of the test user's group.
+group_tests="$(mktemp -d)"
+trap 'rm -rf "$stage_root" "$mock_bin" "$interactive_root" "$loopback_root" "$storage_root" "$storage_root-output" "$legacy_root" "$group_tests"' EXIT
+real_getent="$(command -v getent)"
+nameless_bin="$group_tests/bin"
+mkdir -p "$nameless_bin"
+probe="$group_tests/probe"
+mkdir "$probe"
+test_gid="$(stat -c '%g' "$probe")"
+test_group="$("$real_getent" group "$test_gid" | cut -d: -f1)"
+[[ -n "$test_group" && "$test_group" != root ]]
+printf '%s\n' '#!/usr/bin/env bash' \
+    "if [[ \"\${1:-}\" == group && \"\${2:-}\" == $test_gid ]]; then exit 2; fi" \
+    "exec '$real_getent' \"\$@\"" > "$nameless_bin/getent"
+chmod +x "$nameless_bin/getent"
+
+seam_install() {
+    local root="$1"
+    shift
+    NUKLEUS_INSTALLER_TEST_STORAGE_GROUPS=1 "$project_root/scripts/install-nukleus.sh" --root "$root" \
+        --binary "$service_binary" --manager-binary "$manager_binary" \
+        --user-bin /home/kira-test/.local/bin --listen 127.0.0.1 --no-enable "$@"
+}
+nameless_install() {
+    PATH="$nameless_bin:$PATH" seam_install "$@"
+}
+tree_snapshot() {
+    (cd "$1" && find . -printf '%p %y %m %g %s %T@\n' | LC_ALL=C sort)
+}
+# R1, R3, R4: one message names every affected directory, the id and both fixes.
+expect_nameless_failure() {
+    local root="$1" errors="$2" output="$3"
+    grep -Fq "$root/srv/lab/models (group id $test_gid)" "$errors"
+    grep -Fq "$root/srv/lab/config/nukleus/catalog (group id $test_gid)" "$errors"
+    grep -Fq "find $root/srv/lab/models -gid $test_gid -exec chgrp -h <group> {} +" "$errors"
+    grep -Fq "find $root/srv/lab/config/nukleus/catalog -gid $test_gid -exec chgrp -h <group> {} +" "$errors"
+    grep -Fq "groupadd -g $test_gid <name>" "$errors"
+    if grep -q 'UNKNOWN' "$errors" "$output"; then exit 1; fi
+    # R2: no action was printed before the failure.
+    if grep -q '^+ ' "$output"; then exit 1; fi
+}
+
+# R1-R4, R2: paths from the command line, real run.
+cli_root="$group_tests/cli"
+mkdir -p "$cli_root/srv/lab/models" "$cli_root/srv/lab/config/nukleus/catalog"
+before="$(tree_snapshot "$cli_root")"
+set +e
+nameless_install "$cli_root" --models-dir /srv/lab/models --config-dir /srv/lab/config/nukleus \
+    > "$group_tests/cli-output" 2> "$group_tests/cli-errors"
+real_status=$?
+set -e
+(( real_status != 0 ))
+expect_nameless_failure "$cli_root" "$group_tests/cli-errors" "$group_tests/cli-output"
+[[ "$(tree_snapshot "$cli_root")" == "$before" && ! -e "$cli_root/etc/nukleus" ]]
+
+# R6: the dry run reports the same message with the same status.
+set +e
+nameless_install "$cli_root" --models-dir /srv/lab/models --config-dir /srv/lab/config/nukleus --dry-run \
+    > "$group_tests/dry-output" 2> "$group_tests/dry-errors"
+dry_status=$?
+set -e
+(( dry_status == real_status ))
+cmp "$group_tests/cli-errors" "$group_tests/dry-errors"
+expect_nameless_failure "$cli_root" "$group_tests/dry-errors" "$group_tests/dry-output"
+[[ "$(tree_snapshot "$cli_root")" == "$before" ]]
+
+# R5, R2: paths kept from an existing nukleus.conf during an update.
+update_root="$group_tests/update"
+mkdir -p "$update_root/etc/nukleus" "$update_root/srv/lab/models" "$update_root/srv/lab/config/nukleus/catalog"
+printf 'NUKLEUS_LISTEN=127.0.0.1\nNUKLEUS_PORT=9384\nNUKLEUS_TOKEN_FILE=/etc/nukleus/token\nNUKLEUS_MODELS_DIR=/srv/lab/models\nNUKLEUS_CONFIG_DIR=/srv/lab/config/nukleus\n' \
+    > "$update_root/etc/nukleus/nukleus.conf"
+printf '\n' > "$update_root/etc/nukleus/token"
+before="$(tree_snapshot "$update_root")"
+if nameless_install "$update_root" > "$group_tests/update-output" 2> "$group_tests/update-errors"; then exit 1; fi
+expect_nameless_failure "$update_root" "$group_tests/update-errors" "$group_tests/update-output"
+[[ "$(tree_snapshot "$update_root")" == "$before" ]]
+
+# R5, R2: paths read in place from a legacy kira-service.conf; nothing is migrated.
+legacy_group_root="$group_tests/legacy"
+mkdir -p "$legacy_group_root/etc/kira-service" "$legacy_group_root/var/lib/kira-service/data" \
+    "$legacy_group_root/usr/local/libexec/kira-service" "$legacy_group_root/usr/lib/systemd/system" \
+    "$legacy_group_root/srv/lab/models" "$legacy_group_root/srv/lab/config/nukleus/catalog"
+printf 'KIRA_SERVICE_LISTEN=127.0.0.1\nKIRA_SERVICE_PORT=9384\nKIRA_SERVICE_TOKEN_FILE=/etc/kira-service/token\nKIRA_SERVICE_MODELS_DIR=/srv/lab/models\nKIRA_SERVICE_CONFIG_DIR=/srv/lab/config/nukleus\n' \
+    > "$legacy_group_root/etc/kira-service/kira-service.conf"
+printf 'old' > "$legacy_group_root/usr/local/libexec/kira-service/kira-service"
+printf '[Unit]\n' > "$legacy_group_root/usr/lib/systemd/system/kira-service.service"
+before="$(tree_snapshot "$legacy_group_root")"
+if nameless_install "$legacy_group_root" > "$group_tests/legacy-output" 2> "$group_tests/legacy-errors"; then exit 1; fi
+expect_nameless_failure "$legacy_group_root" "$group_tests/legacy-errors" "$group_tests/legacy-output"
+[[ -f "$legacy_group_root/etc/kira-service/kira-service.conf" && -d "$legacy_group_root/var/lib/kira-service" ]]
+[[ -f "$legacy_group_root/usr/lib/systemd/system/kira-service.service" ]]
+[[ -f "$legacy_group_root/usr/local/libexec/kira-service/kira-service" ]]
+[[ ! -e "$legacy_group_root/etc/nukleus" ]]
+[[ "$(tree_snapshot "$legacy_group_root")" == "$before" ]]
+
+# R7, R8: a named shared group is joined by name, never by id or placeholder.
+named_root="$group_tests/named"
+mkdir -p "$named_root/srv/lab/models" "$named_root/srv/lab/config/nukleus"
+seam_install "$named_root" --models-dir /srv/lab/models --config-dir /srv/lab/config/nukleus --dry-run \
+    > "$group_tests/named-dry-output"
+grep -Fqx "+ install -d -g $test_group -m 2775 $named_root/srv/lab/models $named_root/srv/lab/models/generation $named_root/srv/lab/models/upscale $named_root/srv/lab/models/llm $named_root/srv/lab/models/companion " \
+    "$group_tests/named-dry-output"
+grep -Fqx "+ install -d -g $test_group -m 2775 $named_root/srv/lab/config/nukleus/catalog " "$group_tests/named-dry-output"
+seam_install "$named_root" --models-dir /srv/lab/models --config-dir /srv/lab/config/nukleus \
+    > "$group_tests/named-output"
+grep -Fqx "+ usermod --append --groups $test_group nukleus " "$group_tests/named-output"
+[[ "$(grep -c '^+ usermod' "$group_tests/named-output")" == 1 ]]
+grep -qx "SupplementaryGroups=$test_group" "$named_root/usr/lib/systemd/system/nukleus.service"
+for directory in "" /generation /upscale /llm /companion; do
+    [[ "$(stat -c '%a %G' "$named_root/srv/lab/models$directory")" == "2775 $test_group" ]]
+done
+[[ "$(stat -c '%a %G' "$named_root/srv/lab/config/nukleus/catalog")" == "2775 $test_group" ]]
+if grep -Eq -e 'UNKNOWN' -e "(-g|--groups|SupplementaryGroups=) ?$test_gid( |$)" \
+    "$group_tests/named-dry-output" "$group_tests/named-output" "$named_root/usr/lib/systemd/system/nukleus.service"; then
+    exit 1
+fi

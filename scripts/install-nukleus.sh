@@ -52,11 +52,15 @@ EOF
 
 fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 
+print_action() {
+    printf '+ '
+    printf '%q ' "$@"
+    printf '\n'
+}
+
 run() {
     if "$dry_run"; then
-        printf '+ '
-        printf '%q ' "$@"
-        printf '\n'
+        print_action "$@"
         return
     fi
     "$@"
@@ -72,14 +76,65 @@ token_has_content() { [[ -n "$(tr -d '[:space:]' <<<"$1")" ]]; }
 # Storage paths are rendered into the systemd unit and a sed replacement.
 valid_storage_path() { [[ "$1" =~ ^/[A-Za-z0-9._/+-]*$ ]]; }
 
+# The directory whose group decides the storage group: the path itself, or
+# its nearest existing parent when it does not exist yet.
+storage_inspected_path() {
+    local path="$1"
+    while [[ ! -e "$path" ]]; do path="$(dirname -- "$path")"; done
+    printf '%s' "$path"
+}
+
+# Prints the name of the group that owns a directory, resolved from its
+# numeric id. Fails when that id has no name on the host, so that no
+# placeholder such as UNKNOWN or a bare id is ever used as a group name.
+storage_group_name() {
+    local gid entry
+    gid="$(stat -c '%g' -- "$1")"
+    entry="$(getent group "$gid")" || return 1
+    [[ -n "${entry%%:*}" ]] || return 1
+    printf '%s' "${entry%%:*}"
+}
+
 # A storage tree whose group is not root is shared: the service joins that
 # group. Otherwise the service owns its storage directories privately.
 storage_group_for() {
-    local path="$1"
-    while [[ ! -e "$path" ]]; do path="$(dirname -- "$path")"; done
-    local group
-    group="$(stat -c '%G' -- "$path")"
+    local path group
+    path="$(storage_inspected_path "$1")"
+    group="$(storage_group_name "$path")" \
+        || fail "The group of $path has no name on this host."
     [[ "$group" == root ]] && printf '%s' "$SERVICE_GROUP" || printf '%s' "$group"
+}
+
+# Stops the installer, before any change to the host, when a storage directory
+# belongs to a group id that has no name. Every such directory is reported.
+check_storage_groups() {
+    local directory path gid seen
+    local -a inspected=() orphans=() orphan_ids=()
+    for directory in "$@"; do
+        path="$(storage_inspected_path "$directory")"
+        for seen in "${inspected[@]}"; do [[ "$seen" != "$path" ]] || continue 2; done
+        inspected+=("$path")
+        storage_group_name "$path" >/dev/null && continue
+        gid="$(stat -c '%g' -- "$path")"
+        orphans+=("$path|$gid")
+        [[ " ${orphan_ids[*]} " == *" $gid "* ]] || orphan_ids+=("$gid")
+    done
+    (( ${#orphans[@]} > 0 )) || return 0
+    local message="Storage directories belong to a group id that has no name on this host:"
+    local orphan
+    for orphan in "${orphans[@]}"; do
+        message+=$'\n'"  ${orphan%|*} (group id ${orphan##*|})"
+    done
+    message+=$'\n'"Give each tree a named group, for example:"
+    for orphan in "${orphans[@]}"; do
+        message+=$'\n'"  find ${orphan%|*} -gid ${orphan##*|} -exec chgrp -h <group> {} +"
+    done
+    message+=$'\n'"or create a group with that id:"
+    for gid in "${orphan_ids[@]}"; do
+        message+=$'\n'"  groupadd -g $gid <name>"
+    done
+    message+=$'\n'"Then run the installer again."
+    fail "$message"
 }
 
 config_value() {
@@ -214,6 +269,45 @@ renamed_group=false
 existing_config_source="$config_path"
 existing_token_source="$token_path"
 dry_run_config=""
+
+# Storage groups are derived from the storage trees on a live installation. The
+# installer test sets NUKLEUS_INSTALLER_TEST_STORAGE_GROUPS=1 with --root to
+# derive them from the staged trees; account changes are then only printed.
+derive_storage_groups=false
+staged_storage_groups=false
+if [[ -z "$install_root" ]]; then
+    derive_storage_groups=true
+elif [[ "${NUKLEUS_INSTALLER_TEST_STORAGE_GROUPS:-}" == 1 ]]; then
+    derive_storage_groups=true
+    staged_storage_groups=true
+fi
+
+# The storage paths this run will use, resolved before the legacy migration or
+# any other change to the host, with the precedence applied after reading
+# nukleus.conf below: the command line, then the configured paths.
+if "$derive_storage_groups"; then
+    checked_models_dir="$models_dir"
+    checked_config_dir="$storage_config_dir"
+    if [[ -z "$checked_models_dir" ]]; then
+        if [[ -e "$legacy_config_dir" ]]; then
+            checked_source="$legacy_config_dir/$LEGACY_NAME.conf"
+            checked_prefix="KIRA_SERVICE"
+        else
+            checked_source="$config_path"
+            checked_prefix="NUKLEUS"
+        fi
+        if [[ -f "$checked_source" ]]; then
+            checked_models_dir="$(config_value "${checked_prefix}_MODELS_DIR" "$checked_source")"
+            checked_config_dir="$(config_value "${checked_prefix}_CONFIG_DIR" "$checked_source")"
+        fi
+    fi
+    checked_storage=()
+    [[ -z "$checked_models_dir" ]] || checked_storage+=("$(destination "$checked_models_dir")")
+    [[ -z "$checked_models_dir" || -z "$checked_config_dir" ]] \
+        || checked_storage+=("$(destination "$checked_config_dir/catalog")")
+    check_storage_groups "${checked_storage[@]}"
+fi
+
 if [[ -e "$legacy_config_dir" || -e "$legacy_state_dir" ]]; then
     [[ ! -e "$config_dir" && ! -e "$state_dir" ]] \
         || fail "Both $LEGACY_NAME and $SERVICE_NAME deployments exist; move them manually before installing Nukleus."
@@ -446,15 +540,19 @@ fi
 storage_groups=()
 prepare_storage() {
     local group
-    if [[ -n "$install_root" ]]; then
+    if ! "$derive_storage_groups"; then
         run install -d -m 0750 "${@/#/$install_root}"
         return
     fi
-    group="$(storage_group_for "$1")"
+    group="$(storage_group_for "$(destination "$1")")"
     if [[ "$group" == "$SERVICE_GROUP" ]]; then
-        run install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$@"
+        if "$staged_storage_groups"; then
+            run install -d -m 0750 "${@/#/$install_root}"
+        else
+            run install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$@"
+        fi
     else
-        run install -d -g "$group" -m 2775 "$@"
+        run install -d -g "$group" -m 2775 "${@/#/$install_root}"
         [[ " ${storage_groups[*]} " == *" $group "* ]] || storage_groups+=("$group")
     fi
 }
@@ -462,7 +560,11 @@ if [[ -n "$models_dir" ]]; then
     prepare_storage "$models_dir" "$models_dir"/{generation,upscale,llm,companion}
     prepare_storage "$storage_config_dir/catalog"
     for storage_group in "${storage_groups[@]}"; do
-        run usermod --append --groups "$storage_group" "$SERVICE_USER"
+        if "$staged_storage_groups"; then
+            print_action usermod --append --groups "$storage_group" "$SERVICE_USER"
+        else
+            run usermod --append --groups "$storage_group" "$SERVICE_USER"
+        fi
     done
 fi
 
