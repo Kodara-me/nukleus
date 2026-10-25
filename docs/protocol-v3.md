@@ -14,6 +14,23 @@ The service replies with `authenticated` and `capabilities`. `models.list` retur
 Each model contains `id`, `name`, `fileName` and `bytes`; a model with a
 companion also includes the category-relative `companionFileName` and
 `companionRole` (`mmproj` or `vae`).
+
+An authenticated client lists the installed models with a request that has no other field:
+
+```json
+{"type":"models.list"}
+```
+
+The reply has one `{category, models}` entry per category, with an empty `models`
+array for a category that holds none. This reply lists one upscaler (the other
+categories follow the same shape and are left out):
+
+```json
+{"type":"models.list.result","categories":[{"category":"upscaler","models":[{"id":"upscaler:model.gguf","name":"model.gguf","fileName":"model.gguf","bytes":67108864,"displayName":"Upscaler","companionFiles":{},"modelType":"checkpoint"}]}]}
+```
+
+The `id` is opaque: clients pass it back unchanged in their jobs.
+
 ## Prompt enhancement
 
 prompt.enhance accepts an installed LLM (llm-chat) model ID, a prompt string

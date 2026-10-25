@@ -1,6 +1,22 @@
 # Nukleus
 
-Nukleus is the standalone backend for Kira applications. It owns installed models and their recommended options, single HTTPS model installations, the `sd-cli` image queue, and the versioned WebSocket API. Client applications select opaque installed-model IDs and submit jobs; they do not manage service files.
+Nukleus is a Linux service that keeps your local AI models and runs image, video and text jobs on them, one at a time in a single FIFO queue, for any number of client applications over the versioned WebSocket protocol v3. Clients pick an installed model by its opaque ID and submit jobs; they never touch the service's files. [Kaimera](https://github.com/Kodara-me/kaimera) and Kira Canvas are example clients.
+
+## Features
+
+- Image generation, reference-image editing and fixed 2× upscaling, run with `sd-cli`.
+- Image animation: a start image (and optionally an end image) becomes a short video, with seamless ping-pong loops and MP4 output.
+- Text chat and prompt enhancement with llama.cpp models.
+- A model catalogue with recommended options, companion files (VAE, text encoders, vision projectors, LoRAs) and installation from HTTPS URLs or local files.
+- Presets and editing qualities shared by every client.
+- Progress reporting and binary results over the WebSocket, with the same queue for every client.
+- A token-protected LAN listener, or loopback only.
+
+## Architecture
+
+- **`nukleusd`** is the daemon. It owns the models, the queue and the WebSocket API on port `9384`.
+- **`nukleus-manager`** is the administrator tool, a GUI and a CLI, that installs and configures models and presets.
+- **`NukleusSdk`** is the static C++/Qt client library (`Nukleus::SDK`) that speaks the protocol for you. Clients in other languages use [the protocol](docs/protocol-v3.md) directly.
 
 ## Install
 
@@ -57,22 +73,91 @@ home directory: install manually built tools outside `/home` (for example
 `/usr/local/bin`) or point `NUKLEUS_LLAMA_SERVER`/`NUKLEUS_LLAMA_COMPLETION` at such a
 path. Manual Vulkan builds of llama.cpp also need the `spirv-headers` package.
 
+## First steps with the manager
+
+The installer starts the service. Check that it runs, then add a first model with
+the manager and list it. This example installs an upscaler; replace the URL with
+the model file you want (the manager downloads it and one installation runs at a
+time):
+
+```sh
+systemctl status nukleus
+nukleus-manager add https://huggingface.co/owner/repo/resolve/main/model.gguf --category upscaler --display-name "Upscaler"
+nukleus-manager list
+```
+
+`nukleus-manager --gui` does the same in a window, with the model options. The
+manager connects to the local service without a token. See [Manager](docs/manager.md)
+for the GUI, every CLI command and the other categories, and [Models](docs/models.md)
+for companions and installation sources.
+
+## Writing a client
+
+A client opens a WebSocket to the service (`ws://127.0.0.1:9384` on the same
+machine), authenticates, then asks for the installed models:
+
+```json
+{"type":"authenticate","version":3,"token":""}
+{"type":"models.list"}
+```
+
+Loopback clients may send an empty token; other clients send the configured LAN
+token. The service answers `authenticated`, `capabilities` and then
+`models.list.result`:
+
+```json
+{"type":"models.list.result","categories":[{"category":"upscaler","models":[{"id":"upscaler:model.gguf","name":"model.gguf","fileName":"model.gguf","bytes":67108864,"displayName":"Upscaler","companionFiles":{},"modelType":"checkpoint"}]}]}
+```
+
+Jobs then name a model `id` from that list. The complete message reference is in
+[Protocol v3](docs/protocol-v3.md).
+
+Clients written in C++ with Qt can use the SDK instead. Install it with
+`cmake --install build --prefix "$HOME/.local"`, then in `CMakeLists.txt`:
+
+```cmake
+find_package(NukleusSdk CONFIG REQUIRED)
+target_link_libraries(my-client PRIVATE Nukleus::SDK)
+```
+
+A minimal client that connects and lists the models:
+
+```cpp
+#include <nukleus/ServiceClient.h>
+
+#include <QCoreApplication>
+#include <QDebug>
+#include <QUrl>
+
+int main(int argc, char *argv[])
+{
+    QCoreApplication app(argc, argv);
+    Nukleus::ServiceClient client;
+    QObject::connect(&client, &Nukleus::ServiceClient::modelsChanged, &app, [&client, &app] {
+        for (const Nukleus::ModelInfo &model : client.models())
+            qInfo() << model.id << model.displayLabel();
+        app.quit();
+    });
+    client.setConfiguration(QUrl(QStringLiteral("ws://127.0.0.1:9384")), {});
+    client.connectToService();
+    return app.exec();
+}
+```
+
+The SDK authenticates and requests the models by itself once connected. It also
+submits generation, editing, upscaling, animation, chat and prompt-enhancement
+jobs and reports their progress and binary results.
+
 ## Build
 
-Building requires CMake 3.24 or newer. The manager requires
-[Ardoise](https://github.com/jstmichel/ardoise) 0.1, Qt SVG, and LinguistTools
-in addition to Qt Network/WebSockets/Widgets. CMake uses an installed Ardoise
-package when found and otherwise clones tag `v0.1.0`. Install Ardoise with one
-command:
+Building from source needs CMake 3.24+, Ninja, a C++20 compiler, Qt 6.5+ (Network,
+WebSockets, Widgets, SVG, LinguistTools), LibArchive and
+[Ardoise](https://github.com/jstmichel/ardoise) 0.1, which CMake clones when it is
+not installed. To install Ardoise first, with one command:
 
 ```sh
 curl -fsSL https://github.com/jstmichel/ardoise/releases/latest/download/get-ardoise.sh | sh
 ```
-
-To build against a local Ardoise checkout, pass
-`-DFETCHCONTENT_SOURCE_DIR_ARDOISE=/path/to/ardoise`. The daemon and installable
-SDK do not link the UI framework.
-
 
 ```sh
 cmake -S . -B build -G Ninja
@@ -80,26 +165,11 @@ cmake --build build
 ctest --test-dir build
 ```
 
-For a standard CMake prefix installation of the executables:
-
-```sh
-cmake --install build --prefix "$HOME/.local"
-```
-
-This installs the daemon under `libexec/nukleus/` and the manager under
-`bin/`. Use `scripts/install-nukleus.sh` for the complete Linux systemd
-installation, including configuration, service-account setup, model storage,
-and the user-local manager installation.
-
-Sources are organized under `src/daemon/`, `src/manager/`, and
-`src/sdk/`. The executable targets remain declared by
-`src/CMakeLists.txt`, so built binaries continue to appear under `build/src/`.
-
-The reusable image client is exported as `Nukleus::SDK`; the namespaced
-wire implementation is `Nukleus::Protocol`. Install the static SDK and
-headers with `cmake --install build --prefix "$HOME/.local"`, then consume it
-with `find_package(NukleusSdk CONFIG REQUIRED)`. The SDK supports image
-generation, fixed 2× upscaling, model discovery, progress, and binary results.
+`cmake --install build --prefix "$HOME/.local"` installs the daemon under
+`libexec/nukleus/`, the manager under `bin/`, and the SDK with its headers. Use
+`scripts/install-nukleus.sh` for the complete systemd installation. Building
+against a local Ardoise checkout, the source layout and the tests are described in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Documentation
 
