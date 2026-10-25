@@ -180,8 +180,8 @@ prompt-only requests with default dimensions/steps/CFG and no companions,
 VAE arguments for direct and uploaded-input jobs, and result
 bytes. Rebuild and rerun the Linux installer to update a systemd-installed daemon;
 a workspace build alone does not update the running service. The installer
-also migrates a deployment made under the former Kira Service name (see README,
-"Upgrading from Kira Service"); `nukleus-installer-test` covers it in a staging root.
+also migrates a deployment made under the former Kira Service name (see
+`docs/deployment.md`, "Upgrading from Kira Service"); `nukleus-installer-test` covers it in a staging root.
 
 Model classification uses a top-level `explicitContent` boolean, separate from
 recommendations. SDK and Manager install/configure methods accept an optional
