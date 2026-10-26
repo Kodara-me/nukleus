@@ -92,3 +92,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME nukleus-get-test
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/NukleusGetTest.sh ${CMAKE_SOURCE_DIR}/scripts/get-nukleus.sh)
 endif()
+
+add_executable(nukleus-web-test WebServiceTest.cpp)
+target_link_libraries(nukleus-web-test PRIVATE nukleus-web-core Qt6::Test)
+add_test(NAME nukleus-web-test COMMAND nukleus-web-test)

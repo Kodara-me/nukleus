@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Nukleus</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="bar">
+    <h1>Nukleus</h1>
+  </header>
+  <main>
+    <section id="status" class="status" data-state="connecting" role="status" aria-live="polite">
+      <p id="status-title" class="status-title">Connecting to Nukleus…</p>
+      <p id="status-detail" class="status-detail"></p>
+      <button id="retry" type="button" hidden>Check again</button>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

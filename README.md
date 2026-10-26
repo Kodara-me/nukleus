@@ -15,6 +15,7 @@ Nukleus is a Linux service that keeps your local AI models and runs image, video
 ## Architecture
 
 - **`nukleusd`** is the daemon. It owns the models, the queue and the WebSocket API on port `9384`.
+- **`nukleus-web`** is a small web service, a client of `nukleusd` like any other, for the local network. It listens on port `9385` and serves a responsive page that shows whether Nukleus is available and, when it is not, why. See [Web service](#web-service).
 - **`nukleus-manager`** is the administrator tool, a GUI and a CLI, that installs and configures models and presets.
 - **`NukleusSdk`** is the static C++/Qt client library (`Nukleus::SDK`) that speaks the protocol for you. Clients in other languages use [the protocol](docs/protocol-v3.md) directly.
 
@@ -42,6 +43,30 @@ installing. The archive is checked against the release's `SHA256SUMS` and
 nothing is installed when it does not match or a test fails. Image work also
 needs the runtime tools listed under
 [Runtime tools on Arch Linux](#runtime-tools-on-arch-linux).
+
+### Web service
+
+`nukleus-web` serves a plain HTML page and a small API to any browser on the local
+network, with no sign-in: it answers only loopback, private and link-local source
+addresses, and only requests whose `Host` names this machine. It connects to
+`nukleusd` on port `9384` and reconnects on its own. It is configured by
+environment variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `NUKLEUS_WEB_LISTEN` | A LAN IPv4 address to listen on, besides `127.0.0.1`. Unset: loopback only. |
+| `NUKLEUS_WEB_BACKEND_HOST` | The host of `nukleusd`. Default `127.0.0.1`. |
+| `NUKLEUS_WEB_BACKEND_TOKEN_FILE` | A file holding the LAN token, required when the backend host is not loopback and never used for loopback. |
+
+From a build, with `nukleusd` running on the same machine:
+
+```sh
+./build/src/nukleus-web
+```
+
+Then open `http://127.0.0.1:9385/`. `GET /api/status` answers the connection state
+(`available`, `unavailable` or `connecting`) and, while unavailable, its reason
+(`unreachable`, `authentication-refused` or `incompatible-protocol`).
 
 ### Runtime tools on Arch Linux
 

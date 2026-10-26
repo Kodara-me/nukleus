@@ -70,6 +70,25 @@ and an existing opaque `id` to attach files without downloading the primary agai
 The legacy VAE GUI exposes this via Optional files; the compatibility CLI exposes `attach` with
 `--model-type`, `--clip-l`, `--clip-g`, and `--vae`.
 
+## Web service
+
+`nukleus-web` (`src/web/`) is a third executable beside `nukleusd` and
+`nukleus-manager`, installed by CMake to `libexec/nukleus/`. It is a minimal
+HTTP/1.1 server on `QTcpServer` (`HttpServer`) with the access checks and request
+limits of its specification, a `BackendLink` that holds its one `Nukleus::SDK`
+connection to `nukleusd` and reconnects, and a front-end of plain HTML, CSS and
+JavaScript in `src/web/ui/`, compiled into the executable as Qt resources: no
+framework and no build step. Source and `Host` checks live in `HostRules`.
+
+Run it from the build with `./build/src/nukleus-web`; `NUKLEUS_WEB_LISTEN`,
+`NUKLEUS_WEB_BACKEND_HOST` and `NUKLEUS_WEB_BACKEND_TOKEN_FILE` configure it (see the
+README). `nukleus-web-test` runs the service against an in-process fake `nukleusd`
+and drives the HTTP API from loopback with `QTcpSocket`, so tests never start the real
+service; the source-address check is tested through its classification function,
+since CI has no non-loopback peer, and the timeouts through a configurable interval.
+Check the page by hand at 360 px wide and on a phone browser when the front-end
+changes.
+
 ## Shared manager UI
 
 ModelRouting Protocol types carry English/French labels, preset prefixes

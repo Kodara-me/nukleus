@@ -10,6 +10,8 @@ cmake --install "$build_root" --prefix "$stage_root"
 
 daemon="$stage_root/libexec/nukleus/nukleusd"
 manager="$stage_root/bin/nukleus-manager"
+web="$stage_root/libexec/nukleus/nukleus-web"
 
 [[ -x "$daemon" ]]
 [[ -x "$manager" ]]
+[[ -x "$web" ]]
