@@ -1,14 +1,18 @@
 #!/bin/sh
 # Builds, tests and installs a Nukleus release as a Linux systemd service:
 #
-#   curl -fsSL https://github.com/jstmichel/nukleus/releases/latest/download/get-nukleus.sh | sh
+#   curl -fsSL https://github.com/jstmichel/nukleus/releases/latest/download/get-nukleus.sh | sh -s -- -- --install-backend
 #
 # Usage: get-nukleus.sh [--version <tag>] [--dry-run] [--help] [-- <installer options>]
 #
 #   --version <tag>  install this release (for example v0.1.0) instead of the latest
 #   --dry-run        download, check and build, then print the installation command
 #   -- <options>     passed to scripts/install-nukleus.sh, for example
-#                    -- --listen 127.0.0.1   or   -- --desktop-shortcut
+#                    -- --install-backend --listen 127.0.0.1
+#
+# Every installed component (the backend and the web service) is updated. A first install
+# needs a component flag among the options: --install-backend (nukleusd and the model
+# manager), --install-web-service, or both. Without one, nothing is downloaded.
 #
 # Requires curl, tar, git, CMake 3.24+, a C++20 compiler, Qt 6.5+ with Network, WebSockets,
 # Widgets, SVG and LinguistTools, LibArchive, and sudo. Ardoise is used when installed, otherwise CMake
@@ -22,7 +26,7 @@ tag=""
 dry_run=0
 
 usage() {
-    sed -n '2,16s/^# \{0,1\}//p' "$0" 2>/dev/null \
+    sed -n '2,19s/^# \{0,1\}//p' "$0" 2>/dev/null \
         || echo "Usage: get-nukleus.sh [--version <tag>] [--dry-run] [-- <installer options>]"
 }
 
@@ -49,6 +53,22 @@ while [ $# -gt 0 ]; do
     esac
 done
 # The remaining arguments are the installer's.
+
+# R47: a host with no component installed needs a component flag, checked before any download.
+unit_dir=${NUKLEUS_SYSTEMD_UNIT_DIR:-/usr/lib/systemd/system}
+installed=0
+for unit in nukleus.service kira-service.service nukleus-web.service; do
+    [ -f "$unit_dir/$unit" ] && installed=1
+done
+flagged=0
+for option in "$@"; do
+    case $option in
+        --install-backend|--install-web-service) flagged=1 ;;
+    esac
+done
+if [ "$installed" -eq 0 ] && [ "$flagged" -eq 0 ]; then
+    fail "nothing is installed on this host and no component was chosen; pass -- --install-backend (nukleusd and the model manager), --install-web-service, or both"
+fi
 
 # sha256 <file>: prints the file's SHA-256 digest.
 sha256() {
@@ -105,7 +125,7 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir "$build" --output-on-failure \
     || fail "the Nukleus tests failed; nothing was installed"
 
 set -- "$source/scripts/install-nukleus.sh" --binary "$build/src/nukleusd" \
-    --manager-binary "$build/src/nukleus-manager" "$@"
+    --manager-binary "$build/src/nukleus-manager" --web-binary "$build/src/nukleus-web" "$@"
 
 if [ "$dry_run" -eq 1 ]; then
     say "  would run: sudo $*"
@@ -119,5 +139,5 @@ say "Installing Nukleus $version…"
 if (: </dev/tty) 2>/dev/null; then
     sudo "$@" </dev/tty || fail "the installer stopped; see the messages above"
 else
-    sudo "$@" </dev/null || fail "the installer stopped; without a terminal, pass -- --listen 127.0.0.1"
+    sudo "$@" </dev/null || fail "the installer stopped; without a terminal, pass -- --install-backend --listen 127.0.0.1"
 fi

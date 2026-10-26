@@ -25,7 +25,7 @@ On Linux, one command builds the latest release, runs its tests and installs it
 as a systemd service with the manager in `~/.local/bin`:
 
 ```sh
-curl -fsSL https://github.com/jstmichel/nukleus/releases/latest/download/get-nukleus.sh | sh
+curl -fsSL https://github.com/jstmichel/nukleus/releases/latest/download/get-nukleus.sh | sh -s -- -- --install-backend
 ```
 
 It needs curl, git, CMake 3.24+, a C++20 compiler, Qt 6.5+ (Network,
@@ -35,8 +35,20 @@ Installer options follow `--`, for example a loopback-only service with a
 desktop shortcut:
 
 ```sh
-curl -fsSL https://github.com/jstmichel/nukleus/releases/latest/download/get-nukleus.sh | sh -s -- -- --listen 127.0.0.1 --desktop-shortcut
+curl -fsSL https://github.com/jstmichel/nukleus/releases/latest/download/get-nukleus.sh | sh -s -- -- --install-backend --listen 127.0.0.1 --desktop-shortcut
 ```
+
+The installer has two component flags, and a host with nothing installed needs at
+least one of them (`get-nukleus.sh` stops before downloading otherwise):
+
+- `--install-backend` installs `nukleusd` and the manager;
+- `--install-web-service` installs the [web service](#web-service). A web-only host,
+  such as a NAS next to the machine that runs `nukleusd`, takes
+  `--install-web-service --web-listen ADDRESS --web-backend-host HOST --web-backend-token TOKEN`,
+  or asks for each one when run from a terminal.
+
+Every component already installed is updated, with or without a flag, so
+`update-nukleus.sh` keeps the host's selection.
 
 `--version v0.1.0` installs a given release and `--dry-run` stops before
 installing. The archive is checked against the release's `SHA256SUMS` and

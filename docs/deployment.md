@@ -8,7 +8,7 @@ The one-command install and the runtime tools the daemon needs are in the
 ## Installing the service
 
 ```sh
-sudo scripts/install-nukleus.sh --binary build/src/nukleusd --manager-binary build/src/nukleus-manager
+sudo scripts/install-nukleus.sh --install-backend --binary build/src/nukleusd --manager-binary build/src/nukleus-manager
 ```
 
 The installer uses port `9384`, preserves a valid existing bind/token configuration, installs the manager into the invoking user's `~/.local/bin` with an application-menu entry (`~/.local/share/applications`, icons under `~/.local/share/icons/hicolor` referenced by absolute path); `--desktop-shortcut` also adds a shortcut to the user's XDG desktop directory, or `--desktop-dir PATH` to another directory, and restarts updated installations. A LAN binding listens on both `127.0.0.1` and the selected IPv4 address. Loopback manager clients authenticate without a token; non-loopback clients require the shared LAN token. Configuration remains under `/etc/nukleus/`; system-service model data resolves to `/var/lib/nukleus/data/nukleus/models/`.
@@ -22,6 +22,47 @@ scripts/migrate-nukleus-storage.sh --source OLD_MODELS --models-dir /srv/lab/mod
 Uninstalling, even with `--purge`, never removes the split storage directories.
 
 The Linux installer moves legacy models from `$XDG_DATA_HOME/kira-canvas/models/` during an upgrade. It aborts without changing either directory if both model roots already exist.
+
+## Choosing the components
+
+The installer handles two components, each chosen by a flag:
+
+| Flag | Installs |
+| --- | --- |
+| `--install-backend` | `nukleusd` with its `nukleus.service` unit, and the manager. Needs `--binary`, `--manager-binary` and a manager user (`SUDO_USER` or `--user-bin`). |
+| `--install-web-service` | `nukleus-web` with its `nukleus-web.service` unit and the unprivileged `nukleus-web` account. Needs `--web-binary` (default `build/src/nukleus-web`) only. |
+
+A component is installed on a host when its unit is present under `/usr/lib/systemd/system`
+(`nukleus.service`, or the legacy `kira-service.service`, and `nukleus-web.service`). Every
+installed component is updated by every run, with or without a flag, and a flag adds its
+component; the installer never adds a component that no flag names, so no update turns on the
+web service, which has no sign-in. A host with nothing installed and no flag stops before any
+change, naming both flags. `update-nukleus.sh` and `get-nukleus.sh` pass `--web-binary` with
+the built `nukleus-web` and accept the flags after `--`.
+
+### Web service on its own host
+
+On a NAS with no GPU, install only the web service and point it at the machine that runs `nukleusd`:
+
+```sh
+sudo scripts/install-nukleus.sh --install-web-service --web-binary build/src/nukleus-web \
+    --web-listen 192.168.1.20 --web-backend-host 192.168.1.10 --web-backend-token 'LAN TOKEN'
+```
+
+- `--web-listen ADDRESS` is the LAN IPv4 address of the interface (`127.0.0.1` for this
+  computer only). Interactively the installer offers the same list of addresses as for the
+  backend; without a terminal the option is required.
+- `--web-backend-host` and `--web-backend-token` are required, or asked (the token with a
+  masked prompt), unless the backend is installed on the same host or by the same run, in
+  which case the web service connects over loopback and asks for neither. The token is the
+  backend's LAN token.
+- The configuration is `/etc/nukleus/nukleus-web.conf` (`NUKLEUS_WEB_LISTEN`,
+  `NUKLEUS_WEB_BACKEND_HOST`, `NUKLEUS_WEB_BACKEND_TOKEN_FILE`) and the token is stored in
+  `/etc/nukleus/web-backend-token`, owned by root, group `nukleus-web`, mode `0640`. Later
+  runs keep both. The service listens on port `9385`; firewall rules are not changed.
+- `scripts/uninstall-nukleus.sh` removes the web service's program and unit, and with
+  `--purge` its configuration and token file. It deletes no account, the `nukleus-web` one
+  included.
 
 ## Upgrading from Kira Service
 

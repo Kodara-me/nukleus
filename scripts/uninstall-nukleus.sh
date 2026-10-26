@@ -3,6 +3,7 @@
 set -euo pipefail
 
 readonly SERVICE_NAME="nukleus"
+readonly WEB_SERVICE_NAME="nukleus-web"
 install_root=""
 user_bin_path=""
 desktop_dir_override=""
@@ -14,7 +15,8 @@ usage() {
     cat <<'EOF'
 Usage: sudo scripts/uninstall-nukleus.sh [options]
 
-Remove the installed Nukleus program, model manager, and systemd unit.
+Remove the installed Nukleus program, model manager, web service and systemd
+units. The nukleus and nukleus-web accounts are left in place.
 Configuration and downloaded model data are retained unless --purge is confirmed.
 
 Options:
@@ -78,7 +80,9 @@ fi
 
 if [[ -z "$install_root" ]]; then
     run systemctl disable --now "$SERVICE_NAME.service" || true
+    run systemctl disable --now "$WEB_SERVICE_NAME.service" || true
 fi
+run rm -f "$(destination "/usr/lib/systemd/system/$WEB_SERVICE_NAME.service")"
 run rm -f "$(destination "/usr/lib/systemd/system/$SERVICE_NAME.service")"
 run rm -rf "$(destination "/usr/local/libexec/$SERVICE_NAME")"
 run rm -f "$(destination "$user_bin_path/nukleus-manager")"

@@ -43,7 +43,8 @@ add_test(NAME nukleus-sdk-test COMMAND nukleus-sdk-test)
 
 add_test(NAME nukleus-installer-test
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/NukleusInstallerTest.sh
-            ${CMAKE_SOURCE_DIR} $<TARGET_FILE:nukleusd> $<TARGET_FILE:nukleus-manager>)
+            ${CMAKE_SOURCE_DIR} $<TARGET_FILE:nukleusd> $<TARGET_FILE:nukleus-manager>
+            $<TARGET_FILE:nukleus-web>)
 
 add_test(NAME nukleus-storage-migration-test
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/NukleusStorageMigrationTest.sh ${CMAKE_SOURCE_DIR})

@@ -20,7 +20,9 @@ Options:
   --cmake-arg ARG     Extra CMake configure argument; may be repeated
   -h, --help          Show this help
 
-Installer options after -- are passed to install-nukleus.sh.
+Installer options after -- are passed to install-nukleus.sh. Every installed
+component is updated; add --install-backend or --install-web-service after --
+to install one that is not installed yet.
 Existing CMake cache settings are retained. New builds use Ninja and Release.
 Requires a clean tracked working tree, an upstream branch, build dependencies,
 and cached or passwordless sudo credentials. Does not update sibling checkouts.
@@ -69,4 +71,5 @@ ctest --test-dir "$build_dir" --output-on-failure
 printf 'Installing and restarting Nukleus…\n'
 sudo -n "$project_root/scripts/install-nukleus.sh" "${installer_args[@]}" \
     --binary "$build_dir/src/nukleusd" \
-    --manager-binary "$build_dir/src/nukleus-manager"
+    --manager-binary "$build_dir/src/nukleus-manager" \
+    --web-binary "$build_dir/src/nukleus-web"
