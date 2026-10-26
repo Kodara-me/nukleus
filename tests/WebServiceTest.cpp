@@ -303,6 +303,9 @@ private slots:
         lan.insert("NUKLEUS_WEB_LISTEN", "192.168.1.20");
         QVERIFY2(WebConfig::fromEnvironment(lan, &config, &error), qPrintable(error));
         QCOMPARE(config.listenAddress, QHostAddress("192.168.1.20"));
+        QProcessEnvironment publicListen;
+        publicListen.insert("NUKLEUS_WEB_LISTEN", "8.8.8.8");
+        QVERIFY(!WebConfig::fromEnvironment(publicListen, &config, &error));
         QCOMPARE(config.port, quint16(9385));
     }
 
@@ -479,17 +482,18 @@ private slots:
     void tokenNeverAppearsInAResponseOrALog()
     {
         const QString token = QStringLiteral("tok-SECRET-0123456789");
-        FakeDaemon daemon;
-        daemon.setMode(FakeDaemon::Mode::RejectAuthentication);
-        QVERIFY(daemon.start());
         g_log.clear();
-        WebConfig config = testConfig(daemon.port());
+        // A backend host that is not loopback, so that the SDK really holds the token.
+        WebConfig config = testConfig(freePort());
+        config.backendHost = QStringLiteral("nukleus-backend.invalid");
         config.backendToken = token;
         WebService service(config);
         QString error;
         QVERIFY2(service.start(&error), qPrintable(error));
+        QCOMPARE(service.link()->client()->token(), token);
         const quint16 port = service.server()->port();
-        QTRY_COMPARE(statusOf(port).value("reason").toString(), QString("authentication-refused"));
+        // Let a failed attempt and its log line happen when the name cannot be resolved quickly.
+        QTest::qWait(1500);
         QByteArray everything;
         for (const QByteArray &raw : {request("GET", "/", {hostHeader(port)}), request("GET", "/api/status", {hostHeader(port)}),
                  request("GET", "/app.js", {hostHeader(port)}), request("GET", "/missing", {hostHeader(port)}),
@@ -500,6 +504,27 @@ private slots:
         QVERIFY(!everything.contains(token.toUtf8()));
         QVERIFY(!g_log.join('\n').contains(token));
         QVERIFY(!g_log.isEmpty());
+    }
+
+    // R17
+    void reasonIsKeptWhileReconnecting()
+    {
+        const quint16 backendPort = freePort();
+        WebService service(testConfig(backendPort));
+        QString error;
+        QVERIFY2(service.start(&error), qPrintable(error));
+        const quint16 port = service.server()->port();
+        QTRY_COMPARE(statusOf(port).value("reason").toString(), QString("unreachable"));
+        // A host that accepts the connection and never answers the handshake: attempts stay pending.
+        QTcpServer silent;
+        QVERIFY(silent.listen(QHostAddress::LocalHost, backendPort));
+        QTRY_VERIFY_WITH_TIMEOUT(silent.hasPendingConnections(), 5000);
+        for (int i = 0; i < 10; ++i) {
+            QTest::qWait(50);
+            const QJsonObject status = statusOf(port);
+            QCOMPARE(status.value("state").toString(), QString("unavailable"));
+            QCOMPARE(status.value("reason").toString(), QString("unreachable"));
+        }
     }
 
     // R18

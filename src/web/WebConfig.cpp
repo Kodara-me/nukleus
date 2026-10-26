@@ -19,6 +19,10 @@ bool WebConfig::fromEnvironment(const QProcessEnvironment &environment, WebConfi
             *error = QStringLiteral("NUKLEUS_WEB_LISTEN must be an IPv4 address of this host.");
             return false;
         }
+        if (!isAllowedSource(address)) {
+            *error = QStringLiteral("NUKLEUS_WEB_LISTEN must be a private or link-local address: the service answers no other.");
+            return false;
+        }
         result.listenAddress = address;
     }
 

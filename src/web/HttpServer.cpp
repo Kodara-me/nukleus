@@ -113,7 +113,11 @@ private:
             m_socket->readAll();
             return;
         }
-        if (m_phase != Phase::Head && m_phase != Phase::Body) return;
+        if (m_phase != Phase::Head && m_phase != Phase::Body) {
+            // Nothing more is expected from the client: discard what it sends so the read buffer stays empty.
+            m_socket->readAll();
+            return;
+        }
         const QByteArray data = m_socket->readAll();
         if (data.isEmpty()) return;
         restartIdle();
@@ -339,7 +343,11 @@ HttpServer::HttpServer(HttpServerOptions options, HttpHandler handler, QObject *
 {
 }
 
-HttpServer::~HttpServer() = default;
+HttpServer::~HttpServer()
+{
+    // The connections report to the server when they go: delete them while it is still whole.
+    qDeleteAll(findChildren<HttpConnection *>(Qt::FindDirectChildrenOnly));
+}
 
 bool HttpServer::listen(QString *error)
 {
