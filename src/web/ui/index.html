@@ -17,6 +17,37 @@
       <p id="status-detail" class="status-detail"></p>
       <button id="retry" type="button" hidden>Check again</button>
     </section>
+
+    <section id="action" class="card" hidden>
+      <h2 id="action-title">Text to image</h2>
+      <p id="action-unavailable" class="notice" role="status" hidden></p>
+      <form id="form" novalidate>
+        <label for="model">Model</label>
+        <select id="model" name="modelId" required></select>
+
+        <label for="prompt">Prompt</label>
+        <textarea id="prompt" name="prompt" rows="4" required></textarea>
+
+        <label for="negativePrompt">Negative prompt</label>
+        <textarea id="negativePrompt" name="negativePrompt" rows="2"></textarea>
+
+        <div class="grid">
+          <div><label for="width">Width</label><input id="width" name="width" type="number" inputmode="numeric" min="64" max="4096" step="1"></div>
+          <div><label for="height">Height</label><input id="height" name="height" type="number" inputmode="numeric" min="64" max="4096" step="1"></div>
+          <div><label for="steps">Steps</label><input id="steps" name="steps" type="number" inputmode="numeric" min="1" step="1"></div>
+          <div><label for="cfgScale">CFG scale</label><input id="cfgScale" name="cfgScale" type="number" inputmode="decimal" min="0" step="any"></div>
+          <div><label for="seed">Seed</label><input id="seed" name="seed" type="number" inputmode="numeric" step="1"></div>
+        </div>
+
+        <p id="form-error" class="notice error" role="alert" hidden></p>
+        <button id="submit" type="submit">Generate</button>
+      </form>
+    </section>
+
+    <section id="jobs-section" hidden>
+      <h2>Jobs</h2>
+      <ul id="jobs" class="jobs"></ul>
+    </section>
   </main>
   <script src="/app.js"></script>
 </body>

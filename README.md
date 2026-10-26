@@ -76,9 +76,31 @@ From a build, with `nukleusd` running on the same machine:
 ./build/src/nukleus-web
 ```
 
-Then open `http://127.0.0.1:9385/`. `GET /api/status` answers the connection state
-(`available`, `unavailable` or `connecting`) and, while unavailable, its reason
-(`unreachable`, `authentication-refused` or `incompatible-protocol`).
+Then open `http://127.0.0.1:9385/`. The page shows whether Nukleus is available and,
+when it is not, why, and offers the **Text to image** action: choose an installed
+image-generation model (those that can generate, shown by display name), edit the
+prompt, negative prompt, width, height, steps, CFG scale and seed (prefilled from the
+model's recommended options, else 1024 × 1024, 28 steps, CFG 7, seed -1) and generate.
+Each job shows its queue position, then its progress, then the image inline with a
+download button, or its error. The jobs of a browser are listed newest first and kept
+in that browser across reloads; the web service keeps the 20 most recent jobs and
+their results in memory only, so older jobs and every job from before a restart show
+as no longer available. The page uses no external resource and works from 360 px wide.
+
+The API behind the page:
+
+- `GET /api/status` answers the connection state (`available`, `unavailable` or
+  `connecting`), while unavailable its reason (`unreachable`,
+  `authentication-refused` or `incompatible-protocol`), and the actions with their
+  models. The model list is read from `nukleusd` on every request.
+- `POST /api/jobs` takes a `multipart/form-data` request (`action=text-to-image`,
+  `modelId`, `prompt`, `negativePrompt`, `width`, `height`, `steps`, `cfgScale`,
+  `seed`) and answers the job's identifier, a random 128-bit value. It answers `503`
+  while two other requests are sending a body.
+- `GET /api/jobs/<id>` answers the state (`queued`, `running`, `finished` or
+  `failed`), queue position, progress and error, and `GET /api/jobs/<id>/result` the
+  image with its MIME type, for download. A job that is not held anymore answers `404`.
+  No request lists jobs.
 
 ### Runtime tools on Arch Linux
 

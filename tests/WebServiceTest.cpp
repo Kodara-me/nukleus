@@ -6,8 +6,10 @@
 
 #include <QEventLoop>
 #include <QHostAddress>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
@@ -50,6 +52,21 @@ public:
             });
             connect(socket, &QWebSocket::textMessageReceived, this, [this, socket](const QString &text) {
                 const QJsonObject message = QJsonDocument::fromJson(text.toUtf8()).object();
+                if (message.value("type") == "models.list") {
+                    ++m_modelRequests;
+                    socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "models.list.result"}, {"categories", m_categories}}).toJson(QJsonDocument::Compact)));
+                    return;
+                }
+                if (message.value("type") == "submit") {
+                    m_submits.append(message);
+                    m_submitSocket = socket;
+                    const QString jobId = message.value("jobId").toString();
+                    if (m_rejectSubmissions)
+                        send(socket, {{"type", "error"}, {"code", "invalid-request"}, {"message", "Invalid generation options"}, {"jobId", jobId}});
+                    else
+                        send(socket, {{"type", "queued"}, {"jobId", jobId}});
+                    return;
+                }
                 if (message.value("type") != "authenticate") return;
                 m_tokens.append(message.value("token").toString());
                 if (m_mode == Mode::RejectAuthentication) {
@@ -59,7 +76,7 @@ public:
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"error\",\"code\":\"incompatible-protocol\",\"message\":\"Unsupported protocol version\"}"));
                 } else {
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"authenticated\"}"));
-                    socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\"]}"));
+                    send(socket, {{"type", "capabilities"}, {"state", "ready"}, {"operations", QJsonArray::fromStringList(m_operations)}});
                 }
             });
         });
@@ -78,8 +95,44 @@ public:
     void setMode(Mode mode) { m_mode = mode; }
     QStringList tokens() const { return m_tokens; }
 
+    void setOperations(const QStringList &operations) { m_operations = operations; }
+    void setModels(const QJsonArray &categories) { m_categories = categories; }
+    void setRejectSubmissions(bool reject) { m_rejectSubmissions = reject; }
+    int modelRequests() const { return m_modelRequests; }
+    QList<QJsonObject> submits() const { return m_submits; }
+    QString lastJobId() const { return m_submits.isEmpty() ? QString() : m_submits.last().value("jobId").toString(); }
+
+    // Job events of the last submission, as nukleusd sends them.
+    void queuePosition(int position) { send(m_submitSocket, {{"type", "queue-position"}, {"jobId", lastJobId()}, {"position", position}}); }
+    void running() { send(m_submitSocket, {{"type", "running"}, {"jobId", lastJobId()}}); }
+    void progress(int percentage)
+    {
+        send(m_submitSocket, {{"type", "progress"}, {"jobId", lastJobId()},
+                              {"progress", QJsonObject{{"stage", "sampling"}, {"percentage", percentage}, {"statusText", "Sampling"}}}});
+    }
+    void finish(const QByteArray &bytes, const QString &mimeType = QStringLiteral("image/png"))
+    {
+        send(m_submitSocket, {{"type", "result"}, {"jobId", lastJobId()}, {"operation", "image.generate"}, {"mimeType", mimeType}});
+        m_submitSocket->sendBinaryMessage(bytes);
+    }
+    void fail(const QString &code, const QString &message)
+    {
+        send(m_submitSocket, {{"type", "error"}, {"code", code}, {"message", message}, {"jobId", lastJobId()}});
+    }
+
 private:
+    static void send(QWebSocket *socket, const QJsonObject &object)
+    {
+        socket->sendTextMessage(QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact)));
+    }
+
     QList<QWebSocket *> m_sockets;
+    QStringList m_operations{QStringLiteral("image.generate")};
+    QJsonArray m_categories;
+    QList<QJsonObject> m_submits;
+    QWebSocket *m_submitSocket = nullptr;
+    bool m_rejectSubmissions = false;
+    int m_modelRequests = 0;
     std::unique_ptr<QWebSocketServer> m_server;
     QStringList m_tokens;
     Mode m_mode = Mode::Accept;
@@ -202,6 +255,43 @@ quint16 freePort()
     probe.listen(QHostAddress::LocalHost, 0);
     return probe.serverPort();
 }
+
+QJsonObject imageModel(const QString &id, const QString &displayName, const QJsonObject &recommended = {})
+{
+    QJsonObject model{{"id", id}, {"name", id + ".safetensors"}, {"fileName", id + ".safetensors"}, {"bytes", 1}, {"displayName", displayName}};
+    if (!recommended.isEmpty()) model.insert("recommendedOptions", recommended);
+    return model;
+}
+
+QJsonArray categories(const QJsonArray &imageModels, const QJsonArray &animationModels = {}, const QJsonArray &upscalers = {})
+{
+    return {QJsonObject{{"category", "image-generation"}, {"models", imageModels}},
+            QJsonObject{{"category", "upscaler"}, {"models", upscalers}},
+            QJsonObject{{"category", "animation"}, {"models", animationModels}}};
+}
+
+// A `multipart/form-data` body of text fields.
+QByteArray multipartBody(const QList<QPair<QString, QString>> &fields)
+{
+    QByteArray body;
+    for (const auto &field : fields)
+        body += "--XBOUNDARYX\r\nContent-Disposition: form-data; name=\"" + field.first.toUtf8() + "\"\r\n\r\n" + field.second.toUtf8() + "\r\n";
+    return body + "--XBOUNDARYX--\r\n";
+}
+
+Reply postJob(quint16 port, QList<QPair<QString, QString>> fields)
+{
+    const QByteArray body = multipartBody(fields);
+    return exchange(QHostAddress::LocalHost, port,
+                    request("POST", "/api/jobs", {hostHeader(port), "Content-Type: multipart/form-data; boundary=XBOUNDARYX",
+                                                  "Content-Length: " + QByteArray::number(body.size())}, body));
+}
+
+QJsonObject jsonOf(const Reply &reply) { return QJsonDocument::fromJson(reply.body).object(); }
+
+Reply getPath(quint16 port, const QByteArray &path) { return exchange(QHostAddress::LocalHost, port, request("GET", path, {hostHeader(port)})); }
+
+QJsonObject jobOf(quint16 port, const QString &id) { return jsonOf(getPath(port, "/api/jobs/" + id.toLatin1())); }
 
 QJsonObject statusOf(quint16 port)
 {
@@ -657,6 +747,288 @@ private slots:
         senders.front()->write(QByteArray(997, 'x'));
         QTRY_COMPARE(server.server.bodiesInFlight(), 1);
         QCOMPARE(exchange(QHostAddress::LocalHost, port, request("POST", "/x", {hostHeader(port), "Content-Length: 2"}, "ab")).status, 200);
+    }
+
+    // R1, R2
+    void textToImageListsModelsThatCanGenerate()
+    {
+        FakeDaemon daemon;
+        daemon.setModels(categories(
+            {imageModel("plain", "Plain model"),
+             imageModel("generator", "Generator", {{"canGenerate", true}, {"canEdit", false}, {"width", 768}, {"height", 768}, {"steps", 20}, {"cfgScale", 5.5}}),
+             imageModel("editor", "Editor only", {{"canGenerate", false}, {"canEdit", true}})},
+            {QJsonObject{{"id", "video"}, {"name", "video"}, {"fileName", "video"}, {"displayName", "Video model"}}},
+            {QJsonObject{{"id", "up"}, {"name", "up"}, {"fileName", "up"}, {"displayName", "Upscaler"}}}));
+        QVERIFY(daemon.start());
+        WebService service(testConfig(daemon.port()));
+        QString error;
+        QVERIFY2(service.start(&error), qPrintable(error));
+        const quint16 port = service.server()->port();
+        QTRY_COMPARE(statusOf(port).value("state").toString(), QString("available"));
+        const QJsonArray actions = statusOf(port).value("actions").toArray();
+        QCOMPARE(actions.size(), 1);
+        const QJsonObject action = actions.at(0).toObject();
+        QCOMPARE(action.value("id").toString(), QString("text-to-image"));
+        QVERIFY(action.value("available").toBool());
+        const QJsonArray models = action.value("models").toArray();
+        QCOMPARE(models.size(), 2);
+        QCOMPARE(models.at(0).toObject().value("id").toString(), QString("plain"));
+        QCOMPARE(models.at(0).toObject().value("name").toString(), QString("Plain model"));
+        QVERIFY(models.at(0).toObject().value("recommendedOptions").toObject().isEmpty());
+        QCOMPARE(models.at(1).toObject().value("name").toString(), QString("Generator"));
+        QCOMPARE(models.at(1).toObject().value("recommendedOptions").toObject().value("steps").toInt(), 20);
+    }
+
+    // R2
+    void textToImageIsUnavailableWithoutAModelOrTheCapability()
+    {
+        FakeDaemon daemon;
+        daemon.setModels(categories({imageModel("editor", "Editor only", {{"canGenerate", false}, {"canEdit", true}})}));
+        QVERIFY(daemon.start());
+        WebService service(testConfig(daemon.port()));
+        QString error;
+        QVERIFY2(service.start(&error), qPrintable(error));
+        const quint16 port = service.server()->port();
+        QTRY_COMPARE(statusOf(port).value("state").toString(), QString("available"));
+        QJsonObject action = statusOf(port).value("actions").toArray().at(0).toObject();
+        QVERIFY(!action.value("available").toBool());
+        QCOMPARE(action.value("unavailable").toString(), QString("no-model"));
+        QVERIFY(action.value("models").toArray().isEmpty());
+
+        FakeDaemon incapable;
+        incapable.setOperations({"image.upscale"});
+        incapable.setModels(categories({imageModel("plain", "Plain model")}));
+        QVERIFY(incapable.start());
+        WebService other(testConfig(incapable.port()));
+        QVERIFY2(other.start(&error), qPrintable(error));
+        const quint16 otherPort = other.server()->port();
+        QTRY_COMPARE(statusOf(otherPort).value("state").toString(), QString("available"));
+        action = statusOf(otherPort).value("actions").toArray().at(0).toObject();
+        QVERIFY(!action.value("available").toBool());
+        QCOMPARE(action.value("unavailable").toString(), QString("unsupported-operation"));
+        QCOMPARE(postJob(otherPort, {{"action", "text-to-image"}, {"modelId", "plain"}, {"prompt", "a cat"}}).status, 400);
+        QVERIFY(incapable.submits().isEmpty());
+    }
+
+    // R3
+    void aModelInstalledLaterAppearsInTheNextStatus()
+    {
+        FakeDaemon daemon;
+        daemon.setModels(categories({imageModel("first", "First")}));
+        QVERIFY(daemon.start());
+        WebService service(testConfig(daemon.port()));
+        QString error;
+        QVERIFY2(service.start(&error), qPrintable(error));
+        const quint16 port = service.server()->port();
+        QTRY_COMPARE(statusOf(port).value("state").toString(), QString("available"));
+        QCOMPARE(statusOf(port).value("actions").toArray().at(0).toObject().value("models").toArray().size(), 1);
+        // nukleusd announces no install: the model list is requested again on every status.
+        daemon.setModels(categories({imageModel("first", "First"), imageModel("second", "Second")}));
+        const int before = daemon.modelRequests();
+        QCOMPARE(statusOf(port).value("actions").toArray().at(0).toObject().value("models").toArray().size(), 2);
+        QVERIFY(daemon.modelRequests() > before);
+    }
+
+    // R4
+    void submittedValuesAndPrefilledOptionsReachNukleus()
+    {
+        FakeDaemon daemon;
+        daemon.setModels(categories({imageModel("plain", "Plain model"),
+            imageModel("tuned", "Tuned", {{"width", 768}, {"height", 768}, {"steps", 20}, {"cfgScale", 5.5}})}));
+        QVERIFY(daemon.start());
+        WebService service(testConfig(daemon.port()));
+        QString error;
+        QVERIFY2(service.start(&error), qPrintable(error));
+        const quint16 port = service.server()->port();
+        QTRY_COMPARE(statusOf(port).value("state").toString(), QString("available"));
+        const QJsonObject status = statusOf(port);
+        QCOMPARE(status.value("defaults").toObject(), (QJsonObject{{"width", 1024}, {"height", 1024}, {"steps", 28}, {"cfgScale", 7}, {"seed", -1}}));
+        QCOMPARE(status.value("actions").toArray().at(0).toObject().value("models").toArray().at(1).toObject().value("recommendedOptions").toObject().value("width").toInt(), 768);
+
+        QCOMPARE(postJob(port, {{"action", "text-to-image"}, {"modelId", "plain"}, {"prompt", "a cat"}, {"negativePrompt", "blur"},
+                                {"width", "512"}, {"height", "640"}, {"steps", "12"}, {"cfgScale", "3.5"}, {"seed", "42"}}).status, 200);
+        QTRY_COMPARE(daemon.submits().size(), 1);
+        QJsonObject message = daemon.submits().at(0);
+        QCOMPARE(message.value("operation").toString(), QString("image.generate"));
+        QJsonObject options = message.value("options").toObject();
+        QCOMPARE(options.value("modelId").toString(), QString("plain"));
+        QCOMPARE(options.value("prompt").toString(), QString("a cat"));
+        QCOMPARE(options.value("negativePrompt").toString(), QString("blur"));
+        QCOMPARE(options.value("width").toInt(), 512);
+        QCOMPARE(options.value("height").toInt(), 640);
+        QCOMPARE(options.value("steps").toInt(), 12);
+        QCOMPARE(options.value("cfgScale").toDouble(), 3.5);
+        QCOMPARE(options.value("seed").toInt(), 42);
+
+        // Fields left out: the model's recommended options, else the Nukleus defaults.
+        QCOMPARE(postJob(port, {{"action", "text-to-image"}, {"modelId", "tuned"}, {"prompt", "a dog"}}).status, 200);
+        QTRY_COMPARE(daemon.submits().size(), 2);
+        options = daemon.submits().at(1).value("options").toObject();
+        QCOMPARE(options.value("width").toInt(), 768);
+        QCOMPARE(options.value("steps").toInt(), 20);
+        QCOMPARE(options.value("cfgScale").toDouble(), 5.5);
+        QCOMPARE(options.value("seed").toInt(), -1);
+        QCOMPARE(postJob(port, {{"action", "text-to-image"}, {"modelId", "plain"}, {"prompt", "a bird"}}).status, 200);
+        QTRY_COMPARE(daemon.submits().size(), 3);
+        options = daemon.submits().at(2).value("options").toObject();
+        QCOMPARE(options.value("width").toInt(), 1024);
+        QCOMPARE(options.value("height").toInt(), 1024);
+        QCOMPARE(options.value("steps").toInt(), 28);
+        QCOMPARE(options.value("cfgScale").toDouble(), 7.0);
+
+        // A malformed number and an unknown model are refused before anything is sent.
+        QCOMPARE(postJob(port, {{"action", "text-to-image"}, {"modelId", "plain"}, {"prompt", "x"}, {"width", "wide"}}).status, 400);
+        QCOMPARE(postJob(port, {{"action", "text-to-image"}, {"modelId", "missing"}, {"prompt", "x"}}).status, 400);
+        QCOMPARE(daemon.submits().size(), 3);
+    }
+
+    // R9
+    void aRejectedJobShowsNukleusError()
+    {
+        FakeDaemon daemon;
+        daemon.setRejectSubmissions(true);
+        daemon.setModels(categories({imageModel("plain", "Plain model")}));
+        QVERIFY(daemon.start());
+        WebService service(testConfig(daemon.port()));
+        QString error;
+        QVERIFY2(service.start(&error), qPrintable(error));
+        const quint16 port = service.server()->port();
+        QTRY_COMPARE(statusOf(port).value("state").toString(), QString("available"));
+        const QString id = jsonOf(postJob(port, {{"action", "text-to-image"}, {"modelId", "plain"}, {"prompt", "x"}, {"steps", "0"}})).value("id").toString();
+        QVERIFY(!id.isEmpty());
+        QTRY_COMPARE(jobOf(port, id).value("state").toString(), QString("failed"));
+        QCOMPARE(jobOf(port, id).value("error").toString(), QString("Invalid generation options"));
+        QCOMPARE(getPath(port, "/api/jobs/" + id.toLatin1() + "/result").status, 409);
+    }
+
+    // R10
+    void aJobGoesFromQueuedToRunningToFinished()
+    {
+        FakeDaemon daemon;
+        daemon.setModels(categories({imageModel("plain", "Plain model")}));
+        QVERIFY(daemon.start());
+        WebService service(testConfig(daemon.port()));
+        QString error;
+        QVERIFY2(service.start(&error), qPrintable(error));
+        const quint16 port = service.server()->port();
+        QTRY_COMPARE(statusOf(port).value("state").toString(), QString("available"));
+        const QString id = jsonOf(postJob(port, {{"action", "text-to-image"}, {"modelId", "plain"}, {"prompt", "x"}})).value("id").toString();
+        QCOMPARE(id.size(), 32);
+        QCOMPARE(jobOf(port, id).value("state").toString(), QString("queued"));
+        QTRY_COMPARE(daemon.submits().size(), 1);
+        daemon.queuePosition(2);
+        QTRY_COMPARE(jobOf(port, id).value("queuePosition").toInt(-1), 2);
+        QCOMPARE(jobOf(port, id).value("state").toString(), QString("queued"));
+        QCOMPARE(getPath(port, "/api/jobs/" + id.toLatin1() + "/result").status, 409);
+        daemon.running();
+        QTRY_COMPARE(jobOf(port, id).value("state").toString(), QString("running"));
+        daemon.progress(40);
+        QTRY_COMPARE(jobOf(port, id).value("progress").toInt(-1), 40);
+        const QByteArray image("\x89PNG-fake-image");
+        daemon.finish(image);
+        QTRY_COMPARE(jobOf(port, id).value("state").toString(), QString("finished"));
+        const Reply result = getPath(port, "/api/jobs/" + id.toLatin1() + "/result");
+        QCOMPARE(result.status, 200);
+        QCOMPARE(result.body, image);
+        QCOMPARE(result.header("Content-Type"), QByteArray("image/png"));
+        QVERIFY(result.header("Content-Disposition").startsWith("attachment; filename=\"nukleus-" + id.left(8).toLatin1()));
+        QVERIFY(result.header("Content-Disposition").contains(".png"));
+
+        const QString failing = jsonOf(postJob(port, {{"action", "text-to-image"}, {"modelId", "plain"}, {"prompt", "y"}})).value("id").toString();
+        QTRY_COMPARE(daemon.submits().size(), 2);
+        daemon.running();
+        daemon.fail("generation-failed", "Image generation failed");
+        QTRY_COMPARE(jobOf(port, failing).value("state").toString(), QString("failed"));
+        QCOMPARE(jobOf(port, failing).value("error").toString(), QString("Image generation failed"));
+    }
+
+    // R34
+    void aPostIsRefusedAsBusyWhileTwoBodiesAreBeingReceived()
+    {
+        FakeDaemon daemon;
+        daemon.setModels(categories({imageModel("plain", "Plain model")}));
+        QVERIFY(daemon.start());
+        WebService service(testConfig(daemon.port()));
+        QString error;
+        QVERIFY2(service.start(&error), qPrintable(error));
+        const quint16 port = service.server()->port();
+        QTRY_COMPARE(statusOf(port).value("state").toString(), QString("available"));
+        std::vector<std::unique_ptr<QTcpSocket>> senders;
+        for (int i = 0; i < 2; ++i) {
+            senders.push_back(std::make_unique<QTcpSocket>());
+            senders.back()->connectToHost(QHostAddress::LocalHost, port);
+            QVERIFY(senders.back()->waitForConnected(2000));
+            senders.back()->write(request("POST", "/api/jobs", {hostHeader(port), "Content-Type: multipart/form-data; boundary=XBOUNDARYX",
+                                                                 "Content-Length: 5000"}, "--XBOUNDARYX"));
+        }
+        QTRY_COMPARE(service.server()->bodiesInFlight(), 2);
+        // Refused before its body is read: only its headers are sent. The interface shows the 503 as busy.
+        const Reply busy = exchange(QHostAddress::LocalHost, port, request("POST", "/api/jobs", {hostHeader(port),
+            "Content-Type: multipart/form-data; boundary=XBOUNDARYX", "Content-Length: 5000"}));
+        QCOMPARE(busy.status, 503);
+        QVERIFY(busy.body.contains("busy"));
+        QVERIFY(daemon.submits().isEmpty());
+    }
+
+    // R12, R13
+    void jobsAreReachedOnlyByTheirIdentifierAndOnlyImageGenerateIsSubmitted()
+    {
+        FakeDaemon daemon;
+        daemon.setModels(categories({imageModel("plain", "Plain model")}));
+        QVERIFY(daemon.start());
+        WebService service(testConfig(daemon.port()));
+        QString error;
+        QVERIFY2(service.start(&error), qPrintable(error));
+        const quint16 port = service.server()->port();
+        QTRY_COMPARE(statusOf(port).value("state").toString(), QString("available"));
+        const QString id = jsonOf(postJob(port, {{"action", "text-to-image"}, {"modelId", "plain"}, {"prompt", "x"}})).value("id").toString();
+        QVERIFY(id.size() >= 32); // 128 bits, hex
+        QVERIFY(QRegularExpression("^[0-9a-f]+$").match(id).hasMatch());
+        for (const QByteArray &path : {QByteArray("/api/jobs"), QByteArray("/api/jobs/"), QByteArray("/api/jobs/unknown"),
+                                       QByteArray("/api/jobs/00000000000000000000000000000000"),
+                                       QByteArray("/api/jobs/00000000000000000000000000000000/result")}) {
+            const Reply reply = getPath(port, path);
+            QCOMPARE(reply.status, 404);
+            QVERIFY2(!reply.body.contains(id.toLatin1()), path.constData());
+            QVERIFY2(!reply.body.contains("state"), path.constData());
+        }
+        // Other actions are not submitted, whatever their name.
+        for (const QString &action : {QStringLiteral("image-to-image"), QStringLiteral("edit"), QStringLiteral("image-to-video"),
+                                      QStringLiteral("text.chat"), QStringLiteral("image.upscale"), QString()})
+            QCOMPARE(postJob(port, {{"action", action}, {"modelId", "plain"}, {"prompt", "x"}}).status, 400);
+        QTRY_COMPARE(daemon.submits().size(), 1);
+        for (const QJsonObject &submit : daemon.submits()) QCOMPARE(submit.value("operation").toString(), QString("image.generate"));
+    }
+
+    // R44, R45
+    void theTwentyFirstJobMakesTheOldestUnavailableAndARestartForgetsAll()
+    {
+        FakeDaemon daemon;
+        daemon.setModels(categories({imageModel("plain", "Plain model")}));
+        QVERIFY(daemon.start());
+        QStringList ids;
+        {
+            WebService service(testConfig(daemon.port()));
+            QString error;
+            QVERIFY2(service.start(&error), qPrintable(error));
+            const quint16 port = service.server()->port();
+            QTRY_COMPARE(statusOf(port).value("state").toString(), QString("available"));
+            for (int i = 0; i < 21; ++i) {
+                const Reply reply = postJob(port, {{"action", "text-to-image"}, {"modelId", "plain"}, {"prompt", QString::number(i)}});
+                QCOMPARE(reply.status, 200);
+                ids.append(jsonOf(reply).value("id").toString());
+            }
+            QCOMPARE(getPath(port, "/api/jobs/" + ids.first().toLatin1()).status, 404);
+            QVERIFY(!getPath(port, "/api/jobs/" + ids.first().toLatin1()).body.contains("state"));
+            QCOMPARE(getPath(port, "/api/jobs/" + ids.first().toLatin1() + "/result").status, 404);
+            for (int i = 1; i < 21; ++i) QCOMPARE(getPath(port, "/api/jobs/" + ids.at(i).toLatin1()).status, 200);
+        }
+        WebService restarted(testConfig(daemon.port()));
+        QString error;
+        QVERIFY2(restarted.start(&error), qPrintable(error));
+        const quint16 port = restarted.server()->port();
+        QTRY_COMPARE(statusOf(port).value("state").toString(), QString("available"));
+        for (const QString &id : ids) QCOMPARE(getPath(port, "/api/jobs/" + id.toLatin1()).status, 404);
     }
 
     // R26

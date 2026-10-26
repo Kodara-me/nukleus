@@ -65,6 +65,10 @@ add_library(nukleus-web-core OBJECT
     web/HostRules.h
     web/HttpServer.cpp
     web/HttpServer.h
+    web/JobStore.cpp
+    web/JobStore.h
+    web/Multipart.cpp
+    web/Multipart.h
     web/WebConfig.cpp
     web/WebConfig.h
     web/WebService.cpp
