@@ -28,9 +28,18 @@
   var jobsSection = document.getElementById("jobs-section");
   var jobsList = document.getElementById("jobs");
   var FIELDS = ["width", "height", "steps", "cfgScale", "seed"];
+  var tabs = document.getElementById("tabs");
+  var actionTitle = document.getElementById("action-title");
+  var MAX_IMAGE_BYTES = 32 * 1024 * 1024;     // R8
+  var MAX_JOB_IMAGE_BYTES = 96 * 1024 * 1024; // R8
+  var MAX_REFERENCES = 7;                     // R6
+  var SUBMIT_LABELS = { "text-to-image": "Generate", "image-to-image": "Generate", "edit": "Edit", "image-to-video": "Create video" };
+  var BUSY = "The service is busy or cannot be reached. Try again in a moment; your values are kept.";
 
   var statusTimer = null;
   var models = [];
+  var actions = [];
+  var current = "text-to-image";
   var modelsKey = "";
   var defaults = { width: 1024, height: 1024, steps: 28, cfgScale: 7, seed: -1 };
   var jobs = loadJobs();
@@ -61,6 +70,7 @@
   function prefill(model) {
     var options = (model && model.recommendedOptions) || {};
     FIELDS.forEach(function (name) {
+      if (form.elements[name].disabled) return;
       form.elements[name].value = options[name] !== undefined ? options[name] : defaults[name];
     });
   }
@@ -70,12 +80,52 @@
     return null;
   }
 
-  function renderAction(action) {
+  function currentAction() {
+    for (var i = 0; i < actions.length; i++) if (actions[i].id === current) return actions[i];
+    return null;
+  }
+
+  // Shows the fields of the current action and leaves the others out of the form data.
+  function applyAction() {
+    Array.prototype.forEach.call(form.querySelectorAll("[data-for]"), function (node) {
+      var shown = node.getAttribute("data-for").split(" ").indexOf(current) >= 0;
+      node.hidden = !shown;
+      Array.prototype.forEach.call(node.querySelectorAll("input"), function (input) { input.disabled = !shown; });
+    });
+    form.elements.action.value = current;
+    submit.textContent = SUBMIT_LABELS[current] || "Submit";
+  }
+
+  function renderTabs() {
+    tabs.textContent = "";
+    actions.forEach(function (action) {
+      var tab = element("button", "tab", action.title);
+      tab.type = "button";
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-selected", action.id === current ? "true" : "false");
+      tab.addEventListener("click", function () { selectAction(action.id); });
+      tabs.appendChild(tab);
+    });
+  }
+
+  function selectAction(id) {
+    current = id;
+    modelsKey = "";
+    showFormError("");
+    renderTabs();
+    renderAction();
+  }
+
+  function renderAction() {
+    var action = currentAction();
+    if (!action) { actionSection.hidden = true; return; }
     var list = action.models || [];
     var key = JSON.stringify(list);
     actionSection.hidden = false;
+    actionTitle.textContent = action.title;
     unavailable.hidden = action.available;
     form.hidden = !action.available;
+    applyAction();
     if (!action.available) {
       unavailable.textContent = UNAVAILABLE[action.unavailable] || "This action is unavailable.";
       return;
@@ -101,8 +151,10 @@
     if (status.defaults) defaults = status.defaults;
     if (status.state === "available") {
       show("available", "Nukleus is available.", "");
-      var action = (status.actions || []).filter(function (a) { return a.id === "text-to-image"; })[0];
-      if (action) renderAction(action);
+      actions = status.actions || [];
+      if (!currentAction() && actions.length) current = actions[0].id;
+      renderTabs();
+      renderAction();
     } else {
       actionSection.hidden = true;
       if (status.state === "unavailable") show("unavailable", "Nukleus is unavailable.", REASONS[status.reason] || "Unknown reason.");
@@ -155,7 +207,7 @@
       delete cards[job.id];
       jobsSection.hidden = jobs.length === 0;
     });
-    heading.textContent = job.title || "Text to image";
+    heading.textContent = job.title || "Job";
     var note = element("p", "job-detail", job.prompt || "");
     [heading, note, info, bar, media, remove].forEach(function (node) { item.appendChild(node); });
     return { item: item, info: info, bar: bar, media: media, done: false };
@@ -240,40 +292,72 @@
     formError.hidden = !message;
   }
 
+  function isAcceptedImage(file) {
+    return file.type === "image/png" || file.type === "image/jpeg" || /\.(png|jpe?g)$/i.test(file.name);
+  }
+
+  // R8: the browser checks what it can; the web service checks again. Returns a message, or "".
+  function checkImages() {
+    var total = 0;
+    var message = "";
+    Array.prototype.forEach.call(form.querySelectorAll('input[type="file"]:not(:disabled)'), function (input) {
+      if (message) return;
+      var files = Array.prototype.slice.call(input.files || []);
+      if (input.name === "reference" && files.length > MAX_REFERENCES) {
+        message = "Choose at most " + MAX_REFERENCES + " reference images.";
+        return;
+      }
+      files.forEach(function (file) {
+        if (message) return;
+        if (!isAcceptedImage(file)) message = "\u201c" + file.name + "\u201d is not a PNG or JPEG image.";
+        else if (file.size > MAX_IMAGE_BYTES) message = "\u201c" + file.name + "\u201d is larger than 32 MiB.";
+        total += file.size;
+      });
+    });
+    if (!message && total > MAX_JOB_IMAGE_BYTES) message = "The images of one job are limited to 96 MiB in all.";
+    return message;
+  }
+
   function onSubmit(event) {
     event.preventDefault();
     showFormError("");
     var model = selectedModel();
-    if (!model) { showFormError("Choose a model."); return; }
+    var action = currentAction();
+    if (!model || !action) { showFormError("Choose a model."); return; }
+    var problem = checkImages();
+    if (problem) { showFormError(problem); return; }
     submit.disabled = true;
-    // The form is left as it is, so a refusal never loses what was entered (R9, R34).
+    // The form is left as it is, so a refusal never loses what was entered (R9, R34, R35).
     fetch("/api/jobs", { method: "POST", body: new FormData(form) })
       .then(function (response) {
-        if (response.status === 503) throw new Error("The service is busy. Try again in a moment; your values are kept.");
+        if (response.status === 503) throw new Error(BUSY);
         return response.json().then(function (body) {
           if (!response.ok) throw new Error(body.error || "The job was refused.");
           return body;
         });
       })
       .then(function (body) {
-        var job = { id: body.id, title: "Text to image · " + model.name, prompt: form.elements.prompt.value.slice(0, 200) };
+        var job = { id: body.id, title: action.title + " \u00b7 " + model.name, prompt: form.elements.prompt.value.slice(0, 200) };
         lastSubmitted = job.id;
         jobs.unshift(job);
         saveJobs();
         addCard(job, true);
       })
       .catch(function (error) {
-        showFormError(error instanceof SyntaxError ? "The service answered something unexpected." : error.message || "The job could not be sent.");
+        // A busy service answers before it reads the body and may close the connection: the browser
+        // then reports a network error (a TypeError), which reads as busy too.
+        if (error instanceof TypeError) showFormError(BUSY);
+        else showFormError(error instanceof SyntaxError ? "The service answered something unexpected." : error.message || "The job could not be sent.");
       })
       .then(function () { submit.disabled = false; });
   }
 
   function start() {
-    // The action is fixed for now: it travels with every job.
+    // The action travels with every job.
     var hidden = document.createElement("input");
     hidden.type = "hidden";
     hidden.name = "action";
-    hidden.value = "text-to-image";
+    hidden.value = current;
     form.appendChild(hidden);
 
     modelSelect.addEventListener("change", function () { prefill(selectedModel()); });

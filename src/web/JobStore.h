@@ -28,7 +28,8 @@ public:
     explicit JobStore(int capacity = 20);
 
     // Adds a job for an SDK job id and returns it; the oldest job beyond the capacity is dropped.
-    WebJob &add(const QString &sdkId);
+    // A job waiting to be sent to Nukleus has no SDK job id yet.
+    WebJob &add(const QString &sdkId = {});
     // Null for an identifier that is not a well-formed identifier or that the store does not hold.
     WebJob *find(const QString &id);
     WebJob *findBySdkId(const QString &sdkId);

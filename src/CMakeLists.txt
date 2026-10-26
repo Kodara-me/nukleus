@@ -65,6 +65,8 @@ add_library(nukleus-web-core OBJECT
     web/HostRules.h
     web/HttpServer.cpp
     web/HttpServer.h
+    web/ImageUpload.cpp
+    web/ImageUpload.h
     web/JobStore.cpp
     web/JobStore.h
     web/Multipart.cpp
@@ -76,7 +78,7 @@ add_library(nukleus-web-core OBJECT
 )
 set_target_properties(nukleus-web-core PROPERTIES AUTORCC ON)
 target_include_directories(nukleus-web-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/web)
-target_link_libraries(nukleus-web-core PUBLIC Nukleus::SDK Qt6::Network Qt6::WebSockets)
+target_link_libraries(nukleus-web-core PUBLIC Nukleus::SDK Qt6::Gui Qt6::Network Qt6::WebSockets)
 
 add_executable(nukleus-web web/nukleus-web-main.cpp)
 target_link_libraries(nukleus-web PRIVATE nukleus-web-core)

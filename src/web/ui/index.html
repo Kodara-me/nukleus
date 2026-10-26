@@ -19,6 +19,7 @@
     </section>
 
     <section id="action" class="card" hidden>
+      <div id="tabs" class="tabs" role="tablist" aria-label="Actions"></div>
       <h2 id="action-title">Text to image</h2>
       <p id="action-unavailable" class="notice" role="status" hidden></p>
       <form id="form" novalidate>
@@ -31,12 +32,31 @@
         <label for="negativePrompt">Negative prompt</label>
         <textarea id="negativePrompt" name="negativePrompt" rows="2"></textarea>
 
+        <div class="images" data-for="image-to-image">
+          <label for="image">Source image</label>
+          <input id="image" name="image" type="file" accept="image/png,image/jpeg">
+          <label for="strength">Source image strength (0 to 1)</label>
+          <input id="strength" name="strength" type="number" inputmode="decimal" min="0" max="1" step="any" value="0.55">
+        </div>
+        <div class="images" data-for="edit">
+          <label for="source">Source image</label>
+          <input id="source" name="source" type="file" accept="image/png,image/jpeg">
+          <label for="reference">Reference images (up to 7)</label>
+          <input id="reference" name="reference" type="file" accept="image/png,image/jpeg" multiple>
+        </div>
+        <div class="images" data-for="image-to-video">
+          <label for="startImage">Start image</label>
+          <input id="startImage" name="startImage" type="file" accept="image/png,image/jpeg">
+          <label for="endImage">End image (optional)</label>
+          <input id="endImage" name="endImage" type="file" accept="image/png,image/jpeg">
+        </div>
+
         <div class="grid">
-          <div><label for="width">Width</label><input id="width" name="width" type="number" inputmode="numeric" min="64" max="4096" step="1"></div>
-          <div><label for="height">Height</label><input id="height" name="height" type="number" inputmode="numeric" min="64" max="4096" step="1"></div>
-          <div><label for="steps">Steps</label><input id="steps" name="steps" type="number" inputmode="numeric" min="1" step="1"></div>
-          <div><label for="cfgScale">CFG scale</label><input id="cfgScale" name="cfgScale" type="number" inputmode="decimal" min="0" step="any"></div>
-          <div><label for="seed">Seed</label><input id="seed" name="seed" type="number" inputmode="numeric" step="1"></div>
+          <div data-for="text-to-image image-to-image"><label for="width">Width</label><input id="width" name="width" type="number" inputmode="numeric" min="64" max="4096" step="1"></div>
+          <div data-for="text-to-image image-to-image"><label for="height">Height</label><input id="height" name="height" type="number" inputmode="numeric" min="64" max="4096" step="1"></div>
+          <div data-for="text-to-image image-to-image edit"><label for="steps">Steps</label><input id="steps" name="steps" type="number" inputmode="numeric" min="1" step="1"></div>
+          <div data-for="text-to-image image-to-image edit"><label for="cfgScale">CFG scale</label><input id="cfgScale" name="cfgScale" type="number" inputmode="decimal" min="0" step="any"></div>
+          <div data-for="text-to-image image-to-image edit image-to-video"><label for="seed">Seed</label><input id="seed" name="seed" type="number" inputmode="numeric" step="1"></div>
         </div>
 
         <p id="form-error" class="notice error" role="alert" hidden></p>

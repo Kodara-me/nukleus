@@ -256,7 +256,7 @@ QString ServiceClient::submitEdit(const ImageGenerationRequest &request)
     QJsonObject options{{"modelId", request.modelId}, {"inputCount", int(request.editImages.size())}, {"prompt", request.prompt},
          {"width", request.width}, {"height", request.height}, {"steps", request.steps},
          {"cfgScale", request.cfgScale}, {"sampler", request.sampler},
-         {"scheduler", request.scheduler}, {"clipSkip", request.clipSkip}};
+         {"scheduler", request.scheduler}, {"clipSkip", request.clipSkip}, {"seed", request.seed}};
     if (!request.qualityId.isEmpty()) options.insert("qualityId", request.qualityId);
     if (!request.negativePrompt.isEmpty()) options.insert("negativePrompt", request.negativePrompt);
     return submit(ImageOperation::Edit, options, request.editImages);

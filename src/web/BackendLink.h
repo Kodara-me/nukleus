@@ -22,7 +22,8 @@ public:
     State state() const { return m_state; }
     // "unreachable", "authentication-refused" or "incompatible-protocol" while unavailable, empty otherwise.
     QString reason() const { return m_reason; }
-    Nukleus::ServiceClient *client() const { return const_cast<Nukleus::ServiceClient *>(&m_client); }
+    Nukleus::ServiceClient *client() { return &m_client; }
+    const Nukleus::ServiceClient *client() const { return &m_client; }
 
     // Maps the SDK's error code to the reason the interface shows.
     static QString reasonForCode(const QString &code);

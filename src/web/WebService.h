@@ -25,7 +25,7 @@ public:
 private:
     void handle(const HttpRequest &request, HttpResponder respond);
     void respondStatus(HttpResponder respond);
-    QJsonObject textToImageAction() const;
+    QJsonObject actionJson(int index) const;
     HttpResponse submitJob(const HttpRequest &request);
     HttpResponse jobResponse(const QString &id);
     HttpResponse resultResponse(const QString &id);
@@ -35,11 +35,26 @@ private:
     void onJobStateChanged(const QString &sdkId, Nukleus::JobState state, int queuePosition);
     void onProgress(const QString &sdkId, const Nukleus::GenerationProgress &progress);
     void onImageJobFinished(const Nukleus::ImageJobResult &result);
+    void onAnimationFinished(const Nukleus::AnimationResult &result);
+    void finishJob(const QString &sdkId, bool succeeded, const QByteArray &data, const QByteArray &mimeType, const QString &message);
+    // The submission queue (R35): jobs wait here, with their images, until the previous job's uploads are done.
+    using Sender = std::function<QString()>;
+    void enqueue(const QString &jobId, Sender send);
+    void sendNext();
+    void releaseSending(const QString &sdkId);
 
     WebConfig m_config;
     BackendLink m_link;
     HttpServer m_server;
     JobStore m_jobs;
+    struct Waiting
+    {
+        QString jobId;
+        std::function<QString()> send;
+    };
+    QList<Waiting> m_waiting;
+    QString m_sendingSdkId; // the job whose images are being sent, empty when none
+    bool m_sending = false;
     QList<std::function<void()>> m_modelWaiters;
     QTimer m_modelTimeout;
 };

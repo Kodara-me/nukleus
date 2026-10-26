@@ -1,11 +1,15 @@
 #include "BackendLink.h"
 #include "HostRules.h"
 #include "HttpServer.h"
+#include "ImageUpload.h"
 #include "WebConfig.h"
 #include "WebService.h"
 
+#include <QBuffer>
 #include <QEventLoop>
 #include <QHostAddress>
+#include <QImage>
+#include <QImageReader>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -50,6 +54,19 @@ public:
                 m_sockets.removeAll(socket);
                 socket->deleteLater();
             });
+            connect(socket, &QWebSocket::binaryMessageReceived, this, [this, socket](const QByteArray &bytes) {
+                if (!m_pending.contains(socket)) return;
+                Upload &upload = m_pending[socket];
+                m_uploads[upload.jobId].append(bytes);
+                m_events.append("binary:" + upload.jobId);
+                if (++upload.received < upload.expected) {
+                    send(socket, {{"type", "upload-required"}, {"jobId", upload.jobId}, {"inputRole", "reference"}, {"inputIndex", upload.received}});
+                } else if (m_holdUploads) {
+                    m_held = socket;
+                } else {
+                    finishUpload(socket);
+                }
+            });
             connect(socket, &QWebSocket::textMessageReceived, this, [this, socket](const QString &text) {
                 const QJsonObject message = QJsonDocument::fromJson(text.toUtf8()).object();
                 if (message.value("type") == "models.list") {
@@ -58,13 +75,29 @@ public:
                     return;
                 }
                 if (message.value("type") == "submit") {
-                    m_submits.append(message);
-                    m_submitSocket = socket;
                     const QString jobId = message.value("jobId").toString();
-                    if (m_rejectSubmissions)
+                    // nukleusd refuses a submission on a connection with an upload pending.
+                    if (m_pending.contains(socket)) {
+                        ++m_refusedDuringUpload;
+                        send(socket, {{"type", "error"}, {"code", "queue-full"}, {"message", "The service queue is full"}, {"jobId", jobId}});
+                        return;
+                    }
+                    m_submits.append(message);
+                    m_events.append("submit:" + jobId);
+                    m_submitSocket = socket;
+                    if (m_rejectSubmissions) {
                         send(socket, {{"type", "error"}, {"code", "invalid-request"}, {"message", "Invalid generation options"}, {"jobId", jobId}});
-                    else
+                        return;
+                    }
+                    const QJsonObject options = message.value("options").toObject();
+                    int expected = options.value("inputCount").toInt(options.value("hasInput").toBool() ? 1 : 0);
+                    if (message.value("operation") == "image.animate") expected = options.value("hasEndImage").toBool() ? 2 : 1;
+                    if (expected > 0) {
+                        m_pending.insert(socket, {jobId, expected, 0});
+                        send(socket, {{"type", "upload-required"}, {"jobId", jobId}, {"inputRole", "source"}});
+                    } else {
                         send(socket, {{"type", "queued"}, {"jobId", jobId}});
+                    }
                     return;
                 }
                 if (message.value("type") != "authenticate") return;
@@ -98,6 +131,16 @@ public:
     void setOperations(const QStringList &operations) { m_operations = operations; }
     void setModels(const QJsonArray &categories) { m_categories = categories; }
     void setRejectSubmissions(bool reject) { m_rejectSubmissions = reject; }
+    // While set, the last upload of a job is not acknowledged until releaseUpload().
+    void setHoldUploads(bool hold) { m_holdUploads = hold; }
+    bool hasHeldUpload() const { return m_held != nullptr; }
+    void releaseUpload()
+    {
+        if (m_held) finishUpload(std::exchange(m_held, nullptr));
+    }
+    QList<QByteArray> uploadsOf(const QString &jobId) const { return m_uploads.value(jobId); }
+    QStringList events() const { return m_events; }
+    int refusedDuringUpload() const { return m_refusedDuringUpload; }
     int modelRequests() const { return m_modelRequests; }
     QList<QJsonObject> submits() const { return m_submits; }
     QString lastJobId() const { return m_submits.isEmpty() ? QString() : m_submits.last().value("jobId").toString(); }
@@ -112,7 +155,7 @@ public:
     }
     void finish(const QByteArray &bytes, const QString &mimeType = QStringLiteral("image/png"))
     {
-        send(m_submitSocket, {{"type", "result"}, {"jobId", lastJobId()}, {"operation", "image.generate"}, {"mimeType", mimeType}});
+        send(m_submitSocket, {{"type", "result"}, {"jobId", lastJobId()}, {"operation", mimeType.startsWith("video/") ? "image.animate" : "image.generate"}, {"mimeType", mimeType}});
         m_submitSocket->sendBinaryMessage(bytes);
     }
     void fail(const QString &code, const QString &message)
@@ -121,13 +164,32 @@ public:
     }
 
 private:
+    struct Upload
+    {
+        QString jobId;
+        int expected = 0;
+        int received = 0;
+    };
+
+    void finishUpload(QWebSocket *socket)
+    {
+        const Upload upload = m_pending.take(socket);
+        send(socket, {{"type", "queued"}, {"jobId", upload.jobId}});
+    }
+
     static void send(QWebSocket *socket, const QJsonObject &object)
     {
         socket->sendTextMessage(QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact)));
     }
 
     QList<QWebSocket *> m_sockets;
-    QStringList m_operations{QStringLiteral("image.generate")};
+    QHash<QWebSocket *, Upload> m_pending;
+    QHash<QString, QList<QByteArray>> m_uploads;
+    QStringList m_events;
+    QWebSocket *m_held = nullptr;
+    bool m_holdUploads = false;
+    int m_refusedDuringUpload = 0;
+    QStringList m_operations{QStringLiteral("image.generate"), QStringLiteral("image.edit"), QStringLiteral("image.animate")};
     QJsonArray m_categories;
     QList<QJsonObject> m_submits;
     QWebSocket *m_submitSocket = nullptr;
@@ -287,6 +349,51 @@ Reply postJob(quint16 port, QList<QPair<QString, QString>> fields)
                                                   "Content-Length: " + QByteArray::number(body.size())}, body));
 }
 
+struct UploadFile
+{
+    QString field;
+    QString fileName;
+    QByteArray data;
+};
+
+Reply postJobWithFiles(quint16 port, QList<QPair<QString, QString>> fields, const QList<UploadFile> &files)
+{
+    QByteArray body = multipartBody(fields);
+    body.chop(QByteArray("--XBOUNDARYX--\r\n").size());
+    for (const UploadFile &file : files)
+        body += "--XBOUNDARYX\r\nContent-Disposition: form-data; name=\"" + file.field.toUtf8() + "\"; filename=\"" + file.fileName.toUtf8()
+              + "\"\r\nContent-Type: application/octet-stream\r\n\r\n" + file.data + "\r\n";
+    body += "--XBOUNDARYX--\r\n";
+    return exchange(QHostAddress::LocalHost, port,
+                    request("POST", "/api/jobs", {hostHeader(port), "Content-Type: multipart/form-data; boundary=XBOUNDARYX",
+                                                  "Content-Length: " + QByteArray::number(body.size())}, body), 20000);
+}
+
+QByteArray encodedImage(int width, int height, const char *format = "PNG")
+{
+    QImage image(width, height, QImage::Format_RGB32);
+    image.fill(QColor(40, 120, 200));
+    QByteArray bytes;
+    QBuffer buffer(&bytes);
+    buffer.open(QIODevice::WriteOnly);
+    image.save(&buffer, format);
+    return bytes;
+}
+
+QSize sizeOfImage(const QByteArray &bytes)
+{
+    QByteArray copy = bytes;
+    QBuffer buffer(&copy);
+    buffer.open(QIODevice::ReadOnly);
+    return QImageReader(&buffer).size();
+}
+
+QJsonObject animationModel(const QString &id, const QString &displayName, const QStringList &missing = {})
+{
+    return QJsonObject{{"id", id}, {"name", id}, {"fileName", id}, {"bytes", 1}, {"displayName", displayName},
+                       {"missingFiles", QJsonArray::fromStringList(missing)}};
+}
+
 QJsonObject jsonOf(const Reply &reply) { return QJsonDocument::fromJson(reply.body).object(); }
 
 Reply getPath(quint16 port, const QByteArray &path) { return exchange(QHostAddress::LocalHost, port, request("GET", path, {hostHeader(port)})); }
@@ -298,6 +405,27 @@ QJsonObject statusOf(quint16 port)
     const Reply reply = exchange(QHostAddress::LocalHost, port, request("GET", "/api/status", {hostHeader(port)}));
     return QJsonDocument::fromJson(reply.body).object();
 }
+
+// A fake daemon with a web service connected to it.
+struct Rig
+{
+    explicit Rig(const QJsonArray &models, const QStringList &operations = {})
+    {
+        daemon.setModels(models);
+        if (!operations.isEmpty()) daemon.setOperations(operations);
+        started = daemon.start();
+        service = std::make_unique<WebService>(testConfig(daemon.port()));
+        QString error;
+        started = started && service->start(&error);
+        if (started) port = service->server()->port();
+    }
+    FakeDaemon daemon;
+    std::unique_ptr<WebService> service;
+    quint16 port = 0;
+    bool started = false;
+};
+
+const QStringList AllOperations{"image.generate", "image.edit", "image.animate", "image.animate.mp4"};
 }
 
 class WebServiceTest final : public QObject
@@ -766,7 +894,7 @@ private slots:
         const quint16 port = service.server()->port();
         QTRY_COMPARE(statusOf(port).value("state").toString(), QString("available"));
         const QJsonArray actions = statusOf(port).value("actions").toArray();
-        QCOMPARE(actions.size(), 1);
+        QCOMPARE(actions.size(), 4);
         const QJsonObject action = actions.at(0).toObject();
         QCOMPARE(action.value("id").toString(), QString("text-to-image"));
         QVERIFY(action.value("available").toBool());
@@ -993,8 +1121,8 @@ private slots:
             QVERIFY2(!reply.body.contains("state"), path.constData());
         }
         // Other actions are not submitted, whatever their name.
-        for (const QString &action : {QStringLiteral("image-to-image"), QStringLiteral("edit"), QStringLiteral("image-to-video"),
-                                      QStringLiteral("text.chat"), QStringLiteral("image.upscale"), QString()})
+        for (const QString &action : {QStringLiteral("image.generate"), QStringLiteral("image.edit"), QStringLiteral("image.animate"),
+                                      QStringLiteral("text.chat"), QStringLiteral("prompt.enhance"), QStringLiteral("image.upscale"), QString()})
             QCOMPARE(postJob(port, {{"action", action}, {"modelId", "plain"}, {"prompt", "x"}}).status, 400);
         QTRY_COMPARE(daemon.submits().size(), 1);
         for (const QJsonObject &submit : daemon.submits()) QCOMPARE(submit.value("operation").toString(), QString("image.generate"));
@@ -1029,6 +1157,383 @@ private slots:
         const quint16 port = restarted.server()->port();
         QTRY_COMPARE(statusOf(port).value("state").toString(), QString("available"));
         for (const QString &id : ids) QCOMPARE(getPath(port, "/api/jobs/" + id.toLatin1()).status, 404);
+    }
+
+    // R1, R2
+    void everyActionListsItsModelsAndUnavailableStatesGiveTheReason()
+    {
+        Rig rig(categories({imageModel("plain", "Plain model"),
+                            imageModel("generator", "Generator", {{"canGenerate", true}, {"canEdit", false}}),
+                            imageModel("editor", "Editor only", {{"canGenerate", false}, {"canEdit", true}})},
+                           {animationModel("video", "Video model"), animationModel("partial", "Partial video", {"vae"})}),
+                AllOperations);
+        QVERIFY(rig.started);
+        QTRY_COMPARE(statusOf(rig.port).value("state").toString(), QString("available"));
+        const auto namesOf = [](const QJsonObject &action) {
+            QStringList names;
+            for (const QJsonValue &model : action.value("models").toArray()) names << model.toObject().value("name").toString();
+            return names;
+        };
+        const QJsonArray actions = statusOf(rig.port).value("actions").toArray();
+        QCOMPARE(actions.size(), 4);
+        QCOMPARE(actions.at(0).toObject().value("id").toString(), QString("text-to-image"));
+        QCOMPARE(actions.at(1).toObject().value("id").toString(), QString("image-to-image"));
+        QCOMPARE(actions.at(2).toObject().value("id").toString(), QString("edit"));
+        QCOMPARE(actions.at(3).toObject().value("id").toString(), QString("image-to-video"));
+        QCOMPARE(namesOf(actions.at(0).toObject()), (QStringList{"Plain model", "Generator"}));
+        QCOMPARE(namesOf(actions.at(1).toObject()), (QStringList{"Plain model", "Generator"}));
+        QCOMPARE(namesOf(actions.at(2).toObject()), (QStringList{"Plain model", "Editor only"}));
+        QCOMPARE(namesOf(actions.at(3).toObject()), (QStringList{"Video model"})); // missingFiles must be empty
+        for (const QJsonValue &action : actions) QVERIFY(action.toObject().value("available").toBool());
+
+        // No model for an action: unavailable with its reason, and nothing can be submitted.
+        Rig noModels(categories({imageModel("generator", "Generator", {{"canGenerate", true}, {"canEdit", false}})},
+                                {animationModel("partial", "Partial video", {"vae"})}), AllOperations);
+        QVERIFY(noModels.started);
+        QTRY_COMPARE(statusOf(noModels.port).value("state").toString(), QString("available"));
+        const QJsonArray bare = statusOf(noModels.port).value("actions").toArray();
+        QVERIFY(bare.at(0).toObject().value("available").toBool());
+        for (int i : {2, 3}) {
+            QVERIFY(!bare.at(i).toObject().value("available").toBool());
+            QCOMPARE(bare.at(i).toObject().value("unavailable").toString(), QString("no-model"));
+            QVERIFY(bare.at(i).toObject().value("models").toArray().isEmpty());
+        }
+        const QByteArray png = encodedImage(64, 64);
+        QCOMPARE(postJobWithFiles(noModels.port, {{"action", "edit"}, {"modelId", "generator"}, {"prompt", "x"}}, {{"source", "a.png", png}}).status, 400);
+        QCOMPARE(postJobWithFiles(noModels.port, {{"action", "image-to-video"}, {"modelId", "partial"}, {"prompt", "x"}}, {{"startImage", "a.png", png}}).status, 400);
+        QVERIFY(noModels.daemon.submits().isEmpty());
+
+        // Models without the operation in the capabilities: unavailable whatever the models are.
+        Rig incapable(categories({imageModel("plain", "Plain model")}, {animationModel("video", "Video model")}), {"image.generate"});
+        QVERIFY(incapable.started);
+        QTRY_COMPARE(statusOf(incapable.port).value("state").toString(), QString("available"));
+        const QJsonArray limited = statusOf(incapable.port).value("actions").toArray();
+        QVERIFY(limited.at(0).toObject().value("available").toBool());
+        QVERIFY(limited.at(1).toObject().value("available").toBool());
+        for (int i : {2, 3}) {
+            QVERIFY(!limited.at(i).toObject().value("available").toBool());
+            QCOMPARE(limited.at(i).toObject().value("unavailable").toString(), QString("unsupported-operation"));
+        }
+        QCOMPARE(postJobWithFiles(incapable.port, {{"action", "edit"}, {"modelId", "plain"}, {"prompt", "x"}}, {{"source", "a.png", png}}).status, 400);
+        QVERIFY(incapable.daemon.submits().isEmpty());
+    }
+
+    // R5
+    void imageToImageSendsAGenerateJobWithTheSourceAsItsInput()
+    {
+        Rig rig(categories({imageModel("plain", "Plain model", {{"width", 768}, {"height", 768}})}), AllOperations);
+        QVERIFY(rig.started);
+        QTRY_COMPARE(statusOf(rig.port).value("state").toString(), QString("available"));
+        const QByteArray png = encodedImage(300, 200);
+        // The source is required.
+        QCOMPARE(postJob(rig.port, {{"action", "image-to-image"}, {"modelId", "plain"}, {"prompt", "x"}}).status, 400);
+        QVERIFY(rig.daemon.submits().isEmpty());
+        QCOMPARE(postJobWithFiles(rig.port, {{"action", "image-to-image"}, {"modelId", "plain"}, {"prompt", "a cat"}, {"negativePrompt", "blur"},
+                                             {"width", "512"}, {"height", "640"}, {"steps", "12"}, {"cfgScale", "3.5"}, {"seed", "42"}, {"strength", "0.8"}},
+                                  {{"image", "photo.png", png}}).status, 200);
+        QTRY_COMPARE(rig.daemon.submits().size(), 1);
+        const QJsonObject message = rig.daemon.submits().at(0);
+        QCOMPARE(message.value("operation").toString(), QString("image.generate"));
+        const QJsonObject options = message.value("options").toObject();
+        QVERIFY(options.value("hasInput").toBool());
+        QCOMPARE(options.value("baseImageStrength").toDouble(), 0.8);
+        QCOMPARE(options.value("width").toInt(), 512);
+        QCOMPARE(options.value("height").toInt(), 640);
+        QCOMPARE(options.value("steps").toInt(), 12);
+        QCOMPARE(options.value("seed").toInt(), 42);
+        QCOMPARE(options.value("prompt").toString(), QString("a cat"));
+        QTRY_COMPARE(rig.daemon.uploadsOf(rig.daemon.lastJobId()), (QList<QByteArray>{png})); // sent unchanged, even a large size would not scale here
+
+        // Defaults: the strength is 0.55 and the size is the model's recommended one; a strength out of range is refused.
+        QCOMPARE(postJobWithFiles(rig.port, {{"action", "image-to-image"}, {"modelId", "plain"}, {"prompt", "x"}}, {{"image", "photo.png", png}}).status, 200);
+        QTRY_COMPARE(rig.daemon.submits().size(), 2);
+        const QJsonObject defaults = rig.daemon.submits().at(1).value("options").toObject();
+        QCOMPARE(defaults.value("baseImageStrength").toDouble(), 0.55);
+        QCOMPARE(defaults.value("width").toInt(), 768);
+        QCOMPARE(postJobWithFiles(rig.port, {{"action", "image-to-image"}, {"modelId", "plain"}, {"prompt", "x"}, {"strength", "1.5"}},
+                                  {{"image", "photo.png", png}}).status, 400);
+    }
+
+    // R6, R36
+    void editSendsTheSourceFirstThenTheReferencesAtTheSizeOfTheSource()
+    {
+        Rig rig(categories({imageModel("plain", "Plain model"), imageModel("generator", "Generator", {{"canEdit", false}})}), AllOperations);
+        QVERIFY(rig.started);
+        QTRY_COMPARE(statusOf(rig.port).value("state").toString(), QString("available"));
+        const QByteArray source = encodedImage(640, 384);
+        const QByteArray first = encodedImage(64, 64);
+        const QByteArray second = encodedImage(128, 64, "JPEG");
+        const QList<QPair<QString, QString>> fields{{"action", "edit"}, {"modelId", "plain"}, {"prompt", "make it night"}, {"negativePrompt", "blur"},
+                                                    {"steps", "9"}, {"cfgScale", "2"}, {"seed", "7"}};
+        QCOMPARE(postJobWithFiles(rig.port, fields, {{"reference", "a.png", first}, {"source", "s.png", source}, {"reference", "b.jpg", second}}).status, 200);
+        QTRY_COMPARE(rig.daemon.submits().size(), 1);
+        const QJsonObject message = rig.daemon.submits().at(0);
+        QCOMPARE(message.value("operation").toString(), QString("image.edit"));
+        const QJsonObject options = message.value("options").toObject();
+        QCOMPARE(options.value("inputCount").toInt(), 3);
+        QCOMPARE(options.value("width").toInt(), 640);
+        QCOMPARE(options.value("height").toInt(), 384);
+        QCOMPARE(options.value("steps").toInt(), 9);
+        QCOMPARE(options.value("seed").toInt(), 7);
+        QCOMPARE(options.value("prompt").toString(), QString("make it night"));
+        QCOMPARE(options.value("negativePrompt").toString(), QString("blur"));
+        QTRY_COMPARE(rig.daemon.uploadsOf(rig.daemon.lastJobId()).size(), 3);
+        QCOMPARE(rig.daemon.uploadsOf(rig.daemon.lastJobId()), (QList<QByteArray>{source, first, second}));
+
+        // The source is required, an edit needs an instruction, and at most seven references are taken.
+        QCOMPARE(postJobWithFiles(rig.port, fields, {{"reference", "a.png", first}}).status, 400);
+        QCOMPARE(postJobWithFiles(rig.port, {{"action", "edit"}, {"modelId", "plain"}, {"prompt", " "}}, {{"source", "s.png", source}}).status, 400);
+        QList<UploadFile> many{{"source", "s.png", source}};
+        for (int i = 0; i < 8; ++i) many.append({"reference", "r.png", first});
+        QCOMPARE(postJobWithFiles(rig.port, fields, many).status, 400);
+        many.removeLast();
+        QCOMPARE(postJobWithFiles(rig.port, fields, many).status, 200);
+        // A model that cannot edit is not accepted.
+        QCOMPARE(postJobWithFiles(rig.port, {{"action", "edit"}, {"modelId", "generator"}, {"prompt", "x"}}, {{"source", "s.png", source}}).status, 400);
+        QTRY_COMPARE(rig.daemon.submits().size(), 2);
+    }
+
+    // R7, R15 of the model: the container follows the capability
+    void imageToVideoSendsAnAnimateJobAndAsksForMp4OnlyWithTheCapability()
+    {
+        const QByteArray start = encodedImage(96, 64);
+        const QByteArray end = encodedImage(64, 64, "JPEG");
+        const QList<QPair<QString, QString>> fields{{"action", "image-to-video"}, {"modelId", "video"}, {"prompt", "waves"},
+                                                    {"negativePrompt", "static"}, {"seed", "5"}, {"steps", "99"}, {"frames", "999"}};
+        {
+            Rig rig(categories({}, {animationModel("video", "Video model")}), AllOperations);
+            QVERIFY(rig.started);
+            QTRY_COMPARE(statusOf(rig.port).value("state").toString(), QString("available"));
+            QCOMPARE(postJobWithFiles(rig.port, fields, {{"startImage", "s.png", start}, {"endImage", "e.jpg", end}}).status, 200);
+            QTRY_COMPARE(rig.daemon.submits().size(), 1);
+            const QJsonObject message = rig.daemon.submits().at(0);
+            QCOMPARE(message.value("operation").toString(), QString("image.animate"));
+            const QJsonObject options = message.value("options").toObject();
+            QCOMPARE(options.value("modelId").toString(), QString("video"));
+            QCOMPARE(options.value("prompt").toString(), QString("waves"));
+            QCOMPARE(options.value("negativePrompt").toString(), QString("static"));
+            QCOMPARE(options.value("seed").toInt(), 5);
+            QVERIFY(options.value("hasEndImage").toBool());
+            // Every other animation option is left to the model, only the container is asked for.
+            QCOMPARE(options.value("parameters").toObject(), (QJsonObject{{"container", "mp4"}}));
+            QTRY_COMPARE(rig.daemon.uploadsOf(rig.daemon.lastJobId()), (QList<QByteArray>{start, end}));
+
+            // The end image is optional, the start image and the prompt are not.
+            QCOMPARE(postJobWithFiles(rig.port, fields, {{"startImage", "s.png", start}}).status, 200);
+            QTRY_COMPARE(rig.daemon.submits().size(), 2);
+            QVERIFY(!rig.daemon.submits().at(1).value("options").toObject().value("hasEndImage").toBool());
+            QCOMPARE(postJobWithFiles(rig.port, fields, {{"endImage", "e.jpg", end}}).status, 400);
+            QCOMPARE(postJobWithFiles(rig.port, {{"action", "image-to-video"}, {"modelId", "video"}}, {{"startImage", "s.png", start}}).status, 400);
+        }
+        Rig noMp4(categories({}, {animationModel("video", "Video model")}), {"image.generate", "image.animate"});
+        QVERIFY(noMp4.started);
+        QTRY_COMPARE(statusOf(noMp4.port).value("state").toString(), QString("available"));
+        QCOMPARE(postJobWithFiles(noMp4.port, fields, {{"startImage", "s.png", start}}).status, 200);
+        QTRY_COMPARE(noMp4.daemon.submits().size(), 1);
+        QVERIFY(!noMp4.daemon.submits().at(0).value("options").toObject().contains("parameters"));
+    }
+
+    // R10, R14: a video result is served with its type, for inline playback and download
+    void aVideoResultIsServedWithItsType()
+    {
+        Rig rig(categories({}, {animationModel("video", "Video model")}), AllOperations);
+        QVERIFY(rig.started);
+        QTRY_COMPARE(statusOf(rig.port).value("state").toString(), QString("available"));
+        const QString id = jsonOf(postJobWithFiles(rig.port, {{"action", "image-to-video"}, {"modelId", "video"}, {"prompt", "x"}},
+                                                    {{"startImage", "s.png", encodedImage(64, 64)}})).value("id").toString();
+        QTRY_COMPARE(rig.daemon.submits().size(), 1);
+        rig.daemon.running();
+        const QByteArray video("fake-mp4-bytes");
+        rig.daemon.finish(video, "video/mp4");
+        QTRY_COMPARE(jobOf(rig.port, id).value("state").toString(), QString("finished"));
+        QCOMPARE(jobOf(rig.port, id).value("mimeType").toString(), QString("video/mp4"));
+        const Reply result = getPath(rig.port, "/api/jobs/" + id.toLatin1() + "/result");
+        QCOMPARE(result.body, video);
+        QCOMPARE(result.header("Content-Type"), QByteArray("video/mp4"));
+        QVERIFY(result.header("Content-Disposition").contains(".mp4"));
+    }
+
+    // R8
+    void otherFormatsAndOversizedImagesAreRefusedWithNothingSubmitted()
+    {
+        Rig rig(categories({imageModel("plain", "Plain model")}, {animationModel("video", "Video model")}), AllOperations);
+        QVERIFY(rig.started);
+        QTRY_COMPARE(statusOf(rig.port).value("state").toString(), QString("available"));
+        const QByteArray png = encodedImage(64, 64);
+        const QList<QPair<QString, QString>> fields{{"action", "image-to-image"}, {"modelId", "plain"}, {"prompt", "x"}};
+        const QByteArray gif = QByteArray("GIF89a") + QByteArray(64, '\0');
+        Reply reply = postJobWithFiles(rig.port, fields, {{"image", "anim.gif", gif}});
+        QCOMPARE(reply.status, 400);
+        QVERIFY(jsonOf(reply).value("error").toString().contains("anim.gif"));
+        reply = postJobWithFiles(rig.port, fields, {{"image", "notes.png", "plain text, not an image"}});
+        QCOMPARE(reply.status, 400);
+        QVERIFY(jsonOf(reply).value("error").toString().contains("PNG or JPEG"));
+
+        // One image over 32 MiB: a valid PNG header is not enough, the size is checked first.
+        QByteArray big = png;
+        big.append(QByteArray(32 * 1024 * 1024 + 1 - big.size(), '\0'));
+        reply = postJobWithFiles(rig.port, fields, {{"image", "big.png", big}});
+        QCOMPARE(reply.status, 413);
+        QVERIFY(jsonOf(reply).value("error").toString().contains("32 MiB"));
+
+        // Images totalling over 96 MiB in one job, each within 32 MiB.
+        QByteArray large = png;
+        large.append(QByteArray(24 * 1024 * 1024 + 512 * 1024 - large.size(), '\0'));
+        const QList<QPair<QString, QString>> editFields{{"action", "edit"}, {"modelId", "plain"}, {"prompt", "x"}};
+        reply = postJobWithFiles(rig.port, editFields, {{"source", "a.png", large}, {"reference", "b.png", large}, {"reference", "c.png", large}, {"reference", "d.png", large}});
+        QCOMPARE(reply.status, 413);
+        QVERIFY(jsonOf(reply).value("error").toString().contains("96 MiB"));
+
+        // An image field the action does not take.
+        QCOMPARE(postJobWithFiles(rig.port, fields, {{"image", "a.png", png}, {"source", "b.png", png}}).status, 400);
+        QCOMPARE(rig.daemon.submits().size(), 0);
+        // The same request within the limits goes through.
+        QCOMPARE(postJobWithFiles(rig.port, fields, {{"image", "a.png", png}}).status, 200);
+        QTRY_COMPARE(rig.daemon.submits().size(), 1);
+    }
+
+    // R46
+    void anImageThatCannotBeDecodedRefusesTheJobNamingIt()
+    {
+        Rig rig(categories({imageModel("plain", "Plain model")}, {animationModel("video", "Video model")}), AllOperations);
+        QVERIFY(rig.started);
+        QTRY_COMPARE(statusOf(rig.port).value("state").toString(), QString("available"));
+        const QByteArray png = encodedImage(200, 200);
+        // A PNG whose data is cut short, and a JPEG that is only a header.
+        const QByteArray truncated = png.left(60);
+        const QByteArray corruptJpeg = QByteArray("\xff\xd8\xff\xe0\x00\x10JFIF\x00 not really a picture");
+        for (const QString &action : {QStringLiteral("image-to-image"), QStringLiteral("edit"), QStringLiteral("image-to-video")}) {
+            const QString field = action == "image-to-image" ? "image" : action == "edit" ? "source" : "startImage";
+            for (const QByteArray &bad : {truncated, corruptJpeg}) {
+                const Reply reply = postJobWithFiles(rig.port, {{"action", action}, {"modelId", action == "image-to-video" ? "video" : "plain"}, {"prompt", "x"}},
+                                                     {{field, "broken photo.png", bad}});
+                QCOMPARE(reply.status, 400);
+                QVERIFY2(jsonOf(reply).value("error").toString().contains("broken photo.png"), qPrintable(jsonOf(reply).value("error").toString()));
+            }
+        }
+        // A corrupt reference refuses the job although the source is fine; the end image too.
+        Reply reply = postJobWithFiles(rig.port, {{"action", "edit"}, {"modelId", "plain"}, {"prompt", "x"}}, {{"source", "ok.png", png}, {"reference", "ref.png", truncated}});
+        QCOMPARE(reply.status, 400);
+        QVERIFY(jsonOf(reply).value("error").toString().contains("ref.png"));
+        reply = postJobWithFiles(rig.port, {{"action", "image-to-video"}, {"modelId", "video"}, {"prompt", "x"}}, {{"startImage", "ok.png", png}, {"endImage", "end.png", truncated}});
+        QCOMPARE(reply.status, 400);
+        QVERIFY(jsonOf(reply).value("error").toString().contains("end.png"));
+        QCOMPARE(rig.daemon.submits().size(), 0);
+    }
+
+    // R36
+    void editImagesOverTheModelBudgetAreScaledEachOnItsOwn()
+    {
+        Rig rig(categories({imageModel("plain", "Plain model"), imageModel("small", "Small budget", {{"width", 512}, {"height", 512}})}), AllOperations);
+        QVERIFY(rig.started);
+        QTRY_COMPARE(statusOf(rig.port).value("state").toString(), QString("available"));
+
+        // A phone photo: scaled to the 1024 x 1024 budget, aspect ratio kept, sides multiples of 64.
+        const QByteArray photo = encodedImage(4032, 3024);
+        QCOMPARE(postJobWithFiles(rig.port, {{"action", "edit"}, {"modelId", "plain"}, {"prompt", "x"}}, {{"source", "photo.png", photo}}).status, 200);
+        QTRY_COMPARE(rig.daemon.submits().size(), 1);
+        QJsonObject options = rig.daemon.submits().at(0).value("options").toObject();
+        const int width = options.value("width").toInt();
+        const int height = options.value("height").toInt();
+        QVERIFY(width % 64 == 0 && height % 64 == 0);
+        QVERIFY(width * height <= 1024 * 1024);
+        QVERIFY(width > 64 && height > 64);
+        QVERIFY(qAbs(double(width) / height - 4032.0 / 3024.0) < 0.12); // 4:3 up to the rounding to 64
+        QCOMPARE(QSize(width, height), QSize(1152, 832));
+        QTRY_COMPARE(rig.daemon.uploadsOf(rig.daemon.lastJobId()).size(), 1);
+        // The job is sized from the scaled source, and the bytes sent are that scaled source.
+        QCOMPARE(sizeOfImage(rig.daemon.uploadsOf(rig.daemon.lastJobId()).at(0)), QSize(width, height));
+
+        // A source within the budget is sent unchanged, a reference over it is scaled beside it.
+        const QByteArray small = encodedImage(640, 480);
+        const QByteArray bigReference = encodedImage(3000, 2000);
+        const QByteArray smallReference = encodedImage(256, 256, "JPEG");
+        QCOMPARE(postJobWithFiles(rig.port, {{"action", "edit"}, {"modelId", "plain"}, {"prompt", "x"}},
+                                  {{"source", "s.png", small}, {"reference", "big.png", bigReference}, {"reference", "small.jpg", smallReference}}).status, 200);
+        QTRY_COMPARE(rig.daemon.submits().size(), 2);
+        options = rig.daemon.submits().at(1).value("options").toObject();
+        QCOMPARE(options.value("width").toInt(), 640);
+        QCOMPARE(options.value("height").toInt(), 480);
+        QTRY_COMPARE(rig.daemon.uploadsOf(rig.daemon.lastJobId()).size(), 3);
+        const QList<QByteArray> sent = rig.daemon.uploadsOf(rig.daemon.lastJobId());
+        QCOMPARE(sent.at(0), small);
+        QVERIFY(sent.at(1) != bigReference);
+        const QSize scaled = sizeOfImage(sent.at(1));
+        QVERIFY(scaled.width() % 64 == 0 && scaled.height() % 64 == 0);
+        QVERIFY(scaled.width() * scaled.height() <= 1024 * 1024);
+        QCOMPARE(sent.at(2), smallReference);
+
+        // The budget is the model's recommended size, and the other actions never scale.
+        QCOMPARE(postJobWithFiles(rig.port, {{"action", "edit"}, {"modelId", "small"}, {"prompt", "x"}}, {{"source", "s.png", small}}).status, 200);
+        QTRY_COMPARE(rig.daemon.submits().size(), 3);
+        const QJsonObject limited = rig.daemon.submits().at(2).value("options").toObject();
+        QVERIFY(limited.value("width").toInt() * limited.value("height").toInt() <= 512 * 512);
+        QCOMPARE(limited.value("width").toInt() % 64, 0);
+        QCOMPARE(scaledSize(QSize(4032, 3024), 1024 * 1024), QSize(1152, 832));
+        QCOMPARE(scaledSize(QSize(100, 100), 1024 * 1024), QSize(100, 100));
+        QCOMPARE(scaledSize(QSize(4000, 100), 1024 * 1024), QSize(4000, 100)); // within the budget
+        QCOMPARE(scaledSize(QSize(4096, 4096), 1000 * 1000).width() % 64, 0);
+        QCOMPARE(scaledSize(QSize(8000, 10), 40000).height(), 64);
+    }
+
+    // R35
+    void jobsWithImagesAreSentOneUploadAtATimeAndANinthWaitingJobIsBusy()
+    {
+        Rig rig(categories({imageModel("plain", "Plain model")}), AllOperations);
+        QVERIFY(rig.started);
+        QTRY_COMPARE(statusOf(rig.port).value("state").toString(), QString("available"));
+        rig.daemon.setHoldUploads(true);
+        const QByteArray png = encodedImage(64, 64);
+        const QList<QPair<QString, QString>> fields{{"action", "image-to-image"}, {"modelId", "plain"}, {"prompt", "x"}};
+        const QString first = jsonOf(postJobWithFiles(rig.port, fields, {{"image", "a.png", png}})).value("id").toString();
+        const QString second = jsonOf(postJobWithFiles(rig.port, fields, {{"image", "b.png", png}})).value("id").toString();
+        QVERIFY(!first.isEmpty() && !second.isEmpty());
+        // Both are accepted and shown as queued; only the first one has reached nukleusd.
+        QCOMPARE(jobOf(rig.port, second).value("state").toString(), QString("queued"));
+        QVERIFY(jobOf(rig.port, second).value("queuePosition").isNull());
+        QTRY_COMPARE(rig.daemon.uploadsOf(rig.daemon.submits().at(0).value("jobId").toString()).size(), 1);
+        QTest::qWait(200);
+        QCOMPARE(rig.daemon.submits().size(), 1);
+
+        // The first job's uploads are done: the second is sent, after them.
+        QTRY_VERIFY(rig.daemon.hasHeldUpload());
+        rig.daemon.releaseUpload();
+        QTRY_COMPARE(rig.daemon.submits().size(), 2);
+        const QString firstSdk = rig.daemon.submits().at(0).value("jobId").toString();
+        const QString secondSdk = rig.daemon.submits().at(1).value("jobId").toString();
+        QCOMPARE(rig.daemon.events().indexOf("binary:" + firstSdk) < rig.daemon.events().indexOf("submit:" + secondSdk), true);
+        QTRY_COMPARE(rig.daemon.uploadsOf(secondSdk).size(), 1);
+        QTRY_VERIFY(rig.daemon.hasHeldUpload());
+        rig.daemon.releaseUpload();
+        QTRY_COMPARE(jobOf(rig.port, second).value("state").toString(), QString("queued"));
+        QCOMPARE(rig.daemon.refusedDuringUpload(), 0); // no job failed because another was submitted at the same time
+
+        // With one upload pending, 8 jobs wait; a ninth is refused as busy, and a slot frees up as jobs are sent.
+        QTRY_COMPARE(rig.daemon.submits().size(), 2);
+        const QString holder = jsonOf(postJobWithFiles(rig.port, fields, {{"image", "c.png", png}})).value("id").toString();
+        QTRY_COMPARE(rig.daemon.submits().size(), 3);
+        QVERIFY(!holder.isEmpty());
+        QStringList waiting;
+        for (int i = 0; i < 8; ++i) {
+            const Reply reply = postJobWithFiles(rig.port, fields, {{"image", "w.png", png}});
+            QCOMPARE(reply.status, 200);
+            waiting << jsonOf(reply).value("id").toString();
+        }
+        const Reply busy = postJobWithFiles(rig.port, fields, {{"image", "w.png", png}});
+        QCOMPARE(busy.status, 503);
+        QVERIFY(jsonOf(busy).value("error").toString().contains("busy"));
+        QCOMPARE(rig.daemon.submits().size(), 3);
+        QCOMPARE(rig.daemon.refusedDuringUpload(), 0);
+        // Everything waiting is eventually sent, in order, and nothing was lost.
+        for (int i = 0; i < 8; ++i) {
+            QTRY_VERIFY(rig.daemon.hasHeldUpload());
+        rig.daemon.releaseUpload();
+            QTRY_COMPARE(rig.daemon.submits().size(), 4 + i);
+        }
+        QTRY_VERIFY(rig.daemon.hasHeldUpload());
+        rig.daemon.releaseUpload();
+        QCOMPARE(rig.daemon.refusedDuringUpload(), 0);
+        for (const QString &id : waiting) QCOMPARE(getPath(rig.port, "/api/jobs/" + id.toLatin1()).status, 200);
     }
 
     // R26

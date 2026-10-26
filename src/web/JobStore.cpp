@@ -47,6 +47,7 @@ WebJob *JobStore::find(const QString &id)
 
 WebJob *JobStore::findBySdkId(const QString &sdkId)
 {
+    if (sdkId.isEmpty()) return nullptr;
     for (WebJob &job : m_jobs)
         if (job.sdkId == sdkId) return &job;
     return nullptr;

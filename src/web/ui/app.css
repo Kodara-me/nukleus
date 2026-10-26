@@ -204,3 +204,32 @@ button.secondary {
   font-weight: 600;
   text-decoration: none;
 }
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.tabs button {
+  flex: 1 1 auto;
+  margin-top: 0;
+  padding: 0 12px;
+  background: transparent;
+  border: 1px solid var(--muted);
+  color: var(--text);
+}
+
+.tabs button[aria-selected="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+[hidden] { display: none !important; }
+
+input[type="file"] {
+  padding: 8px;
+  height: auto;
+}

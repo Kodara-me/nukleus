@@ -15,7 +15,7 @@ Nukleus is a Linux service that keeps your local AI models and runs image, video
 ## Architecture
 
 - **`nukleusd`** is the daemon. It owns the models, the queue and the WebSocket API on port `9384`.
-- **`nukleus-web`** is a small web service, a client of `nukleusd` like any other, for the local network. It listens on port `9385` and serves a responsive page that shows whether Nukleus is available and, when it is not, why. See [Web service](#web-service).
+- **`nukleus-web`** is a small web service, a client of `nukleusd` like any other, for the local network. It listens on port `9385` and serves a responsive page that shows whether Nukleus is available and, when it is not, why, and lets you generate, edit and animate images. See [Web service](#web-service).
 - **`nukleus-manager`** is the administrator tool, a GUI and a CLI, that installs and configures models and presets.
 - **`NukleusSdk`** is the static C++/Qt client library (`Nukleus::SDK`) that speaks the protocol for you. Clients in other languages use [the protocol](docs/protocol-v3.md) directly.
 
@@ -77,11 +77,33 @@ From a build, with `nukleusd` running on the same machine:
 ```
 
 Then open `http://127.0.0.1:9385/`. The page shows whether Nukleus is available and,
-when it is not, why, and offers the **Text to image** action: choose an installed
-image-generation model (those that can generate, shown by display name), edit the
-prompt, negative prompt, width, height, steps, CFG scale and seed (prefilled from the
-model's recommended options, else 1024 × 1024, 28 steps, CFG 7, seed -1) and generate.
-Each job shows its queue position, then its progress, then the image inline with a
+when it is not, why, and offers four actions, each with the installed models that can
+run it, shown by display name. An action no installed model can run, or that Nukleus
+does not offer, is shown as unavailable with the reason.
+
+- **Text to image**: image-generation models that can generate. Edit the prompt,
+  negative prompt, width, height, steps, CFG scale and seed (prefilled from the
+  model's recommended options, else 1024 × 1024, 28 steps, CFG 7, seed -1).
+- **Image to image**: the same fields and models, plus one source image and its
+  strength (0 to 1, default 0.55).
+- **Edit**: image-generation models that can edit. Give an instruction, a source image
+  and up to seven reference images; steps, CFG scale and seed are available too. The
+  job has the size of the source image. An image with more pixels than the model's
+  recommended width × height (1024 × 1024 without one) is scaled down on its own,
+  keeping its aspect ratio, with sides that are multiples of 64, so a phone photo edits
+  in the time and memory the model was tuned for; smaller images are sent unchanged.
+- **Image to video**: animation models with all their files. Give a prompt, a negative
+  prompt, a seed, a start image and optionally an end image; every other option is left
+  to the model. When Nukleus can make `mp4`, the video is asked in that container so it
+  plays in phone browsers.
+
+Images are PNG or JPEG, at most 32 MiB each and 96 MiB for all the images of a job, chosen
+from the device's files or, on phones and tablets, its camera or gallery. Every image is
+decoded by the web service: one that cannot be read refuses the job with a message naming
+it. Jobs wait in a queue of at most 8 in the web service, which sends them to `nukleusd`
+one upload at a time; a ninth waiting job is refused as busy.
+
+Each job shows its queue position, then its progress, then the image or video (with playback controls) inline with a
 download button, or its error. The jobs of a browser are listed newest first and kept
 in that browser across reloads; the web service keeps the 20 most recent jobs and
 their results in memory only, so older jobs and every job from before a restart show
@@ -93,10 +115,14 @@ The API behind the page:
   `connecting`), while unavailable its reason (`unreachable`,
   `authentication-refused` or `incompatible-protocol`), and the actions with their
   models. The model list is read from `nukleusd` on every request.
-- `POST /api/jobs` takes a `multipart/form-data` request (`action=text-to-image`,
-  `modelId`, `prompt`, `negativePrompt`, `width`, `height`, `steps`, `cfgScale`,
-  `seed`) and answers the job's identifier, a random 128-bit value. It answers `503`
-  while two other requests are sending a body.
+- `POST /api/jobs` takes a `multipart/form-data` request (`action` is `text-to-image`,
+  `image-to-image`, `edit` or `image-to-video`, with `modelId`, `prompt`,
+  `negativePrompt`, `width`, `height`, `steps`, `cfgScale`, `seed` and `strength` where
+  the action has them, and the image files `image`; `source` and `reference` (up to 7);
+  or `startImage` and `endImage`) and answers the job's identifier, a random 128-bit
+  value. It answers `400` with a message for an image it refuses, `413` for an image over
+  32 MiB or images over 96 MiB, and `503` while two other requests are sending a body or
+  8 jobs already wait to be sent.
 - `GET /api/jobs/<id>` answers the state (`queued`, `running`, `finished` or
   `failed`), queue position, progress and error, and `GET /api/jobs/<id>/result` the
   image with its MIME type, for download. A job that is not held anymore answers `404`.
