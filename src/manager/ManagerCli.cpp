@@ -8,10 +8,24 @@
 #include <QTextStream>
 #include <QTimer>
 
+#ifdef Q_OS_WIN
+#include <io.h>
+#include <stdio.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace
 {
+bool standardInputIsInteractive()
+{
+#ifdef Q_OS_WIN
+    return _isatty(_fileno(stdin)) != 0;
+#else
+    return isatty(STDIN_FILENO) != 0;
+#endif
+}
+
 QString sizeText(qint64 bytes)
 {
     if (bytes < 1024) return QStringLiteral("%1 bytes").arg(bytes);
@@ -127,7 +141,7 @@ int run(const QCommandLineParser &parser, quint16 port)
     }
     const QString argument = positional.value(1);
     if (command == QStringLiteral("delete") && !parser.isSet(QStringLiteral("yes"))) {
-        if (!isatty(STDIN_FILENO)) {
+        if (!standardInputIsInteractive()) {
             QTextStream(stderr) << "delete requires --yes when standard input is not interactive.\n";
             return 2;
         }

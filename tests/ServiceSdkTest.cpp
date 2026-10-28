@@ -428,7 +428,8 @@ void ServiceSdkTest::reportsConnectionFailure()
 {
     Nukleus::ServiceClient client; QSignalSpy states(&client, &Nukleus::ServiceClient::serviceStateChanged);
     client.setConfiguration(QUrl(QStringLiteral("ws://127.0.0.1:1")), {}); client.connectToService();
-    QTRY_VERIFY_WITH_TIMEOUT(states.count() >= 2, 2000);
+    // Windows takes about two seconds to report a refused loopback connection.
+    QTRY_VERIFY_WITH_TIMEOUT(states.count() >= 2, 10000);
     QVERIFY(states.last().at(0).value<Nukleus::ServiceConnectionState>() == Nukleus::ServiceConnectionState::Disconnected
             || states.last().at(0).value<Nukleus::ServiceConnectionState>() == Nukleus::ServiceConnectionState::Error);
 }

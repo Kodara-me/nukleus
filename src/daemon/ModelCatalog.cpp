@@ -1,5 +1,6 @@
 #include "ModelCatalog.h"
 
+#include "HardLink.h"
 #include "ServicePaths.h"
 #include <nukleus/ModelOptions.h>
 
@@ -18,8 +19,6 @@
 #include <QTimer>
 
 #include <algorithm>
-#include <cerrno>
-#include <unistd.h>
 
 namespace
 {
@@ -878,8 +877,9 @@ void ModelCatalog::completeInstall()
         failActiveInstall(tr("The requested model is no longer installed")); return;
     }
     for (auto &file : m_activeInstall->files) {
-        if (::link(QFile::encodeName(file.partPath).constData(), QFile::encodeName(file.finalPath).constData()) != 0) {
-            failActiveInstall(errno == EEXIST ? tr("A model file is already installed") : tr("Could not install a model file")); return;
+        bool alreadyExists = false;
+        if (!createHardLinkNoReplace(file.partPath, file.finalPath, &alreadyExists)) {
+            failActiveInstall(alreadyExists ? tr("A model file is already installed") : tr("Could not install a model file")); return;
         }
         file.published = true;
     }

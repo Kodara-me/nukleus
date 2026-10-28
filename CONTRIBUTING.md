@@ -34,6 +34,18 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+On Windows the project builds with MSVC: install Visual Studio 2022 Build Tools with the C++ workload, CMake, Ninja, a Qt 6.8 `msvc2022_64` kit with the Qt WebSockets module, and LibArchive through vcpkg (`vcpkg install libarchive:x64-windows`). From an "x64 Native Tools" developer shell:
+
+```sh
+cmake -S . -B build-msvc -G Ninja -DCMAKE_BUILD_TYPE=Debug ^
+    -DCMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64 ^
+    -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+cmake --build build-msvc
+ctest --test-dir build-msvc --output-on-failure
+```
+
+Put the Qt kit's `bin` directory on `PATH` to run the executables and tests from the build directory. The Linux installer tests are not registered on Windows, and the `ServiceTest` cases that need a POSIX shell or POSIX permissions skip with their reason. The `NUKLEUS_SD_CLI`, `NUKLEUS_LLAMA_SERVER`, `NUKLEUS_LLAMA_COMPLETION` and `NUKLEUS_FFMPEG` variables name the runtime tools when they are not on `PATH`.
+
 Run the daemon with `./build/src/nukleusd`. Run the administrator UI with `./build/src/nukleus-manager --gui`, or exercise the manager CLI with `./build/src/nukleus-manager --help`. Use the root installer only for Linux systemd deployments.
 
 Manager GUI connection settings are local QSettings keys `Service/Host` and

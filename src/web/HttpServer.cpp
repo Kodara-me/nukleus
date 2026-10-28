@@ -6,7 +6,9 @@
 #include <QTcpSocket>
 #include <QTimer>
 
-#ifdef Q_OS_UNIX
+#ifdef Q_OS_WIN
+#include <winsock2.h>
+#elif defined(Q_OS_UNIX)
 #include <sys/socket.h>
 #endif
 
@@ -316,7 +318,9 @@ private:
         // The request was refused before it was read: closing now with unread data would reset the
         // connection and could drop the response, so end our side and let the client finish.
         m_phase = Phase::Draining;
-#ifdef Q_OS_UNIX
+#ifdef Q_OS_WIN
+        ::shutdown(static_cast<SOCKET>(m_socket->socketDescriptor()), SD_SEND);
+#elif defined(Q_OS_UNIX)
         ::shutdown(static_cast<int>(m_socket->socketDescriptor()), SHUT_WR);
 #endif
         m_socket->readAll();

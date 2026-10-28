@@ -452,7 +452,7 @@ quint16 NukleusDaemon::serverPort() const
 
 void NukleusDaemon::initializeBackend()
 {
-    const QString sdCliExecutable = QStandardPaths::findExecutable(QStringLiteral("sd-cli"));
+    const QString sdCliExecutable = QStandardPaths::findExecutable(m_configuration.sdCli.isEmpty() ? QStringLiteral("sd-cli") : m_configuration.sdCli);
     if (sdCliExecutable.isEmpty()) {
         qCritical().noquote() << QStringLiteral("[Nukleus] sd-cli was not found on the service PATH.");
     } else {

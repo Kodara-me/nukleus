@@ -9,6 +9,8 @@ add_executable(nukleus-test
     ../src/daemon/FfmpegRunner.cpp
     ../src/daemon/FfmpegRunner.h
     ../src/daemon/GenerationRequest.h
+    ../src/daemon/HardLink.cpp
+    ../src/daemon/HardLink.h
     ../src/sdk/include/nukleus/GenerationProgress.h
     ../src/daemon/NukleusDaemon.cpp
     ../src/daemon/NukleusDaemon.h
@@ -37,21 +39,34 @@ target_compile_definitions(nukleus-test PRIVATE
     NUKLEUS_FAKE_LLAMA_SERVER="$<TARGET_FILE:nukleus-fake-llama-server>")
 add_test(NAME nukleus-test COMMAND nukleus-test)
 
+# Stand-in for the daemon in the test of its children's lifetime, which Windows alone needs.
+if(WIN32)
+    add_executable(nukleus-job-holder JobHolder.cpp ../src/daemon/ChildProcessJob.cpp ../src/daemon/ChildProcessJob.h)
+    target_include_directories(nukleus-job-holder PRIVATE ../src/daemon)
+    target_link_libraries(nukleus-job-holder PRIVATE Qt6::Core)
+    add_dependencies(nukleus-test nukleus-job-holder)
+    target_compile_definitions(nukleus-test PRIVATE
+        NUKLEUS_JOB_HOLDER="$<TARGET_FILE:nukleus-job-holder>")
+endif()
+
 add_executable(nukleus-sdk-test ServiceSdkTest.cpp)
 target_link_libraries(nukleus-sdk-test PRIVATE Nukleus::SDK Qt6::Network Qt6::Test Qt6::WebSockets)
 add_test(NAME nukleus-sdk-test COMMAND nukleus-sdk-test)
 
-add_test(NAME nukleus-installer-test
-    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/NukleusInstallerTest.sh
-            ${CMAKE_SOURCE_DIR} $<TARGET_FILE:nukleusd> $<TARGET_FILE:nukleus-manager>
-            $<TARGET_FILE:nukleus-web>)
+# The Linux installers and their tests need a POSIX shell, so they are not registered on Windows.
+if(UNIX)
+    add_test(NAME nukleus-installer-test
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/NukleusInstallerTest.sh
+                ${CMAKE_SOURCE_DIR} $<TARGET_FILE:nukleusd> $<TARGET_FILE:nukleus-manager>
+                $<TARGET_FILE:nukleus-web>)
 
-add_test(NAME nukleus-storage-migration-test
-    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/NukleusStorageMigrationTest.sh ${CMAKE_SOURCE_DIR})
+    add_test(NAME nukleus-storage-migration-test
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/NukleusStorageMigrationTest.sh ${CMAKE_SOURCE_DIR})
 
-add_test(NAME nukleus-cmake-install-test
-    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/NukleusCMakeInstallTest.sh
-            ${CMAKE_BINARY_DIR})
+    add_test(NAME nukleus-cmake-install-test
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/NukleusCMakeInstallTest.sh
+                ${CMAKE_BINARY_DIR})
+endif()
 
 add_test(NAME nukleus-manager-help COMMAND $<TARGET_FILE:nukleus-manager> --help)
 add_test(NAME nukleus-manager-rejects-companion-category

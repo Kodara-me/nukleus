@@ -1,4 +1,5 @@
 #include "NukleusDaemon.h"
+#include "HardLink.h"
 #include "ModelCatalog.h"
 #include "ServicePaths.h"
 #include "SdCliProgressParser.h"
@@ -24,6 +25,16 @@
 #include <QTemporaryDir>
 #include <QWebSocket>
 #include <QtTest>
+
+#ifdef Q_OS_WIN
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace
 {
@@ -83,6 +94,9 @@ class ServiceTest final : public QObject
 
 private slots:
     void initTestCase();
+    void publishesHardLinkWithoutReplacing_R4();
+    void findsSdCliFromEnvironment_R3();
+    void endsChildProcessesWithTheDaemon_R5();
     void persistsAndProtectsModelRouting();
     void fixedRoutingLabelsAndLegacyMigration();
     void configuresModelRoutingThroughSdk();
@@ -159,6 +173,131 @@ void ServiceTest::initTestCase()
     // Services built from a default configuration must never probe or run the host's ffmpeg;
     // tests that need one name a fake explicitly.
     qputenv("NUKLEUS_FFMPEG", "/nonexistent/nukleus-test-ffmpeg");
+}
+
+void ServiceTest::publishesHardLinkWithoutReplacing_R4()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const auto write = [&](const QString &name, const QByteArray &bytes) {
+        QFile file(directory.filePath(name));
+        return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
+    };
+    const auto read = [&](const QString &name) {
+        QFile file(directory.filePath(name));
+        return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+    };
+    QVERIFY(write("staged.part", "staged"));
+
+    // A free destination is published as a link to the staged bytes.
+    bool alreadyExists = true;
+    QVERIFY(createHardLinkNoReplace(directory.filePath("staged.part"), directory.filePath("model.gguf"), &alreadyExists));
+    QVERIFY(!alreadyExists);
+    QCOMPARE(read("model.gguf"), QByteArray("staged"));
+
+    // A destination that exists is reported as taken and keeps its bytes.
+    QVERIFY(write("taken.gguf", "installed"));
+    QVERIFY(!createHardLinkNoReplace(directory.filePath("staged.part"), directory.filePath("taken.gguf"), &alreadyExists));
+    QVERIFY(alreadyExists);
+    QCOMPARE(read("taken.gguf"), QByteArray("installed"));
+
+    // Any other failure is not reported as a taken destination.
+    QVERIFY(!createHardLinkNoReplace(directory.filePath("missing.part"), directory.filePath("other.gguf"), &alreadyExists));
+    QVERIFY(!alreadyExists);
+    QVERIFY(!QFileInfo::exists(directory.filePath("other.gguf")));
+}
+
+void ServiceTest::findsSdCliFromEnvironment_R3()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QByteArray oldPath = qgetenv("PATH");
+    const auto restore = qScopeGuard([oldPath] {
+        qputenv("PATH", oldPath);
+        qunsetenv("NUKLEUS_SD_CLI");
+    });
+    // The test executable stands in for sd-cli: the daemon only looks it up here, it never runs.
+    const QString suffix = QFileInfo(QCoreApplication::applicationFilePath()).suffix();
+    const QString extension = suffix.isEmpty() ? QString() : QStringLiteral(".") + suffix;
+    QVERIFY(QDir().mkpath(directory.filePath("elsewhere")));
+    QVERIFY(QDir().mkpath(directory.filePath("bin")));
+    const QString named = directory.filePath("elsewhere/custom-sd" + extension);
+    QVERIFY(QFile::copy(QCoreApplication::applicationFilePath(), named));
+    QVERIFY(QFile::copy(QCoreApplication::applicationFilePath(), directory.filePath("bin/sd-cli" + extension)));
+    // A daemon offers image operations only when it found an sd-cli; a client reads that from its capabilities.
+    const auto verifyImageOperations = [&](bool offered) {
+        NukleusConfiguration configuration;
+        configuration.port = 0;
+        configuration.modelRootPath = directory.filePath("models");
+        NukleusDaemon daemon(configuration);
+        QString error;
+        QVERIFY2(daemon.start(&error), qPrintable(error));
+        QWebSocket socket;
+        QList<QJsonObject> messages;
+        connect(&socket, &QWebSocket::textMessageReceived, this,
+                [&](const QString &text) { messages.append(QJsonDocument::fromJson(text.toUtf8()).object()); });
+        socket.open(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())));
+        QTRY_COMPARE(socket.state(), QAbstractSocket::ConnectedState);
+        socket.sendTextMessage("{\"type\":\"authenticate\",\"version\":3}");
+        socket.sendTextMessage("{\"type\":\"capabilities\"}");
+        const auto capabilities = [&] {
+            for (const auto &message : messages)
+                if (message.value("type").toString() == "capabilities") return message;
+            return QJsonObject();
+        };
+        QTRY_VERIFY(!capabilities().isEmpty());
+        QCOMPARE(capabilities().value("operations").toArray().contains("image.generate"), offered);
+    };
+
+    // The variable names an sd-cli that is not on PATH.
+    qputenv("PATH", directory.filePath("empty").toUtf8());
+    qputenv("NUKLEUS_SD_CLI", QDir::toNativeSeparators(named).toUtf8());
+    verifyImageOperations(true);
+    if (QTest::currentTestFailed()) return;
+
+    // A variable naming a missing file does not fall back to PATH.
+    qputenv("PATH", QDir::toNativeSeparators(directory.filePath("bin")).toUtf8());
+    qputenv("NUKLEUS_SD_CLI", QDir::toNativeSeparators(directory.filePath("elsewhere/missing" + extension)).toUtf8());
+    verifyImageOperations(false);
+    if (QTest::currentTestFailed()) return;
+
+    // An empty variable falls back to sd-cli on PATH, as does an unset one.
+    qputenv("NUKLEUS_SD_CLI", "");
+    verifyImageOperations(true);
+    if (QTest::currentTestFailed()) return;
+    qunsetenv("NUKLEUS_SD_CLI");
+    verifyImageOperations(true);
+    if (QTest::currentTestFailed()) return;
+    qputenv("PATH", directory.filePath("empty").toUtf8());
+    verifyImageOperations(false);
+}
+
+void ServiceTest::endsChildProcessesWithTheDaemon_R5()
+{
+#ifndef Q_OS_WIN
+    QSKIP("Linux ties the children to the daemon with PR_SET_PDEATHSIG; the job object is Windows only.");
+#else
+    QProcess holder;
+    holder.setProgram(QStringLiteral(NUKLEUS_JOB_HOLDER));
+    holder.start();
+    QVERIFY(holder.waitForStarted());
+    QVERIFY(holder.waitForReadyRead(10000));
+    bool parsed = false;
+    const DWORD childId = holder.readLine().trimmed().toULong(&parsed);
+    QVERIFY(parsed);
+    const auto running = [childId] {
+        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, childId);
+        if (!process) return false;
+        const bool alive = WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+        CloseHandle(process);
+        return alive;
+    };
+    QVERIFY(running());
+    // Ended abruptly, as from Task Manager: no stop handler runs, only the job can end the child.
+    holder.kill();
+    QVERIFY(holder.waitForFinished(10000));
+    QTRY_VERIFY_WITH_TIMEOUT(!running(), 10000);
+#endif
 }
 
 void ServiceTest::persistsAndProtectsModelRouting()
@@ -1692,6 +1831,9 @@ void ServiceTest::routesPresetGenerationWithoutLlm()
 
 void ServiceTest::enhancesPromptThroughSdk()
 {
+#ifdef Q_OS_WIN
+    QSKIP("The fake llama-completion fixture requires a POSIX shell.");
+#endif
     using namespace Nukleus::Protocol;
     QTemporaryDir directory;
     QVERIFY(QDir(directory.path()).mkpath("llm"));
@@ -2990,6 +3132,9 @@ void ServiceTest::animationRollsBackCanceledAndFailedInstalls_R3()
     QTRY_COMPARE(failed.count(), 1);
     QVERIFY(unchanged());
 
+#ifdef Q_OS_WIN
+    QSKIP("Making the catalogue directory read-only to fail the metadata save requires POSIX permissions.");
+#endif
     // A failure after the files were published removes them and keeps the catalogue.
     QVERIFY(QFile::setPermissions(catalogue, QFileDevice::ReadOwner | QFileDevice::ExeOwner));
     const auto restore = qScopeGuard([&] { QFile::setPermissions(catalogue, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner); });

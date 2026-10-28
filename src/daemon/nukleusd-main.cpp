@@ -1,3 +1,4 @@
+#include "ChildProcessJob.h"
 #include "NukleusDaemon.h"
 #include <nukleus/ServiceProtocol.h>
 
@@ -9,6 +10,7 @@
 
 int main(int argc, char *argv[])
 {
+    endChildrenWithThisProcess();
     QCoreApplication application(argc, argv);
     application.setOrganizationName(QStringLiteral("Nukleus"));
     application.setApplicationName(QStringLiteral("Nukleus"));
