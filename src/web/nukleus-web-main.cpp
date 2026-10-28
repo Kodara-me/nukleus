@@ -1,25 +1,36 @@
+#include "LogFile.h"
+#include "ServiceHost.h"
 #include "WebConfig.h"
 #include "WebService.h"
 
 #include <QCoreApplication>
 #include <QProcessEnvironment>
-#include <cstdio>
 
 int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("nukleus-web"));
+    NukleusService::ServiceHost host(QStringLiteral("nukleus-web"));
+    host.startPending();
+    QString error;
+    if (!NukleusService::installLogFileFromEnvironment(&error)) NukleusService::report(QtWarningMsg, QStringLiteral("nukleus-web: %1").arg(error));
 
     NukleusWeb::WebConfig config;
-    QString error;
     if (!NukleusWeb::WebConfig::fromEnvironment(QProcessEnvironment::systemEnvironment(), &config, &error)) {
-        std::fprintf(stderr, "nukleus-web: %s\n", qPrintable(error));
-        return 1;
+        NukleusService::report(QtCriticalMsg, QStringLiteral("nukleus-web: %1").arg(error));
+        return host.failed(1);
     }
-    NukleusWeb::WebService service(config);
-    if (!service.start(&error)) {
-        std::fprintf(stderr, "nukleus-web: %s\n", qPrintable(error));
-        return 1;
+    int exitCode = 0;
+    {
+        // Its end, with the event loop's, closes the HTTP server and the connection to Nukleus.
+        NukleusWeb::WebService service(config);
+        if (!service.start(&error)) {
+            NukleusService::report(QtCriticalMsg, QStringLiteral("nukleus-web: %1").arg(error));
+            return host.failed(1);
+        }
+        host.running();
+        exitCode = app.exec();
     }
-    return app.exec();
+    host.stopped();
+    return exitCode;
 }

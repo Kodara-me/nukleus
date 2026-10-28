@@ -1,6 +1,19 @@
 include(GNUInstallDirs)
 add_subdirectory(sdk)
 
+# The log file (NUKLEUS_LOG_FILE) and, on Windows, the Service Control Manager host, linked by nukleusd and
+# nukleus-web and by the log file test.
+add_library(nukleus-service STATIC
+    service/LogFile.cpp
+    service/LogFile.h
+    service/ServiceHost.h
+)
+if(WIN32)
+    target_sources(nukleus-service PRIVATE service/WindowsServiceHost.cpp)
+endif()
+target_include_directories(nukleus-service PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/service)
+target_link_libraries(nukleus-service PUBLIC Qt6::Core $<$<PLATFORM_ID:Windows>:advapi32>)
+
 set(SERVICE_DAEMON_SOURCES
     daemon/ChildProcessJob.cpp
     daemon/ChildProcessJob.h
@@ -32,7 +45,7 @@ set_target_properties(nukleusd PROPERTIES AUTORCC ON)
 target_include_directories(nukleusd PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/daemon
 )
-target_link_libraries(nukleusd PRIVATE Nukleus::Protocol Qt6::Network Qt6::WebSockets)
+target_link_libraries(nukleusd PRIVATE Nukleus::Protocol nukleus-service Qt6::Network Qt6::WebSockets)
 
 add_executable(nukleus-manager
     manager/resources.qrc
@@ -86,7 +99,7 @@ target_link_libraries(nukleus-web-core PUBLIC Nukleus::SDK Qt6::Gui Qt6::Network
     $<$<PLATFORM_ID:Windows>:ws2_32>)
 
 add_executable(nukleus-web web/nukleus-web-main.cpp)
-target_link_libraries(nukleus-web PRIVATE nukleus-web-core)
+target_link_libraries(nukleus-web PRIVATE nukleus-web-core nukleus-service)
 
 install(TARGETS nukleusd nukleus-web
     RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/nukleus
@@ -95,7 +108,7 @@ install(TARGETS nukleus-manager
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-foreach(target nukleusd nukleus-manager nukleus-web nukleus-web-core)
+foreach(target nukleusd nukleus-manager nukleus-web nukleus-web-core nukleus-service)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
     elseif(MSVC)
