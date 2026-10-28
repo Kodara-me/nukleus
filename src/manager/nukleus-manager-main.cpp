@@ -12,8 +12,28 @@
 
 #include <memory>
 
+#ifdef Q_OS_WIN
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace
 {
+// Started on its own, from a shortcut or Explorer, the manager gets a console window that would stay open
+// beside the GUI; started from a shell, it shares that shell's console and keeps it for its messages.
+void releaseOwnConsole()
+{
+#ifdef Q_OS_WIN
+    DWORD processes[2];
+    if (GetConsoleProcessList(processes, 2) == 1) FreeConsole();
+#endif
+}
+
 bool hasArgument(int argc, char *argv[], const QString &argument)
 {
     for (int index = 1; index < argc; ++index) if (QString::fromLocal8Bit(argv[index]) == argument) return true;
@@ -25,6 +45,7 @@ int main(int argc, char *argv[])
 {
     const bool guiRequested = hasArgument(argc, argv, QStringLiteral("--gui"));
     std::unique_ptr<QCoreApplication> application;
+    if (guiRequested) releaseOwnConsole();
     if (guiRequested) application = std::make_unique<QApplication>(argc, argv);
     else application = std::make_unique<QCoreApplication>(argc, argv);
     application->setOrganizationName(QStringLiteral("Nukleus"));

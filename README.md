@@ -140,7 +140,8 @@ paru -S llama.cpp-vulkan-git stable-diffusion.cpp-vulkan-git
 
 `ffmpeg` is optional: it makes the ping-pong loops and the MP4 output of
 `image.animate` (`sudo pacman -S ffmpeg`). The service uses the `ffmpeg` on its PATH, or the one
-`NUKLEUS_FFMPEG` names in `/etc/nukleus/nukleus.conf`.
+`NUKLEUS_FFMPEG` names in `/etc/nukleus/nukleus.conf`. In the same way `NUKLEUS_SD_CLI` names the
+`sd-cli` to run when it is not on the service's PATH; unset or empty, the `sd-cli` on PATH is used.
 
 Both packages build from the upstream sources and install into `/usr/bin`,
 which is on the systemd unit's `PATH`. stable-diffusion.cpp links its own ggml,

@@ -43,6 +43,8 @@ struct NukleusConfiguration
     QString modelRootPath;
     // With modelRootPath, selects the split layout: catalogue JSON files here, weights under modelRootPath/<category>/.
     QString catalogRootPath;
+    // sd-cli is looked up on PATH unless NUKLEUS_SD_CLI names it; an empty value falls back to PATH.
+    QString sdCli = qEnvironmentVariable("NUKLEUS_SD_CLI", "sd-cli");
     QString llamaCompletion = qEnvironmentVariable("NUKLEUS_LLAMA_COMPLETION", "llama-completion");
     int promptEnhancementTimeoutMs = 10 * 60 * 1000; // Also bounds each text.chat turn, model loading included.
     QString llamaServer = qEnvironmentVariable("NUKLEUS_LLAMA_SERVER", "llama-server");

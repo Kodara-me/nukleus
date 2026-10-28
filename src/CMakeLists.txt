@@ -2,9 +2,13 @@ include(GNUInstallDirs)
 add_subdirectory(sdk)
 
 set(SERVICE_DAEMON_SOURCES
+    daemon/ChildProcessJob.cpp
+    daemon/ChildProcessJob.h
     daemon/FfmpegRunner.cpp
     daemon/FfmpegRunner.h
     daemon/GenerationRequest.h
+    daemon/HardLink.cpp
+    daemon/HardLink.h
     daemon/NukleusDaemon.cpp
     daemon/NukleusDaemon.h
     daemon/LlamaServerRunner.cpp
@@ -78,7 +82,8 @@ add_library(nukleus-web-core OBJECT
 )
 set_target_properties(nukleus-web-core PROPERTIES AUTORCC ON)
 target_include_directories(nukleus-web-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/web)
-target_link_libraries(nukleus-web-core PUBLIC Nukleus::SDK Qt6::Gui Qt6::Network Qt6::WebSockets)
+target_link_libraries(nukleus-web-core PUBLIC Nukleus::SDK Qt6::Gui Qt6::Network Qt6::WebSockets
+    $<$<PLATFORM_ID:Windows>:ws2_32>)
 
 add_executable(nukleus-web web/nukleus-web-main.cpp)
 target_link_libraries(nukleus-web PRIVATE nukleus-web-core)
