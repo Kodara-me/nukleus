@@ -112,3 +112,7 @@ endif()
 add_executable(nukleus-web-test WebServiceTest.cpp)
 target_link_libraries(nukleus-web-test PRIVATE nukleus-web-core Qt6::Test)
 add_test(NAME nukleus-web-test COMMAND nukleus-web-test)
+
+add_executable(nukleus-log-file-test LogFileTest.cpp)
+target_link_libraries(nukleus-log-file-test PRIVATE nukleus-service Qt6::Test)
+add_test(NAME nukleus-log-file-test COMMAND nukleus-log-file-test)

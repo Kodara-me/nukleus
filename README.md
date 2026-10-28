@@ -143,6 +143,12 @@ paru -S llama.cpp-vulkan-git stable-diffusion.cpp-vulkan-git
 `NUKLEUS_FFMPEG` names in `/etc/nukleus/nukleus.conf`. In the same way `NUKLEUS_SD_CLI` names the
 `sd-cli` to run when it is not on the service's PATH; unset or empty, the `sd-cli` on PATH is used.
 
+`NUKLEUS_LOG_FILE` makes `nukleusd` and `nukleus-web` append their messages to a file instead of the
+console, on every platform. Each line starts with an ISO timestamp and the level (`INFO`, `WARN`,
+`ERROR`). When the file passes 10 MiB it is renamed to the same name with a `.1` suffix, replacing an
+earlier one, and a new file is started. The directory is created when it is missing; unset or empty,
+the messages keep their current streams.
+
 Both packages build from the upstream sources and install into `/usr/bin`,
 which is on the systemd unit's `PATH`. stable-diffusion.cpp links its own ggml,
 so the packages do not conflict. Restart the service after installing or

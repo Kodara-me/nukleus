@@ -60,9 +60,21 @@ restored settings, Cancel and startup prompting with disposable WebSocket fixtur
 
 Image editing uses image-generation models and their existing weights/companions through image.edit. The same generation IDs work for both operations, without an eligibility flag or a separate model category.
 
-Sources are organized under `src/daemon/`, `src/manager/`, and `src/sdk/`.
-The two executable targets remain declared by `src/CMakeLists.txt`, so their
+Sources are organized under `src/daemon/`, `src/manager/`, `src/service/`, `src/sdk/`
+and `src/web/`.
+The executable targets remain declared by `src/CMakeLists.txt`, so their
 build paths remain under `build/src/`.
+
+`src/service/` is the static library `nukleus-service`, linked by `nukleusd` and
+`nukleus-web`. `LogFile` writes the messages to `NUKLEUS_LOG_FILE` with a 10 MiB
+rotation, on every platform, and `report()` sends the programs' own start and failure
+messages there or to their usual stream. `ServiceHost` is how an executable runs under
+the Windows Service Control Manager (`WindowsServiceHost.cpp`, compiled on Windows only):
+created right after the `QCoreApplication`, it reports Start Pending, Running, and Stopped
+(with a service-specific exit code after a failed start), and turns a Stop or shutdown
+request into `QCoreApplication::quit()` on the main thread. From a console it does nothing
+and the executable behaves as before; outside Windows it is an empty class. Registering
+and removing the services is the installer's work, not the executables'.
 
 To install only the built executables into a CMake prefix, run
 `cmake --install build --prefix "$HOME/.local"`. Use
