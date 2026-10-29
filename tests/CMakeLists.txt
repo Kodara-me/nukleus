@@ -68,6 +68,18 @@ if(UNIX)
                 ${CMAKE_BINARY_DIR})
 endif()
 
+# The Windows installer and uninstaller, run with -DryRun against a fake build directory.
+if(WIN32)
+    find_program(NUKLEUS_POWERSHELL NAMES pwsh powershell)
+    if(NUKLEUS_POWERSHELL)
+        add_test(NAME nukleus-windows-installer-test
+            COMMAND ${NUKLEUS_POWERSHELL} -NoProfile -ExecutionPolicy Bypass
+                    -File ${CMAKE_CURRENT_SOURCE_DIR}/NukleusWindowsInstallerTest.ps1 ${CMAKE_SOURCE_DIR})
+    else()
+        message(STATUS "PowerShell not found: nukleus-windows-installer-test is not registered")
+    endif()
+endif()
+
 add_test(NAME nukleus-manager-help COMMAND $<TARGET_FILE:nukleus-manager> --help)
 add_test(NAME nukleus-manager-rejects-companion-category
     COMMAND $<TARGET_FILE:nukleus-manager> add https://example.test/model.gguf

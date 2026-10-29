@@ -56,6 +56,25 @@ nothing is installed when it does not match or a test fails. Image work also
 needs the runtime tools listed under
 [Runtime tools on Arch Linux](#runtime-tools-on-arch-linux).
 
+### Windows
+
+On Windows 11, `scripts\install-nukleus.ps1` installs the built daemon and web service as
+Windows services (`nukleus` and `nukleus-web`), started with the machine, and the manager with a
+Start menu entry. Build first (see [Build on Windows](#build-on-windows)), then run from an
+elevated PowerShell:
+
+```powershell
+scripts\install-nukleus.ps1 -InstallBackend -BuildDir build-msvc -QtDir C:\Qt\6.8.3\msvc2022_64 `
+    -LlamaServer 'C:\Program Files\llama.cpp\llama-server.exe'
+```
+
+The services run as their own virtual accounts, which cannot read a user's profile: install the
+runtime tools (`sd-cli`, llama.cpp's `llama-server` and `llama-completion`, `ffmpeg`)
+machine-wide, for example `winget install ggml.llamacpp --scope machine`, and the installer
+stores their absolute paths. It stops, naming the tool, when a path is under `C:\Users`, and
+warns about a tool it cannot find. Data and logs are under `%ProgramData%\Nukleus`. See
+[Deployment](docs/deployment.md#windows) for every option, updates, permissions and removal.
+
 ### Web service
 
 `nukleus-web` serves a plain HTML page and a small API to any browser on the local
@@ -262,6 +281,21 @@ ctest --test-dir build
 `scripts/install-nukleus.sh` for the complete systemd installation. Building
 against a local Ardoise checkout, the source layout and the tests are described in
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Build on Windows
+
+Building on Windows needs Visual Studio 2022 Build Tools, Qt 6.8 (`msvc2022_64`), CMake, Ninja
+and libarchive from vcpkg. From a Visual Studio developer prompt:
+
+```bat
+cmake -S . -B build-msvc -G Ninja -DCMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64 ^
+    -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+cmake --build build-msvc
+ctest --test-dir build-msvc
+```
+
+The tests that need a POSIX shell are not registered on Windows; the installer test runs the
+PowerShell scripts with `-DryRun`.
 
 ## Documentation
 
