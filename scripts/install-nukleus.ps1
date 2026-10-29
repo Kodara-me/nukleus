@@ -15,6 +15,10 @@ its flag, and a machine with nothing installed needs at least one of -InstallBac
 Install or update nukleusd and the model manager.
 .PARAMETER InstallWebService
 Install or update the web service (nukleus-web).
+Every path option (-BuildDir, -QtDir, -ModelsDir, -ConfigDir, -SdCli, -LlamaServer,
+-LlamaCompletion, -Ffmpeg and -StateFile) may be relative: it is resolved against the current
+PowerShell location, not the process working directory.
+
 .PARAMETER BuildDir
 Build directory holding the executables in <BuildDir>\src (default: build next to this script).
 .PARAMETER QtDir
@@ -179,6 +183,24 @@ function Test-FileHasContent([string]$Path) {
     return (Test-Path -LiteralPath $Path -PathType Leaf) -and ((Get-Item -LiteralPath $Path).Length -gt 0)
 }
 
+# Resolves a path option against PowerShell's current file system location, not the process working
+# directory. The path need not exist; an absolute path is returned as given.
+function Resolve-OptionPath([string]$Path) {
+    if (-not $Path) { return $Path }
+    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+}
+
+# Every path option is resolved once, here, before validation.
+$BuildDir = Resolve-OptionPath $BuildDir
+$QtDir = Resolve-OptionPath $QtDir
+$ModelsDir = Resolve-OptionPath $ModelsDir
+$ConfigDir = Resolve-OptionPath $ConfigDir
+$SdCli = Resolve-OptionPath $SdCli
+$LlamaServer = Resolve-OptionPath $LlamaServer
+$LlamaCompletion = Resolve-OptionPath $LlamaCompletion
+$Ffmpeg = Resolve-OptionPath $Ffmpeg
+$StateFile = Resolve-OptionPath $StateFile
+
 $programFiles = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
 $installDir = Join-Path $programFiles 'Nukleus'
 $dataDir = Join-Path $env:ProgramData 'Nukleus'
@@ -213,7 +235,7 @@ if ($state) {
 
 if ([bool]$ModelsDir -ne [bool]$ConfigDir) { Stop-Install '-ModelsDir and -ConfigDir must be given together.' }
 foreach ($pair in @(@('-ModelsDir', $ModelsDir), @('-ConfigDir', $ConfigDir))) {
-    if ($pair[1] -and -not (Test-AbsolutePath $pair[1])) { Stop-Install "$($pair[0]) must be an absolute path." }
+    if ($pair[1] -and -not (Test-AbsolutePath $pair[1])) { Stop-Install "$($pair[0]) must resolve to a path on a local drive (for example D:\nukleus\models), not $($pair[1])." }
 }
 foreach ($pair in @(@('-Listen', $Listen), @('-WebListen', $WebListen))) {
     if ($pair[1]) {
@@ -237,7 +259,6 @@ if (-not $DryRun) {
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $BuildDir) { $BuildDir = Join-Path (Split-Path -Parent $scriptDir) 'build' }
-$BuildDir = [System.IO.Path]::GetFullPath($BuildDir)
 $buildBinDir = Join-Path $BuildDir 'src'
 $executables = @{}
 if ($doBackend) {
@@ -293,7 +314,7 @@ if ($doBackend) {
     foreach ($tool in $tools) {
         $path = $null
         if ($tool.Given) {
-            $path = [System.IO.Path]::GetFullPath($tool.Given)
+            $path = $tool.Given
         } elseif ($backendEnvironment.Contains($tool.Variable) -and $backendEnvironment[$tool.Variable]) {
             $path = $backendEnvironment[$tool.Variable]
         } else {
