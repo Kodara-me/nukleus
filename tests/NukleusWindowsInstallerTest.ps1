@@ -34,6 +34,8 @@ foreach ($name in @('nukleusd.exe', 'nukleus-manager.exe', 'nukleus-web.exe', 'Q
     New-Item -ItemType File -Path (Join-Path $buildDir "src\$name") | Out-Null
 }
 $qtDir = Join-Path $work 'Qt'
+$decoy = Join-Path $work 'decoy'
+New-Item -ItemType Directory -Path $decoy | Out-Null
 
 $failures = New-Object System.Collections.Generic.List[string]
 function Assert-That([bool]$Condition, [string]$Message) {
@@ -50,13 +52,24 @@ function Quote-Argument([string]$Value) { '"' + ($Value -replace '"', '\"') + '"
 
 # Runs a script in a fresh shell with standard input closed, as a non-interactive session. The
 # plan shows the service command line escaped as sc.exe receives it; the output unescapes it.
-function Invoke-Script([string]$Script, [string[]]$Arguments, $State, [string]$SearchPath = $emptyPath) {
+function Invoke-Script([string]$Script, [string[]]$Arguments, $State, [string]$SearchPath = $emptyPath, [string]$Location, [switch]$RelativeState) {
     $stateFile = Join-Path $work ([guid]::NewGuid().ToString('N') + '.json')
     $stateObject = if ($State) { $State } else { @{ services = @{}; tokenSet = $false; webBackendTokenSet = $false; firewall = @() } }
     ConvertTo-Json -InputObject $stateObject -Depth 6 | Set-Content -LiteralPath $stateFile -Encoding UTF8
     $info = New-Object System.Diagnostics.ProcessStartInfo
     $info.FileName = $shell
-    $all = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Script) + $Arguments + @('-DryRun', '-StateFile', $stateFile)
+    if ($Location) {
+        # The process working directory is a decoy: only the PowerShell location is $Location.
+        $info.WorkingDirectory = $decoy
+        $given = if ($RelativeState) { Split-Path -Leaf $stateFile } else { $stateFile }
+        $parts = @($Arguments) + @('-DryRun', '-StateFile', $given) | ForEach-Object {
+            if ($_ -match '^-[A-Za-z]+$') { $_ } else { "'" + ($_ -replace "'", "''") + "'" }
+        }
+        $command = "Set-Location -LiteralPath '$($Location -replace "'", "''")'; & '$($Script -replace "'", "''")' $($parts -join ' '); exit `$LASTEXITCODE"
+        $all = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command)
+    } else {
+        $all = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Script) + $Arguments + @('-DryRun', '-StateFile', $stateFile)
+    }
     $info.Arguments = ($all | ForEach-Object { Quote-Argument $_ }) -join ' '
     $info.UseShellExecute = $false
     $info.RedirectStandardInput = $true
@@ -236,6 +249,74 @@ try {
         Assert-Match $run.Out "(?m)^Warning: $tool was not found on PATH" "warning for $tool"
     }
     Assert-NoMatch $run.Out '(?m)^    NUKLEUS_SD_CLI=' 'no path is stored for a tool that was not found'
+
+    # ---- Relative paths resolve against the PowerShell location (R1 to R8, spec #44) -------------
+    # The child shell's process working directory is a decoy directory; Set-Location moves only
+    # the PowerShell location. Before the change, relative paths followed the decoy.
+    $relTools = @('-SdCli', 'cmd.exe', '-LlamaServer', 'whoami.exe', '-LlamaCompletion', 'hostname.exe', '-Ffmpeg', 'more.com')
+
+    # R1, R2: a relative -BuildDir is found under the PowerShell location.
+    $run = Invoke-Script $install @('-InstallBackend', '-BuildDir', 'build', '-QtDir', $qtDir) $null -Location $work
+    Assert-That ($run.Code -eq 0) "R1 R2: a relative -BuildDir is found under the PowerShell location (got $($run.Code)): $($run.Err)"
+    Assert-Match $run.Out ('(?m)^\+ Copy-Item .*' + [regex]::Escape("$buildDir\src") + '.*nukleusd\.exe') 'R1 R2: the plan copies from the resolved build directory'
+
+    # R2: a missing relative -BuildDir is named by its resolved absolute directory.
+    $run = Invoke-Script $install @('-InstallBackend', '-BuildDir', 'missing-build', '-QtDir', $qtDir) $null -Location $work
+    Assert-Refusal $run ([regex]::Escape((Join-Path $work 'missing-build\src'))) 'R2: a missing relative -BuildDir'
+
+    # R3: a relative -QtDir gives an absolute windeployqt.exe path.
+    $run = Invoke-Script $install @('-InstallBackend', '-BuildDir', 'build', '-QtDir', 'Qt') $null -Location $work
+    Assert-Match $run.Out ('(?m)^\+ ' + [regex]::Escape((Join-Path $work 'Qt\bin\windeployqt.exe'))) 'R3: windeployqt.exe is named by its absolute path under the resolved -QtDir'
+
+    # R4: relative tool paths are stored as absolute paths (the location is outside any profile).
+    $run = Invoke-Script $install (@('-InstallBackend', '-BuildDir', $buildDir, '-QtDir', $qtDir) + $relTools) $null -Location $system32
+    Assert-That ($run.Code -eq 0) "R4: relative tool paths are accepted outside a user profile (got $($run.Code)): $($run.Err)"
+    Assert-Match $run.Out ('(?m)^    NUKLEUS_LLAMA_SERVER=' + [regex]::Escape((Join-Path $system32 'whoami.exe')) + '$') 'R4: a relative tool path is stored as its absolute path'
+    Assert-Match $run.Out ('(?m)^    NUKLEUS_SD_CLI=' + [regex]::Escape((Join-Path $system32 'cmd.exe')) + '$') 'R4: every relative tool path is resolved'
+
+    # R4: a relative tool path that resolves under a user profile is refused, naming the option.
+    $run = Invoke-Script $install @('-InstallBackend', '-BuildDir', $buildDir, '-QtDir', $qtDir, '-LlamaServer', 'whoami.exe') $null -Location $work
+    Assert-Refusal $run 'llama-server' 'R4: a relative tool path under a user profile'
+    Assert-Match $run.Err '-LlamaServer' 'R4: the refusal names the option'
+    Assert-Match $run.Err ([regex]::Escape((Join-Path $work 'whoami.exe'))) 'R4: the refusal names the resolved path'
+
+    # R5: relative -ModelsDir and -ConfigDir resolve to absolute paths.
+    $run = Invoke-Script $install @('-InstallBackend', '-BuildDir', 'build', '-QtDir', $qtDir, '-ModelsDir', 'data\models', '-ConfigDir', 'data\config') $null -Location $work
+    Assert-That ($run.Code -eq 0) "R5: relative storage directories are accepted (got $($run.Code)): $($run.Err)"
+    $resolvedModels = Join-Path $work 'data\models'
+    $resolvedConfig = Join-Path $work 'data\config'
+    Assert-Match $run.Out ([regex]::Escape("--models-dir `"$resolvedModels`" --config-dir `"$resolvedConfig`"")) 'R5: the command line holds the resolved directories'
+    Assert-Match $run.Out ('(?m)^\+ New-Item -ItemType Directory ' + [regex]::Escape($resolvedModels) + '$') 'R5: the resolved weight directory is created'
+    Assert-Match $run.Out ('(?m)^\+ New-Item -ItemType Directory ' + [regex]::Escape("$resolvedConfig\catalog") + '$') 'R5: the resolved catalogue directory is created'
+    Assert-Match $run.Out ('(?m)^\+ icacls ' + [regex]::Escape($resolvedModels) + ' /grant ') 'R5: the resolved weight directory is secured'
+
+    # R6: a path that does not resolve to a drive letter is refused, naming the option.
+    foreach ($option in @('-ModelsDir', '-ConfigDir')) {
+        $storage = if ($option -eq '-ModelsDir') { @('-ModelsDir', '\\server\share\models', '-ConfigDir', 'D:\lab\config') } else { @('-ModelsDir', 'D:\lab\models', '-ConfigDir', '\\server\share\config') }
+        $run = Invoke-Script $install (@('-InstallBackend', '-BuildDir', 'build', '-QtDir', $qtDir) + $storage) $null -Location $work
+        Assert-Refusal $run ([regex]::Escape($option)) "R6: a UNC $option"
+    }
+
+    # R1: a relative -StateFile is read from the PowerShell location by both scripts.
+    $run = Invoke-Script $install @('-BuildDir', 'build', '-QtDir', $qtDir) $installed -Location $work -RelativeState
+    Assert-Match $run.Out '(?m)^Updating Nukleus\.' 'R1: the installer reads a relative -StateFile from the PowerShell location'
+    $run = Invoke-Script $uninstall @() $installed -Location $work -RelativeState
+    Assert-Match $run.Out '(?m)^\+ sc\.exe delete nukleus$' 'R1: the uninstaller reads a relative -StateFile from the PowerShell location'
+
+    # R7: absolute paths give the same plan from any location.
+    $absolute = @('-InstallBackend', '-BuildDir', $buildDir, '-QtDir', $qtDir) + $tools
+    $here = Invoke-Script $install $absolute $null -Location $work
+    $there = Invoke-Script $install $absolute $null -Location $system32
+    Assert-That ($here.Code -eq 0 -and $here.Out -eq $there.Out) 'R7: absolute paths give the same plan whatever the location'
+
+    # R7: the default -BuildDir (build next to the scripts directory) is unchanged.
+    $project = Join-Path $work 'project'
+    New-Item -ItemType Directory -Path (Join-Path $project 'scripts') | Out-Null
+    Copy-Item -LiteralPath $buildDir -Destination $project -Recurse -Force
+    Copy-Item -LiteralPath $install -Destination (Join-Path $project 'scripts')
+    $run = Invoke-Script (Join-Path $project 'scripts\install-nukleus.ps1') @('-InstallBackend', '-QtDir', $qtDir) $null -Location $system32
+    Assert-That ($run.Code -eq 0) "R7: the default -BuildDir is found next to the scripts directory (got $($run.Code)): $($run.Err)"
+    Assert-Match $run.Out ('(?m)^\+ Copy-Item .*' + [regex]::Escape("$project\build\src") + '.*nukleusd\.exe') 'R7: the plan copies from the default build directory'
 
     # ---- Without elevation, a real run stops before any change (R12) ----------------------------
     $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())

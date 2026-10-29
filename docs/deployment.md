@@ -94,6 +94,8 @@ The component rule is the Linux one: every component already installed is update
 that is not installed is added only by its flag, and a machine with nothing installed needs
 `-InstallBackend` (`nukleusd` and the manager), `-InstallWebService` (`nukleus-web`) or both.
 
+Relative paths given to the path options (`-BuildDir`, `-QtDir`, `-ModelsDir`, `-ConfigDir`, `-SdCli`, `-LlamaServer`, `-LlamaCompletion`, `-Ffmpeg`) are resolved against the current PowerShell location, and the stored paths are the absolute results. `-ModelsDir` and `-ConfigDir` must resolve to a path on a local drive (for example `D:\nukleus\models`); a network (UNC) path is refused.
+
 | Option | Meaning |
 | --- | --- |
 | `-BuildDir`, `-QtDir` | Where the executables are, and the Qt installation for `windeployqt`. |
