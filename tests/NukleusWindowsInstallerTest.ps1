@@ -297,6 +297,21 @@ try {
         Assert-Refusal $run ([regex]::Escape($option)) "R6: a UNC $option"
     }
 
+    # Tool access: a tool that the service account cannot run is opened to it, read and execute only, with
+    # its libraries; a tool every user can run is left alone.
+    $restrictedDir = Join-Path $env:ProgramData ('nukleus-installer-test-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $restrictedDir | Out-Null
+    $restrictedTool = Join-Path $restrictedDir 'llama-server.exe'
+    Copy-Item -LiteralPath (Join-Path $system32 'whoami.exe') -Destination $restrictedTool
+    & (Join-Path $system32 'icacls.exe') $restrictedTool /inheritance:r /grant:r '*S-1-5-32-544:F' "${env:USERDOMAIN}\${env:USERNAME}:F" | Out-Null
+    $restrictedTools = @('-SdCli', (Join-Path $system32 'cmd.exe'), '-LlamaServer', $restrictedTool,
+        '-LlamaCompletion', (Join-Path $system32 'hostname.exe'), '-Ffmpeg', (Join-Path $system32 'more.com'))
+    $run = Invoke-Script $install (@('-InstallBackend', '-BuildDir', $buildDir, '-QtDir', $qtDir) + $restrictedTools) $null
+    Assert-That ($run.Code -eq 0) "Tool access: a restricted tool is accepted (got $($run.Code)): $($run.Err)"
+    Assert-Match $run.Out ('(?m)^\+ icacls ' + [regex]::Escape($restrictedDir) + ' /grant NT SERVICE\\nukleus:\(OI\)\(CI\)RX /T$') 'Tool access: the folder of a restricted tool is opened to the daemon account'
+    Assert-NoMatch $run.Out '(?m)^\+ icacls .*System32.* /grant' 'Tool access: a tool every user can run is left alone'
+    Assert-NoMatch $run.Out '(?m)^\+ icacls .*(:\(OI\)\(CI\)RX|:RX).*nukleus-web' 'Tool access: the web account is not given the tools'
+
     # R1: a relative -StateFile is read from the PowerShell location by both scripts.
     $run = Invoke-Script $install @('-BuildDir', 'build', '-QtDir', $qtDir) $installed -Location $work -RelativeState
     Assert-Match $run.Out '(?m)^Updating Nukleus\.' 'R1: the installer reads a relative -StateFile from the PowerShell location'
@@ -374,6 +389,7 @@ try {
 }
 finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+    if ($restrictedDir) { Remove-Item -LiteralPath $restrictedDir -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 if ($failures.Count -gt 0) {
