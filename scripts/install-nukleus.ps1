@@ -497,10 +497,24 @@ if ($doWeb) {
 }
 
 # 5. Permissions, once the virtual accounts exist, then the secrets.
-function Grant-Access([string]$Path, [string[]]$Entries, [bool]$Replace) {
+function Grant-Access([string]$Path, [string[]]$Entries, [bool]$Replace, [bool]$Recurse = $false) {
     $mode = if ($Replace) { @('/inheritance:r', '/grant:r') } else { @('/grant') }
-    $text = "icacls $Path $($mode -join ' ') $($Entries -join ' ')"
-    Invoke-Step $text { Invoke-Icacls (@($Path) + $mode + $Entries) }
+    $after = if ($Recurse) { @('/T') } else { @() }
+    $text = "icacls $Path $($mode -join ' ') $($Entries -join ' ') $($after -join ' ')".TrimEnd()
+    Invoke-Step $text { Invoke-Icacls (@($Path) + $mode + $Entries + $after) }
+}
+
+# True when the account, or a group every account belongs to, may run the file.
+function Test-ExecutableByAccount([string]$Path, [string]$Account) {
+    $everyone = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545')
+    foreach ($rule in (Get-Acl -LiteralPath $Path).Access) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        if (-not ($rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::ExecuteFile)) { continue }
+        if ($rule.IdentityReference.Value -eq $Account) { return $true }
+        try { $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { continue }
+        if ($everyone -contains $sid) { return $true }
+    }
+    return $false
 }
 
 if ($doBackend) {
@@ -508,6 +522,19 @@ if ($doBackend) {
     Grant-Access $defaultConfigDir $backendOnly $true
     Grant-Access $tmpDir $backendOnly $true
     Grant-Access $backendModelsDir @("${ServiceAccount}:(OI)(CI)M") $false
+    # The runtime tools run under the service account: a tool whose own permissions leave it out
+    # (a WinGet package, for example) is opened to it, read and execute only, with its libraries.
+    $openedToolDirs = @{}
+    foreach ($variable in $toolPaths.Keys) {
+        $toolPath = $toolPaths[$variable]
+        if (-not (Test-Path -LiteralPath $toolPath -PathType Leaf)) { continue }
+        if (Test-ExecutableByAccount $toolPath $ServiceAccount) { continue }
+        $toolDir = Split-Path -Parent $toolPath
+        if (-not (Split-Path -Parent $toolDir)) { Grant-Access $toolPath @("${ServiceAccount}:RX") $false; continue }
+        if ($openedToolDirs.ContainsKey($toolDir)) { continue }
+        $openedToolDirs[$toolDir] = $true
+        Grant-Access $toolDir @("${ServiceAccount}:(OI)(CI)RX") $false $true
+    }
     if ($ConfigDir) { Grant-Access $backendConfigDir @("${ServiceAccount}:(OI)(CI)M") $false }
     if ($newToken -or $installing -or -not $tokenIsSet) {
         Invoke-Step "New-Item -ItemType File $tokenPath" {
