@@ -247,6 +247,8 @@ void ServiceTest::findsSdCliFromEnvironment_R3()
         };
         QTRY_VERIFY(!capabilities().isEmpty());
         QCOMPARE(capabilities().value("operations").toArray().contains("image.generate"), offered);
+        // R1: masked image to image is offered with the image backend.
+        QCOMPARE(capabilities().value("operations").toArray().contains("image.generate.mask"), offered);
     };
 
     // The variable names an sd-cli that is not on PATH.
@@ -748,7 +750,8 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
                      "printf '%s\\n' \"$@\" > \"$NUKLEUS_TEST_ARGS\"\nprevious=\"\"\nfor argument in "
                      "\"$@\"; do\n if [ \"$previous\" = --output ]; then cp \"$NUKLEUS_TEST_IMAGE\" "
                      "\"$argument\"; fi\n"
-                     " if [ \"$previous\" = --ref-image ]; then cp \"$argument\" \"$NUKLEUS_TEST_ARGS.source\"; fi\n previous=\"$argument\"\ndone\nexit 0\n");
+                     " if [ \"$previous\" = --ref-image ]; then cp \"$argument\" \"$NUKLEUS_TEST_ARGS.source\"; fi\n"
+                     " if [ \"$previous\" = --mask ]; then cp \"$argument\" \"$NUKLEUS_TEST_ARGS.mask\"; fi\n previous=\"$argument\"\ndone\nexit 0\n");
     executable.close();
     QVERIFY(executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
     const QString root = directory.filePath("models");
@@ -949,6 +952,157 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QCOMPARE(messages.last().value("code").toString(), QString("invalid-request"));
     images.clear();
     messages.clear();
+    // Masked image to image. The daemon reads sizes from the image headers only, so a header-only PNG is enough.
+    const auto headerPng = [](int width, int height, int padding = 0) {
+        QByteArray bytes = QByteArray::fromHex("89504e470d0a1a0a0000000d49484452");
+        for (const int value : {width, height})
+            for (int shift = 24; shift >= 0; shift -= 8) bytes.append(char((value >> shift) & 0xff));
+        return bytes + QByteArray::fromHex("0802000000") + QByteArray(4, '\0') + QByteArray(padding, 'x');
+    };
+    const auto headerJpeg = [](int width, int height) {
+        QByteArray bytes = QByteArray::fromHex("ffd8ffe000104a46494600010100000100010000ffc0001108");
+        for (const int value : {height, width}) { bytes.append(char(value >> 8)); bytes.append(char(value & 0xff)); }
+        return bytes + QByteArray::fromHex("03011100021101031101ffd9");
+    };
+    const QByteArray maskBytes = headerPng(1, 1);
+    const auto uploadRequests = [&](const QString &id) {
+        QList<QPair<QString, int>> requests;
+        for (const auto &message : messages)
+            if (message.value("type") == "upload-required" && message.value("jobId") == id)
+                requests.append({message.value("inputRole").toString(), message.value("inputIndex").toInt(0)});
+        return requests;
+    };
+    const auto maskedOptions = [&] {
+        QJsonObject options = valid;
+        options.insert("hasInput", true);
+        options.insert("hasMask", true);
+        options.insert("baseImageStrength", 0.25);
+        return options;
+    };
+    const auto resetCapture = [&] {
+        QFile::remove(capture);
+        QFile::remove(capture + ".mask");
+        images.clear();
+        messages.clear();
+    };
+    // R2, R3: the source is requested first, then the mask (index 1); sd-cli gets all three arguments.
+    resetCapture();
+    send("masked", maskedOptions());
+    QTRY_COMPARE(uploadRequests("masked").size(), 1);
+    QCOMPARE(uploadRequests("masked").first().first, QString("source"));
+    socket.sendBinaryMessage(image);
+    QTRY_COMPARE(uploadRequests("masked").size(), 2);
+    QCOMPARE(uploadRequests("masked").last(), (QPair<QString, int>{"mask", 1}));
+    QVERIFY(!terminal("masked"));
+    socket.sendBinaryMessage(maskBytes);
+    QTRY_VERIFY(terminal("masked"));
+    QTRY_COMPARE(images.count(), 1);
+    const auto maskedArgs = arguments();
+    const int initIndex = maskedArgs.indexOf("--init-img");
+    QVERIFY(initIndex >= 0);
+    QCOMPARE(maskedArgs.value(maskedArgs.indexOf("--strength") + 1), QString("0.25"));
+    const int maskIndex = maskedArgs.indexOf("--mask");
+    QVERIFY(maskIndex >= 0);
+    QVERIFY(maskedArgs.value(maskIndex + 1) != maskedArgs.value(initIndex + 1));
+    QFile maskCopy(capture + ".mask");
+    QVERIFY(maskCopy.open(QIODevice::ReadOnly));
+    QCOMPARE(maskCopy.readAll(), maskBytes);
+    QCOMPARE(maskedArgs.value(maskedArgs.indexOf("--cfg-scale") + 1), QString("5.75"));
+    QCOMPARE(maskedArgs.value(maskedArgs.indexOf("--steps") + 1), QString("37"));
+    // A JPEG mask of the source's size is accepted too.
+    resetCapture();
+    send("masked-jpeg", maskedOptions());
+    QTRY_COMPARE(uploadRequests("masked-jpeg").size(), 1);
+    socket.sendBinaryMessage(image);
+    QTRY_COMPARE(uploadRequests("masked-jpeg").size(), 2);
+    socket.sendBinaryMessage(headerJpeg(1, 1));
+    QTRY_VERIFY(terminal("masked-jpeg"));
+    QTRY_COMPARE(images.count(), 1);
+    QVERIFY(arguments().contains("--mask"));
+
+    // R4: each malformed submission is refused before any upload is requested.
+    QJsonObject editBase = valid;
+    editBase.insert("modelId", "image-generation:edit.gguf");
+    const auto rejectedBeforeUpload = [&](const QString &id, const QString &operation, const QJsonObject &options) {
+        resetCapture();
+        socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+            {"type", "submit"}, {"operation", operation}, {"jobId", id}, {"options", options}}).toJson()));
+        QTRY_VERIFY(terminal(id));
+        QCOMPARE(messages.last().value("code").toString(), QString("invalid-request"));
+        QVERIFY(uploadRequests(id).isEmpty());
+        QVERIFY(!QFileInfo::exists(capture));
+    };
+    const auto withOption = [&](QJsonObject options, const QString &key, const QJsonValue &value) {
+        options.insert(key, value);
+        return options;
+    };
+    rejectedBeforeUpload("mask-string", "image.generate", withOption(maskedOptions(), "hasMask", "true"));
+    rejectedBeforeUpload("mask-number", "image.generate", withOption(maskedOptions(), "hasMask", 1));
+    rejectedBeforeUpload("mask-null", "image.generate", withOption(maskedOptions(), "hasMask", QJsonValue(QJsonValue::Null)));
+    rejectedBeforeUpload("mask-no-input", "image.generate", withOption(maskedOptions(), "hasInput", false));
+    QJsonObject withoutInput = maskedOptions();
+    withoutInput.remove("hasInput");
+    rejectedBeforeUpload("mask-input-absent", "image.generate", withoutInput);
+    rejectedBeforeUpload("mask-references", "image.generate", withOption(maskedOptions(), "inputCount", 2));
+    rejectedBeforeUpload("mask-references-only", "image.generate",
+        withOption(withOption(maskedOptions(), "hasInput", false), "inputCount", 2));
+    rejectedBeforeUpload("mask-on-edit", "image.edit", withOption(editBase, "hasMask", true));
+    rejectedBeforeUpload("mask-false-on-edit", "image.edit", withOption(editBase, "hasMask", false));
+
+    // R5: a bad mask is refused with invalid-image after its upload, and no job is queued.
+    const auto rejectedMask = [&](const QString &id, const QByteArray &source, const QByteArray &mask) {
+        resetCapture();
+        send(id, maskedOptions());
+        QTRY_COMPARE(uploadRequests(id).size(), 1);
+        socket.sendBinaryMessage(source);
+        QTRY_COMPARE(uploadRequests(id).size(), 2);
+        socket.sendBinaryMessage(mask);
+        QTRY_VERIFY(terminal(id));
+        QCOMPARE(messages.last().value("code").toString(), QString("invalid-image"));
+        QCOMPARE(messages.last().value("jobId").toString(), id);
+        QVERIFY(std::none_of(messages.cbegin(), messages.cend(), [](const QJsonObject &message) {
+            return message.value("type") == "queued"; }));
+        QVERIFY(images.isEmpty());
+        QVERIFY(!QFileInfo::exists(capture));
+    };
+    rejectedMask("mask-empty", image, QByteArray());
+    rejectedMask("mask-large", image, headerPng(1, 1, 2048));
+    rejectedMask("mask-gif", image, QByteArray("GIF89a\x01\x00\x01\x00", 10));
+    rejectedMask("mask-truncated-png", image, maskBytes.left(20));
+    rejectedMask("mask-wider", image, headerPng(2, 1));
+    rejectedMask("mask-taller", image, headerPng(1, 2));
+    rejectedMask("mask-jpeg-wider", image, headerJpeg(2, 1));
+    // The source's size cannot be read (here a WebP): nothing is queued either.
+    rejectedMask("mask-source-unreadable", QByteArray("RIFF\x24\x00\x00\x00WEBPVP8 ", 16), maskBytes);
+    // A job refused that way leaves the connection free for the next one.
+    resetCapture();
+    send("masked-after-refusals", maskedOptions());
+    QTRY_COMPARE(uploadRequests("masked-after-refusals").size(), 1);
+    socket.sendBinaryMessage(image);
+    QTRY_COMPARE(uploadRequests("masked-after-refusals").size(), 2);
+    socket.sendBinaryMessage(maskBytes);
+    QTRY_VERIFY(terminal("masked-after-refusals"));
+    QTRY_COMPARE(images.count(), 1);
+
+    // R6: without a mask, image to image requests one upload and the backend gets no mask.
+    for (const bool explicitFalse : {false, true}) {
+        resetCapture();
+        QJsonObject plain = maskedOptions();
+        if (explicitFalse) plain.insert("hasMask", false);
+        else plain.remove("hasMask");
+        const QString id = explicitFalse ? "unmasked-false" : "unmasked-absent";
+        send(id, plain);
+        QTRY_COMPARE(uploadRequests(id).size(), 1);
+        socket.sendBinaryMessage(image);
+        QTRY_VERIFY(terminal(id));
+        QTRY_COMPARE(images.count(), 1);
+        QCOMPARE(uploadRequests(id).size(), 1);
+        const auto plainArgs = arguments();
+        QVERIFY(plainArgs.contains("--init-img"));
+        QVERIFY(!plainArgs.contains("--mask"));
+    }
+    resetCapture();
+
     send("automatic", valid);
     QTRY_VERIFY(terminal("automatic"));
     QTRY_COMPARE(images.count(), 1);

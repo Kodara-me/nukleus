@@ -22,6 +22,7 @@
 #include <QJsonObject>
 #include <QPointer>
 #include <QRegularExpression>
+#include <QSize>
 #include <QStandardPaths>
 #include <QUuid>
 #include <QWebSocket>
@@ -46,7 +47,7 @@ bool validGenerationOptions(const QJsonObject &options)
 {
     const QStringList allowed{"modelId", "prompt", "negativePrompt", "width", "height",
         "steps", "cfgScale", "clipSkip", "seed", "sampler", "scheduler",
-        "hasInput", "inputCount", "baseImageStrength", "styleId", "presetId", "qualityId"};
+        "hasInput", "hasMask", "inputCount", "baseImageStrength", "styleId", "presetId", "qualityId"};
     for (const auto& key : options.keys())
         if (!allowed.contains(key)) return false;
     const auto optionalString = [&options](const QString &key) {
@@ -68,7 +69,8 @@ bool validGenerationOptions(const QJsonObject &options)
                                              && options.value("clipSkip").toInt() != 0))
         && validChoice("sampler", Nukleus::Protocol::modelSamplers())
         && validChoice("scheduler", Nukleus::Protocol::modelSchedulers())
-        && (!options.contains("hasInput") || options.value("hasInput").isBool());
+        && (!options.contains("hasInput") || options.value("hasInput").isBool())
+        && (!options.contains("hasMask") || options.value("hasMask").isBool());
 }
 
 constexpr int MaximumChatMessages = 1024;
@@ -83,6 +85,42 @@ QString chatImageMimeType(const QByteArray &bytes)
 {
     if (bytes.startsWith("\x89PNG\r\n\x1a\n")) return QStringLiteral("image/png");
     if (bytes.startsWith("\xff\xd8\xff")) return QStringLiteral("image/jpeg");
+    return {};
+}
+
+// Reads the pixel size of a PNG (IHDR) or JPEG (SOF) from its headers, without decoding it;
+// the daemon stays free of Qt GUI. Returns an invalid size when the headers cannot be read.
+QSize imageHeaderSize(const QByteArray &bytes)
+{
+    const auto byteAt = [&bytes](qsizetype index) { return index < bytes.size() ? static_cast<quint8>(bytes.at(index)) : 0; };
+    const auto be16 = [&byteAt](qsizetype index) { return (byteAt(index) << 8) | byteAt(index + 1); };
+    const auto be32 = [&be16](qsizetype index) { return (static_cast<quint32>(be16(index)) << 16) | static_cast<quint32>(be16(index + 2)); };
+    const QString mime = chatImageMimeType(bytes);
+    if (mime == QStringLiteral("image/png")) {
+        if (bytes.size() < 24 || bytes.mid(12, 4) != "IHDR") return {};
+        const quint32 width = be32(16);
+        const quint32 height = be32(20);
+        if (width == 0 || height == 0 || width > 65535 || height > 65535) return {};
+        return QSize(int(width), int(height));
+    }
+    if (mime == QStringLiteral("image/jpeg")) {
+        qsizetype position = 2;
+        while (position + 4 <= bytes.size()) {
+            if (byteAt(position) != 0xFF) return {};
+            const int marker = byteAt(position + 1);
+            if (marker == 0xFF) { ++position; continue; }
+            if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD8)) { position += 2; continue; }
+            if (marker == 0xD9 || marker == 0xDA) return {};
+            const bool frame = marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC;
+            if (frame) {
+                if (position + 9 > bytes.size()) return {};
+                const int height = be16(position + 5);
+                const int width = be16(position + 7);
+                return width > 0 && height > 0 ? QSize(width, height) : QSize();
+            }
+            position += 2 + be16(position + 2);
+        }
+    }
     return {};
 }
 
@@ -622,6 +660,13 @@ void NukleusDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         sendError(socket, QStringLiteral("invalid-request"), tr("Invalid generation options"), jobId);
         return;
     }
+    if (options.contains("hasMask")
+        && (edit || (options.value("hasMask").toBool()
+                     && (!options.value("hasInput").toBool() || options.contains("inputCount"))))) {
+        sendError(socket, QStringLiteral("invalid-request"),
+            tr("A mask is only supported for image generation from a base image, without reference images"), jobId);
+        return;
+    }
     if (!edit && options.contains("inputCount") && (!generate || options.value("hasInput").toBool())) {
         sendError(socket, QStringLiteral("invalid-request"),
             tr("Reference images are only supported for image editing and generation without a base image"), jobId);
@@ -671,7 +716,7 @@ void NukleusDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     submission->operation = edit ? Operation::Edit : generate ? Operation::Generate : Operation::Upscale;
     submission->options = options;
     submission->routedPrompts = routedPrompts;
-    submission->expectedInputs = options.value("inputCount").toInt(1);
+    submission->expectedInputs = options.value("hasMask").toBool() ? 2 : options.value("inputCount").toInt(1);
     submission->modelPath = model->filePath;
     if ((generate || edit) && model->companionRole == QStringLiteral("vae") && !model->companionFileName.isEmpty())
         submission->vaePath = QDir(QFileInfo(model->filePath).absolutePath()).filePath(model->companionFileName);
@@ -978,10 +1023,31 @@ void NukleusDaemon::processBinaryMessage(QWebSocket* socket, const QByteArray& d
                                                 : tr("Animation images must be PNG or JPEG"), submission->id);
         return;
     }
+    const bool masked = submission->operation == Operation::Generate && submission->options.value("hasMask").toBool();
+    if (masked && submission->inputs.size() == 1) {
+        // The mask must be a PNG or JPEG of the same size as the source; sizes come from the headers.
+        const QSize sourceSize = imageHeaderSize(submission->inputs.first());
+        const QSize maskSize = imageHeaderSize(data);
+        if (chatImageMimeType(data).isEmpty() || !maskSize.isValid()) {
+            m_pendingUploads.remove(socket);
+            sendError(socket, "invalid-image", tr("The mask must be a PNG or JPEG image"), submission->id);
+            return;
+        }
+        if (!sourceSize.isValid()) {
+            m_pendingUploads.remove(socket);
+            sendError(socket, "invalid-image", tr("The size of the source image could not be read"), submission->id);
+            return;
+        }
+        if (sourceSize != maskSize) {
+            m_pendingUploads.remove(socket);
+            sendError(socket, "invalid-image", tr("The mask must have the same width and height as the source image"), submission->id);
+            return;
+        }
+    }
     submission->inputs.append(data);
     if (submission->inputs.size() < submission->expectedInputs) {
         send(socket, {{QStringLiteral("type"), QStringLiteral("upload-required")}, {QStringLiteral("jobId"), submission->id},
-            {"inputRole", chat ? "image" : animation ? "end" : "reference"}, {"inputIndex", int(submission->inputs.size())}});
+            {"inputRole", chat ? "image" : animation ? "end" : masked ? "mask" : "reference"}, {"inputIndex", int(submission->inputs.size())}});
         return;
     }
     m_pendingUploads.remove(socket);
@@ -1098,7 +1164,10 @@ void NukleusDaemon::runActiveJob()
         request.diffusionModel = m_activeJob->diffusionModel;
         if (m_activeJob->operation == Operation::Edit || o.contains(QStringLiteral("inputCount")))
             request.referenceImagePaths = m_activeJob->inputPaths;
-        else if (o.value(QStringLiteral("hasInput")).toBool()) request.baseImagePath = m_activeJob->inputPaths.value(0);
+        else if (o.value(QStringLiteral("hasInput")).toBool()) {
+            request.baseImagePath = m_activeJob->inputPaths.value(0);
+            if (o.value(QStringLiteral("hasMask")).toBool()) request.maskImagePath = m_activeJob->inputPaths.value(1);
+        }
         if (!m_sdRunner || !m_sdRunner->runGeneration(request)) { sendError(m_activeJob->client, QStringLiteral("start-failed"), tr("Could not start generation"), m_activeJob->id); m_activeJob.reset(); startNextJob(); }
     } else if (m_activeJob->operation == Operation::Upscale) {
         m_activeJob->outputPath = m_activeJob->directory->filePath(QStringLiteral("result.png"));
@@ -1179,6 +1248,7 @@ void NukleusDaemon::sendCapabilities(QWebSocket *socket) const
     operations.append("model-routing");
     if (isImageReady()) {
         operations.append(QStringLiteral("image.generate"));
+        operations.append(QStringLiteral("image.generate.mask"));
         operations.append(QStringLiteral("image.upscale"));
         operations.append(QStringLiteral("image.edit"));
         operations.append(QStringLiteral("image.animate"));

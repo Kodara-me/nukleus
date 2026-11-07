@@ -226,6 +226,8 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
     if (!request.qualityId.isEmpty()) return {};
     if (!request.referenceImages.isEmpty() && (!request.baseImageData.isEmpty() || request.referenceImages.size() > 8
         || request.referenceImages.contains(QByteArray()))) return {};
+    if (!request.maskImageData.isEmpty()
+        && (request.baseImageData.isEmpty() || !request.referenceImages.isEmpty() || !canGenerateWithMask())) return {};
     QJsonObject options{{QStringLiteral("prompt"), request.prompt},
                               {QStringLiteral("negativePrompt"), request.negativePrompt},
                               {QStringLiteral("sampler"), request.sampler},
@@ -244,6 +246,10 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
     if (!request.referenceImages.isEmpty()) {
         options.insert("inputCount", int(request.referenceImages.size()));
         return submit(ImageOperation::Generate, options, request.referenceImages);
+    }
+    if (!request.maskImageData.isEmpty()) {
+        options.insert("hasMask", true);
+        return submit(ImageOperation::Generate, options, {request.baseImageData, request.maskImageData});
     }
     return submit(ImageOperation::Generate, options, request.baseImageData.isEmpty() ? QList<QByteArray>{} : QList<QByteArray>{request.baseImageData});
 }
@@ -361,6 +367,11 @@ bool ServiceClient::canPingPong() const
     return canAnimate() && m_capabilities.imageAnimatePingPong;
 }
 
+bool ServiceClient::canGenerateWithMask() const
+{
+    return m_authenticated && m_capabilities.imageGenerationMask;
+}
+
 bool ServiceClient::canAnimateMp4() const
 {
     return canAnimate() && m_capabilities.imageAnimateMp4;
@@ -439,7 +450,8 @@ void ServiceClient::handleTextMessage(const QString &message)
             operations.contains("text.chat"), chatEngines,
             operations.contains("text.chat.load") && operations.contains("text.chat.unload"),
             operations.contains("text.chat.images"), operations.contains("image.animate"),
-            operations.contains("image.animate.pingPong"), operations.contains("image.animate.mp4")});
+            operations.contains("image.animate.pingPong"), operations.contains("image.animate.mp4"),
+            operations.contains("image.generate.mask")});
         if (m_capabilities.modelRouting) requestModelRouting();
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
@@ -652,7 +664,8 @@ void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
         && m_capabilities.textChatImages == capabilities.textChatImages
         && m_capabilities.imageAnimate == capabilities.imageAnimate
         && m_capabilities.imageAnimatePingPong == capabilities.imageAnimatePingPong
-        && m_capabilities.imageAnimateMp4 == capabilities.imageAnimateMp4) return;
+        && m_capabilities.imageAnimateMp4 == capabilities.imageAnimateMp4
+        && m_capabilities.imageGenerationMask == capabilities.imageGenerationMask) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
 }

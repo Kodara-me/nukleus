@@ -350,6 +350,7 @@ an input upload. Invalid types or ranges return `invalid-request` correlated to
 | hasInput | Optional boolean; defaults to false |
 | baseImageStrength | Optional finite number 0–1; defaults to 0.55 |
 | inputCount | Optional integer 1–8 of reference images; not allowed with `hasInput: true` |
+| hasMask | Optional boolean; defaults to false; needs `hasInput: true`, not allowed with `inputCount` or on `image.edit` (see below) |
 
 With `inputCount`, the service sends one `upload-required` per reference image
 (`inputIndex` 0…n-1, role `reference`); the client answers each with one binary
@@ -357,6 +358,35 @@ frame in order, and sd-cli receives them as repeated `-r` arguments. Only models
 with `canEdit` (missing means true) understand them; for any other model the service
 rejects `inputCount` with `invalid-request`. SDK clients fill
 `ImageGenerationRequest::referenceImages`.
+
+### Masked image to image
+
+`capabilities.operations` includes `image.generate.mask` when the image backend is
+ready; a service without it rejects `hasMask` as an unknown option with
+`invalid-request`. With `hasInput: true` and `hasMask: true`, the service sends two
+`upload-required` messages: first the source (`inputRole` `source`), then the mask
+(`inputRole` `mask`, `inputIndex` 1), each answered with one binary frame, before the
+job is queued. sd-cli receives the source as `--init-img`, the mask as `--mask` and
+`baseImageStrength` as `--strength`; every other option is passed as for an unmasked
+image to image job.
+
+The mask is a PNG or JPEG of the same width and height as the source. White (255)
+marks the area to redraw and black (0) the area to keep; intermediate grey values are
+passed to the backend as given, and their effect is the backend's. The service does
+not composite the original pixels back outside the mask: the result is the backend's
+output at full size.
+
+`hasMask` that is not a boolean, `hasMask: true` without `hasInput: true` or with
+`inputCount`, and `hasMask` on `image.edit` are rejected with `invalid-request`
+before any upload is requested. A mask upload that is empty, larger than the image
+upload limit, not a PNG or JPEG, or of another size than the source is rejected with
+`invalid-image`, as is a source whose size the service cannot read (it reads sizes
+from the PNG or JPEG headers); no job is queued. Without `hasMask`, or with
+`hasMask: false`, image to image is unchanged: one upload, no mask. SDK clients fill
+`ImageGenerationRequest::maskImageData` next to `baseImageData`, and check
+`ServiceClient::canGenerateWithMask()` (`ServiceCapabilities::imageGenerationMask`);
+`submitGeneration` returns an empty job ID when the mask has no base image, comes with
+reference images, or the service does not report `image.generate.mask`.
 
 Automatic sampler/scheduler flags are omitted from the backend command. Positive
 Clip Skip values are forwarded; -1 omits the flag. CFG and image strength retain
