@@ -173,6 +173,7 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
     if (!request.baseImagePath.isEmpty()) {
         arguments.append({QStringLiteral("--init-img"), request.baseImagePath,
                           QStringLiteral("--strength"), QString::number(request.baseImageStrength, 'g', 17)});
+        if (!request.maskImagePath.isEmpty()) arguments.append({QStringLiteral("--mask"), request.maskImagePath});
     }
     if (request.clipSkip > 0) arguments.append({QStringLiteral("--clip-skip"), QString::number(request.clipSkip)});
     if (m_requestType != RequestType::None || m_executablePath.isEmpty()) {
@@ -357,6 +358,8 @@ void SdCliRunner::logGenerationStart(const GenerationRequest &request, const QSt
         qInfo().noquote() << QStringLiteral("[Nukleus][generation] Base image: %1").arg(request.baseImagePath);
         qInfo().noquote() << QStringLiteral("[Nukleus][generation] Base image strength: %1")
                                  .arg(request.baseImageStrength, 0, 'f', 2);
+        if (!request.maskImagePath.isEmpty())
+            qInfo().noquote() << QStringLiteral("[Nukleus][generation] Mask image: %1").arg(request.maskImagePath);
     }
     qInfo().noquote() << QStringLiteral("[Nukleus][sd-cli] Command:\n%1")
                              .arg(commandLine(arguments));

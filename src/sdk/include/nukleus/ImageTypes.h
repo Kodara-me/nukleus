@@ -91,6 +91,9 @@ struct ImageGenerationRequest
     int clipSkip = -1;
     int seed = -1;
     QByteArray baseImageData;
+    // Optional mask for image to image (PNG or JPEG, same size as baseImageData): white redraws, black keeps.
+    // Needs baseImageData, excludes referenceImages, and needs ServiceCapabilities::imageGenerationMask.
+    QByteArray maskImageData;
     QList<QByteArray> editImages;
     // Generation conditioning images (1–8), sent in order; exclusive with baseImageData.
     QList<QByteArray> referenceImages;
@@ -162,6 +165,7 @@ struct ServiceCapabilities
     bool imageAnimate = false; // image.animate turns an image into a video with an animation model.
     bool imageAnimatePingPong = false; // image.animate accepts pingPong (the service has ffmpeg).
     bool imageAnimateMp4 = false; // image.animate accepts container mp4 (the service has ffmpeg).
+    bool imageGenerationMask = false; // image.generate accepts a mask with the base image (image.generate.mask).
 };
 
 // Result of text.chat.load (load true) or text.chat.unload (load false).

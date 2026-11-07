@@ -31,7 +31,7 @@ public:
                 const QString type = message.value(QStringLiteral("type")).toString();
                 if (type == QStringLiteral("authenticate")) {
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"authenticated\"}"));
-                    socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\",\"image.upscale\",\"image.edit\",\"text.chat\",\"text.chat.load\",\"text.chat.unload\"],\"textChatEngines\":[\"server\",\"completion\"]}"));
+                    socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\",\"image.upscale\",\"image.edit\"%1,\"text.chat\",\"text.chat.load\",\"text.chat.unload\"],\"textChatEngines\":[\"server\",\"completion\"]}").arg(m_offerMask ? QStringLiteral(",\"image.generate.mask\"") : QString()));
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list.result\",\"categories\":[{\"category\":\"image-generation\",\"models\":[{\"id\":\"image-generation:test.safetensors\",\"name\":\"Test\",\"fileName\":\"test.safetensors\",\"bytes\":1,\"modelType\":\"diffusion\",\"explicitContent\":true,\"companionFiles\":{\"clip-l\":\"companions/test.safetensors/clip-l/clip_l.safetensors\"},\"companionFileName\":\"companions/test.safetensors/vae.safetensors\",\"companionRole\":\"vae\",\"displayName\":\"Test\"}]},{\"category\":\"upscaler\",\"models\":[{\"id\":\"upscaler:test.gguf\",\"name\":\"Test 2x\",\"fileName\":\"test.gguf\",\"bytes\":2,\"displayName\":\"Test 2x\"}]},{\"category\":\"llm-chat\",\"models\":[{\"id\":\"llm-chat:test.gguf\",\"name\":\"Test LLM\",\"fileName\":\"llm.gguf\",\"bytes\":3,\"companionFileName\":\"companions/llm.gguf/mmproj.gguf\",\"companionRole\":\"mmproj\",\"displayName\":\"Test LLM\"}]}]}"));
                 } else if (type == "models.configure") {
                     const QJsonObject reply{{"type", "models.configure.completed"}, {"id", message.value("id")}, {"model", QJsonObject{{"recommendedOptions", message.value("recommendedOptions")}}}};
@@ -58,7 +58,10 @@ public:
                         socket->sendTextMessage(QString::fromUtf8(QJsonDocument(reply).toJson(QJsonDocument::Compact)));
                     } else if (options.value("hasInput").toBool()) {
                         m_uploadJobs.insert(socket, jobId);
-                        socket->sendTextMessage(QStringLiteral("{\"type\":\"upload-required\",\"jobId\":\"%1\"}").arg(jobId));
+                        m_expectedUploads.insert(socket, options.value("hasMask").toBool() ? 2 : 1);
+                        socket->sendTextMessage(options.value("hasMask").toBool()
+                            ? QStringLiteral("{\"type\":\"upload-required\",\"jobId\":\"%1\",\"inputRole\":\"source\",\"inputIndex\":0}").arg(jobId)
+                            : QStringLiteral("{\"type\":\"upload-required\",\"jobId\":\"%1\"}").arg(jobId));
                     } else {
                         complete(socket, jobId, QByteArray("sdk-result"));
                     }
@@ -66,12 +69,21 @@ public:
             });
             connect(socket, &QWebSocket::binaryMessageReceived, this, [this, socket](const QByteArray &data) {
                 m_uploadedImages.append(data);
+                if (++m_receivedUploads[socket] < m_expectedUploads.value(socket, 1)) {
+                    // A masked job: the source arrived, the mask is next.
+                    socket->sendTextMessage(QStringLiteral("{\"type\":\"upload-required\",\"jobId\":\"%1\",\"inputRole\":\"mask\",\"inputIndex\":1}")
+                        .arg(m_uploadJobs.value(socket)));
+                    return;
+                }
+                m_receivedUploads.remove(socket);
+                m_expectedUploads.remove(socket);
                 const QString jobId = m_uploadJobs.take(socket);
                 complete(socket, jobId, data.isEmpty() ? QByteArray("sdk-result") : QByteArray("sdk-result"));
             });
         });
     }
 
+    void offerMask(bool offered) { m_offerMask = offered; }
     bool start() { return m_server.listen(QHostAddress::LocalHost); }
     QString errorString() const { return m_server.errorString(); }
     QUrl endpoint() const { return QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(m_server.serverPort())); }
@@ -93,6 +105,9 @@ private:
     QList<QJsonObject> m_messages;
     QHash<QWebSocket *, QString> m_uploadJobs;
     QList<QByteArray> m_uploadedImages;
+    QHash<QWebSocket *, int> m_expectedUploads;
+    QHash<QWebSocket *, int> m_receivedUploads;
+    bool m_offerMask = false;
 };
 }
 
@@ -171,6 +186,7 @@ private slots:
     void submitsBinaryInputAndReturnsBinaryOutput();
     void submitsTextChat();
     void supportsMultipleJobs();
+    void submitsMaskedGeneration();
     void installsModelWithCompanion();
     void installsModularCompanionsForExistingModel();
     void reportsConnectionFailure();
@@ -422,6 +438,63 @@ void ServiceSdkTest::supportsMultipleJobs()
     });
     QVERIFY(submitted != service.messages().cend());
     QCOMPARE(submitted->value(QStringLiteral("options")).toObject().value(QStringLiteral("clipSkip")).toInt(), 2);
+}
+
+void ServiceSdkTest::submitsMaskedGeneration()
+{
+    // R1, R7: a service without image.generate.mask gets nothing for a masked request.
+    {
+        FakeSdkService service; QVERIFY2(service.start(), qPrintable(service.errorString()));
+        Nukleus::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+        QTRY_VERIFY(client.modelListAvailable());
+        QVERIFY(!client.capabilities().imageGenerationMask);
+        QVERIFY(!client.canGenerateWithMask());
+        Nukleus::ImageGenerationRequest request; request.prompt = QStringLiteral("p");
+        request.modelId = QStringLiteral("image-generation:test.safetensors");
+        request.baseImageData = QByteArray("source"); request.maskImageData = QByteArray("mask");
+        const int before = int(service.messages().size());
+        QVERIFY(client.submitGeneration(request).isEmpty());
+        QCOMPARE(int(service.messages().size()), before);
+    }
+    FakeSdkService service; service.offerMask(true);
+    QVERIFY2(service.start(), qPrintable(service.errorString()));
+    Nukleus::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+    QTRY_VERIFY(client.modelListAvailable());
+    QTRY_VERIFY(client.canGenerateWithMask());
+    QVERIFY(client.capabilities().imageGenerationMask);
+    QSignalSpy finished(&client, &Nukleus::ServiceClient::imageJobFinished);
+    Nukleus::ImageGenerationRequest request; request.prompt = QStringLiteral("p");
+    request.modelId = QStringLiteral("image-generation:test.safetensors");
+    // R7: a mask needs a base image and excludes reference images; nothing is sent otherwise.
+    const int before = int(service.messages().size());
+    Nukleus::ImageGenerationRequest maskOnly = request; maskOnly.maskImageData = QByteArray("mask");
+    QVERIFY(client.submitGeneration(maskOnly).isEmpty());
+    Nukleus::ImageGenerationRequest withReferences = request;
+    withReferences.baseImageData = QByteArray("source"); withReferences.maskImageData = QByteArray("mask");
+    withReferences.referenceImages = {QByteArray("reference")};
+    QVERIFY(client.submitGeneration(withReferences).isEmpty());
+    QCOMPARE(int(service.messages().size()), before);
+    // R7: the mask is announced with hasMask and uploaded after the source.
+    request.baseImageData = QByteArray("source"); request.maskImageData = QByteArray("mask");
+    const QString jobId = client.submitGeneration(request);
+    QVERIFY(!jobId.isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    const auto submit = std::find_if(service.messages().cbegin(), service.messages().cend(), [&](const QJsonObject &message) {
+        return message.value("type").toString() == QStringLiteral("submit") && message.value("jobId").toString() == jobId; });
+    QVERIFY(submit != service.messages().cend());
+    QCOMPARE(submit->value("options").toObject().value("hasInput").toBool(), true);
+    QCOMPARE(submit->value("options").toObject().value("hasMask").toBool(), true);
+    QCOMPARE(service.uploadedImages(), (QList<QByteArray>{"source", "mask"}));
+    // Without a mask, hasMask is not sent and one upload is made.
+    request.maskImageData.clear();
+    const QString plainId = client.submitGeneration(request);
+    QVERIFY(!plainId.isEmpty());
+    QTRY_COMPARE(finished.count(), 2);
+    const auto plain = std::find_if(service.messages().cbegin(), service.messages().cend(), [&](const QJsonObject &message) {
+        return message.value("jobId").toString() == plainId; });
+    QVERIFY(plain != service.messages().cend());
+    QVERIFY(!plain->value("options").toObject().contains("hasMask"));
+    QCOMPARE(service.uploadedImages().size(), 3);
 }
 
 void ServiceSdkTest::reportsConnectionFailure()
