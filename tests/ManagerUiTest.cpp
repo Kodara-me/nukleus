@@ -933,6 +933,8 @@ class ManagerUiTest final : public QObject
         QVERIFY(!files.contains("lora-high-noise"));
         // The T5-XXL companion has its own group in the Companion branch.
         QVERIFY(!tree->model()->match(root, Qt::UserRole + 3, "t5xxl", 1, Qt::MatchExactly | Qt::MatchRecursive).isEmpty());
+        // So does the LoRA subtype (R3).
+        QVERIFY(!tree->model()->match(root, Qt::UserRole + 3, "lora", 1, Qt::MatchExactly | Qt::MatchRecursive).isEmpty());
         tree->setCurrentIndex(model);
         bool missingShown = false;
         for (auto *label : window.findChildren<QLabel *>()) missingShown = missingShown || label->text().contains("Missing files: Low-noise LoRA");
@@ -1396,6 +1398,27 @@ class ManagerUiTest final : public QObject
         QCOMPARE(installRequests().size(), 1);
         QCOMPARE(installRequests().last().value("category").toString(), QString("companion"));
         QCOMPARE(installRequests().last().value("recommendedOptions").toObject(), (QJsonObject{{"subtype", "controlnet"}}));
+    }
+    void offersLoraCompanionSubtype_R3()
+    {
+        ModelOptionsWidget form;
+        form.setOptions("companion");
+        auto *subtype = form.findChild<QComboBox *>("subtype");
+        QVERIFY(subtype);
+        const int index = subtype->findData("lora");
+        QVERIFY(index >= 0);
+        subtype->setCurrentIndex(index);
+        QCOMPARE(form.options().value("subtype").toString(), QString("lora"));
+        QVERIFY(Nukleus::Protocol::validateModelOptions("companion", form.options()));
+    }
+    void cliInstallsLoraCompanion_R3()
+    {
+        m_completeInstalls = true;
+        QCOMPARE(runCli({"add", "https://example.test/clara.safetensors", "--category", "companion", "--companion-type", "lora",
+                         "--display-name", "Clara"}), 0);
+        QCOMPARE(installRequests().size(), 1);
+        QCOMPARE(installRequests().last().value("category").toString(), QString("companion"));
+        QCOMPARE(installRequests().last().value("recommendedOptions").toObject(), (QJsonObject{{"subtype", "lora"}}));
     }
 };
 QTEST_MAIN(ManagerUiTest)

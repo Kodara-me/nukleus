@@ -270,7 +270,7 @@ when provided, the object must contain exactly the category's complete fields:
 | image-generation | `width` and `height`: identical integers 256–2048, multiples of 256; `steps`: integer 1–200; `cfgScale`: number 0–100; `sampler` and `scheduler`: allowed strings; `clipSkip`: -1 or integer 1–12; optional `promptFormat`: `natural`, `phrases` or `tags` (default `phrases`) |
 | llm-chat | `temperature`: number 0–2; `topP`: number >0 and ≤1; `contextLength`: integer 256–131072; `maxTokens`: integer 1–contextLength; optional booleans `canBeTextEncoder`, `defaultPromptEnhancer`, `defaultPromptTranslator` and `defaultImageDescriber` (default false) |
 | upscaler | No options: empty object only. No explicit-content classification. |
-| companion | `subtype`: exactly `vae`, `mmproj`, `t5xxl` or `controlnet`; MMPROJ requires GGUF; T5-XXL and ControlNet require GGUF or safetensors. |
+| companion | `subtype`: exactly `vae`, `mmproj`, `t5xxl`, `controlnet` or `lora`; MMPROJ requires GGUF; T5-XXL, ControlNet and LoRA require GGUF or safetensors. |
 | animation | Required for new installs: `vaeModelId` (an installed `vae` companion) and `textEncoderModelId` (an installed `t5xxl` companion), both nonblank strings; plus any subset of the [image.animate option table](#animating-an-image-imageanimate) as model defaults, validated as in requests. Unlike other recommendations, these defaults are applied to `image.animate` jobs. |
 
 Samplers: empty (Automatic), `euler`, `euler_a`, `heun`, `dpm2`, `dpm++2m`, `lcm`.
@@ -289,6 +289,28 @@ that matches the architecture of the checkpoint it is used with, as a safetensor
 or GGUF file. ControlNet Union, Control-LoRA and T2I-Adapter models are not
 supported, and one ControlNet applies to a job. A ControlNet is not attached to a
 checkpoint: it is installed once as a shared companion and chosen per job.
+
+A `lora` companion holds LoRA weights, as a safetensors or GGUF file. Like a
+ControlNet, it is installed once as a shared companion, not attached to a
+checkpoint. The backend finds a LoRA by the base name of its file (the file name
+without its last extension, so `clara.v2` for `clara.v2.safetensors`) in the
+companion directory, so `models.install` and `models.configure` reject, with
+`invalid-request`, and leave the catalog unchanged for:
+
+- a `lora` whose base name contains `<`, `>`, `:` or `|`;
+- a `lora` whose base name equals, ignoring case, that of another installed
+  companion;
+- any companion whose base name equals, ignoring case, that of an installed
+  `lora`.
+
+The rule applies to the name the file is installed under: when a download is
+renamed with a numeric suffix because its name is taken, the suffixed name is the
+one checked. The catalog only knows its own files. The backend reads the whole
+companion directory, so a file placed there by another application, with the same
+base name as a LoRA and another extension the backend accepts (such as `.ckpt` or
+`.pt`), could be loaded instead of the LoRA: keep such files out of the directory.
+The service does not check that a LoRA's layers match the checkpoint it is used
+with: the client picks LoRAs trained for the checkpoint's architecture.
 
 To replace recommendations on an installed model:
 

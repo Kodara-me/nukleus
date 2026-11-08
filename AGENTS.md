@@ -299,8 +299,10 @@ Removed conditioning/extraction APIs and model categories must not be restored.
 Existing user model directories and packages are retained on disk.
 
 Companion is a dedicated model category with recommendedOptions.subtype equal to
-vae, mmproj or t5xxl. VAE accepts safetensors/ckpt/GGUF; MMPROJ requires GGUF;
-T5-XXL (animation text encoder) accepts GGUF/safetensors. Standalone
+vae, mmproj, t5xxl, controlnet or lora. VAE accepts safetensors/ckpt/GGUF; MMPROJ requires GGUF;
+T5-XXL (animation text encoder), ControlNet and LoRA accept GGUF/safetensors. A lora base
+name (file name without its last extension) cannot contain <, >, : or |, and no other
+companion may share it, ignoring case. Standalone
 companions have required names and no explicit-content classification.
 LLM install/configure accepts optional string mmprojModelId: omission preserves,
 empty clears, and nonempty must reference an installed mmproj subtype. Save this

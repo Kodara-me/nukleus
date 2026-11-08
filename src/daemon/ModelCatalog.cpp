@@ -4,6 +4,7 @@
 #include "ServicePaths.h"
 #include <nukleus/ModelOptions.h>
 
+#include <QCoreApplication>
 #include <QDebug>
 #include <QDir>
 #include <QFile>
@@ -14,6 +15,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPointer>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QSignalBlocker>
 #include <QTimer>
@@ -68,6 +70,24 @@ bool isAnimationSourceFile(const QString &fileName)
 {
     const auto suffix = QFileInfo(fileName).suffix().toLower();
     return suffix == QStringLiteral("gguf") || suffix == QStringLiteral("safetensors");
+}
+
+// sd-cli resolves <lora:name:weight> to a file in the companion directory by base name.
+// Keep that unambiguous: a LoRA base name cannot break the tag syntax, and no other
+// companion shares a base name (ignoring case) with a LoRA. selfFileName is excluded.
+QString loraNameError(const QString &fileName, const QString &subtype, const QList<ModelInfo> &companions, const QString &selfFileName)
+{
+    const auto baseName = QFileInfo(fileName).completeBaseName();
+    const bool isLora = subtype == QStringLiteral("lora");
+    if (isLora && baseName.contains(QRegularExpression(QStringLiteral("[<>:|]"))))
+        return QCoreApplication::translate("ModelCatalog", "LoRA companion file names cannot contain <, >, : or |");
+    for (const auto &other : companions) {
+        if (other.fileName == selfFileName) continue;
+        if (QFileInfo(other.fileName).completeBaseName().compare(baseName, Qt::CaseInsensitive) != 0) continue;
+        if (isLora || other.recommendedOptions.value(QStringLiteral("subtype")) == QStringLiteral("lora"))
+            return QCoreApplication::translate("ModelCatalog", "A LoRA companion cannot share its file name, ignoring case and extension, with another companion");
+    }
+    return {};
 }
 
 bool isHuggingFaceHost(const QString &host)
@@ -386,12 +406,19 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
             return fail(tr("T5-XXL companions require GGUF or safetensors files"));
         if (request.category == ModelCategory::Companion && subtype == "controlnet" && !isAnimationSourceFile(job->fileName))
             return fail(tr("ControlNet companions require GGUF or safetensors files"));
+        if (request.category == ModelCategory::Companion && subtype == "lora" && !isAnimationSourceFile(job->fileName))
+            return fail(tr("LoRA companions require GGUF or safetensors files"));
         if (!acceptsFileName(request.category, job->fileName)) return fail(tr("The URL filename is not supported for this model category"));
         job->finalPath = QDir(directoryPath(request.category)).filePath(job->fileName);
         const QFileInfo original(job->fileName);
         for (int suffix = 2; QFileInfo::exists(job->finalPath) || QFileInfo::exists(job->finalPath + ".part") || metadata->contains(job->fileName); ++suffix) {
             job->fileName = QStringLiteral("%1-%2.%3").arg(original.completeBaseName()).arg(suffix).arg(original.suffix());
             job->finalPath = QDir(directoryPath(request.category)).filePath(job->fileName);
+        }
+        // Checked on the name the file is installed under, after any numeric suffix.
+        if (request.category == ModelCategory::Companion) {
+            const auto nameError = loraNameError(job->fileName, subtype.toString(), models(ModelCategory::Companion), {});
+            if (!nameError.isEmpty()) return fail(nameError);
         }
         job->files.append({"primary", url, job->fileName, job->finalPath, job->finalPath + ".part"});
     }
@@ -474,6 +501,17 @@ bool ModelCatalog::configure(const QString &id, const QJsonObject &options, QStr
     if (category == ModelCategory::Companion && options.value("subtype") == "controlnet" && !isAnimationSourceFile(info->fileName)) {
         if (error) *error = tr("ControlNet companions require GGUF or safetensors files");
         return false;
+    }
+    if (category == ModelCategory::Companion && options.value("subtype") == "lora" && !isAnimationSourceFile(info->fileName)) {
+        if (error) *error = tr("LoRA companions require GGUF or safetensors files");
+        return false;
+    }
+    if (category == ModelCategory::Companion) {
+        const auto nameError = loraNameError(info->fileName, options.value("subtype").toString(), models(ModelCategory::Companion), info->fileName);
+        if (!nameError.isEmpty()) {
+            if (error) *error = nameError;
+            return false;
+        }
     }
     const auto name = displayName.value_or(info->displayName).trimmed();
     if (name.isEmpty() || name.size() > 256) { if (error) *error = tr("A display name of 1–256 characters is required"); return false; }
