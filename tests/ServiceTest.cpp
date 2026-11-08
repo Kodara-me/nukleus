@@ -142,6 +142,8 @@ private slots:
     void separatesWeightsFromCatalogue();
     void animationInstallsAllFiles_R1_R2_R5_R9();
     void animationListsOverProtocol_R1_R7_R9();
+    void controlNetCompanionIsCataloged_R1();
+    void controlNetCompanionIsAcceptedByOptions_R2();
     void animationRollsBackCanceledAndFailedInstalls_R3();
     void animationRequiresMatchingCompanions_R4_R5();
     void animationAttachesAndRemovesFiles_R6_R7();
@@ -3241,6 +3243,66 @@ void ServiceTest::animationListsOverProtocol_R1_R7_R9()
     entry = listed();
     QCOMPARE(entry.value("missingFiles").toArray(), QJsonArray{"high-noise"});
     QVERIFY(entry.value("explicitContent").toBool());
+}
+
+void ServiceTest::controlNetCompanionIsCataloged_R1()
+{
+    TestHttpServer server("weights");
+    QVERIFY(server.start());
+    QTemporaryDir directory;
+    NukleusConfiguration configuration;
+    configuration.port = 0;
+    configuration.modelRootPath = directory.path();
+    NukleusDaemon daemon(configuration);
+    QString error;
+    QVERIFY2(daemon.start(&error), qPrintable(error));
+    Nukleus::ServiceClient client;
+    client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
+    client.connectToService();
+    QTRY_VERIFY(client.modelListAvailable());
+    const QJsonObject controlnet{{"subtype", "controlnet"}};
+    QVERIFY(!client.installModel(Nukleus::ModelCategory::Companion, server.url("openpose.safetensors"), {}, controlnet,
+        {}, "checkpoint", {}, {}, QString("OpenPose")).isEmpty());
+    QTRY_COMPARE(client.models(Nukleus::ModelCategory::Companion).size(), 1);
+    QVERIFY(!client.installModel(Nukleus::ModelCategory::Companion, server.url("depth.gguf"), {}, controlnet,
+        {}, "checkpoint", {}, {}, QString("Depth")).isEmpty());
+    QTRY_COMPARE(client.models(Nukleus::ModelCategory::Companion).size(), 2);
+
+    QWebSocket socket;
+    QList<QJsonObject> messages;
+    connect(&socket, &QWebSocket::textMessageReceived, this, [&](const QString &text) {
+        messages.append(QJsonDocument::fromJson(text.toUtf8()).object());
+    });
+    socket.open(client.endpoint());
+    QTRY_COMPARE(socket.state(), QAbstractSocket::ConnectedState);
+    socket.sendTextMessage("{\"type\":\"authenticate\",\"version\":3}");
+    QTRY_VERIFY(messages.size() >= 2);
+    messages.clear();
+    socket.sendTextMessage("{\"type\":\"models.list\"}");
+    QTRY_VERIFY(!messages.isEmpty());
+    QStringList subtypes;
+    for (const auto &category : messages.first().value("categories").toArray())
+        if (category.toObject().value("category") == "companion")
+            for (const auto &model : category.toObject().value("models").toArray())
+                subtypes.append(model.toObject().value("recommendedOptions").toObject().value("subtype").toString());
+    QCOMPARE(subtypes, (QStringList{"controlnet", "controlnet"}));
+
+    // Another file type is refused at install and at configure.
+    QTemporaryDir catalogDirectory;
+    ModelCatalog catalog(catalogDirectory.path(), true);
+    QVERIFY(installCompanion(catalog, server.url("openpose.safetensors"), "controlnet"));
+    QVERIFY(!installCompanion(catalog, server.url("control.ckpt"), "controlnet"));
+    QVERIFY(!installCompanion(catalog, server.url("control.bin"), "controlnet"));
+    QVERIFY(installCompanion(catalog, server.url("old_vae.ckpt"), "vae"));
+    QVERIFY(!catalog.configure("companion:old_vae.ckpt", controlnet, &error, {}, QString("Old VAE")));
+    QCOMPARE(error, QString("ControlNet companions require GGUF or safetensors files"));
+    QVERIFY(catalog.configure("companion:openpose.safetensors", controlnet, &error, {}, QString("OpenPose")));
+}
+
+void ServiceTest::controlNetCompanionIsAcceptedByOptions_R2()
+{
+    QVERIFY(Nukleus::Protocol::validateModelOptions("companion", {{"subtype", "controlnet"}}));
+    QVERIFY(!Nukleus::Protocol::validateModelOptions("companion", {{"subtype", "control-net"}}));
 }
 
 void ServiceTest::animationRollsBackCanceledAndFailedInstalls_R3()

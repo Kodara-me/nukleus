@@ -1376,6 +1376,27 @@ class ManagerUiTest final : public QObject
         QCOMPARE(runCli({"attach", "animation:wan-low.gguf"}), 2);
         QVERIFY(installRequests().isEmpty());
     }
+    void offersControlNetCompanionSubtype_R2()
+    {
+        ModelOptionsWidget form;
+        form.setOptions("companion");
+        auto *subtype = form.findChild<QComboBox *>("subtype");
+        QVERIFY(subtype);
+        const int index = subtype->findData("controlnet");
+        QVERIFY(index >= 0);
+        subtype->setCurrentIndex(index);
+        QCOMPARE(form.options().value("subtype").toString(), QString("controlnet"));
+        QVERIFY(Nukleus::Protocol::validateModelOptions("companion", form.options()));
+    }
+    void cliInstallsControlNetCompanion_R2()
+    {
+        m_completeInstalls = true;
+        QCOMPARE(runCli({"add", "https://example.test/openpose.safetensors", "--category", "companion", "--companion-type", "controlnet",
+                         "--display-name", "OpenPose"}), 0);
+        QCOMPARE(installRequests().size(), 1);
+        QCOMPARE(installRequests().last().value("category").toString(), QString("companion"));
+        QCOMPARE(installRequests().last().value("recommendedOptions").toObject(), (QJsonObject{{"subtype", "controlnet"}}));
+    }
 };
 QTEST_MAIN(ManagerUiTest)
 #include "ManagerUiTest.moc"

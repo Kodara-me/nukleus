@@ -134,6 +134,7 @@ void ModelOptionsWidget::setOptions(const QString &category, const QJsonObject &
         subtype->addItem(tr("VAE"), "vae");
         subtype->addItem(tr("MMPROJ (vision projector)"), "mmproj");
         subtype->addItem(tr("T5-XXL (animation text encoder)"), "t5xxl");
+        subtype->addItem(tr("ControlNet"), "controlnet");
         subtype->setCurrentIndex(subtype->findData(values.value("subtype").toString()));
         connect(subtype, &QComboBox::currentIndexChanged, this, &ModelOptionsWidget::optionsChanged);
         add("subtype", tr("Type:"), subtype);

@@ -86,7 +86,7 @@ bool validateModelOptions(const QString &category, const QJsonObject &options, Q
             !number("maxTokens", 1, options.value("contextLength").toDouble(), true))
             return fail();
     }
-    else if (category == "companion" && !QStringList{"vae", "mmproj", "t5xxl"}.contains(options.value("subtype").toString()))
+    else if (category == "companion" && !QStringList{"vae", "mmproj", "t5xxl", "controlnet"}.contains(options.value("subtype").toString()))
         return fail();
     else if (category == "animation")
     {
