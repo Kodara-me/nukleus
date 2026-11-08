@@ -49,7 +49,7 @@ namespace ManagerCli
 void addOptions(QCommandLineParser &parser)
 {
     parser.addOption({QStringLiteral("category"), QStringLiteral("Model category for add."), QStringLiteral("category")});
-    parser.addOption({"companion-type", "Companion subtype: vae, mmproj or t5xxl.", "type", "vae"});
+    parser.addOption({"companion-type", "Companion subtype: vae, mmproj, t5xxl or controlnet.", "type", "vae"});
     parser.addOption({"mmproj-model", "Installed MMPROJ companion ID for an LLM model; empty clears.", "id"});
     parser.addOption({"display-name", "Required display name for add; optional rename for attach.", "name"});
     parser.addOption({QStringLiteral("mmproj"), QStringLiteral("Optional mmproj URL for image add/attach."), QStringLiteral("url")});

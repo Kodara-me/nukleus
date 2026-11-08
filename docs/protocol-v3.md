@@ -270,7 +270,7 @@ when provided, the object must contain exactly the category's complete fields:
 | image-generation | `width` and `height`: identical integers 256–2048, multiples of 256; `steps`: integer 1–200; `cfgScale`: number 0–100; `sampler` and `scheduler`: allowed strings; `clipSkip`: -1 or integer 1–12; optional `promptFormat`: `natural`, `phrases` or `tags` (default `phrases`) |
 | llm-chat | `temperature`: number 0–2; `topP`: number >0 and ≤1; `contextLength`: integer 256–131072; `maxTokens`: integer 1–contextLength; optional booleans `canBeTextEncoder`, `defaultPromptEnhancer`, `defaultPromptTranslator` and `defaultImageDescriber` (default false) |
 | upscaler | No options: empty object only. No explicit-content classification. |
-| companion | `subtype`: exactly `vae`, `mmproj` or `t5xxl`; MMPROJ requires GGUF; T5-XXL requires GGUF or safetensors. |
+| companion | `subtype`: exactly `vae`, `mmproj`, `t5xxl` or `controlnet`; MMPROJ requires GGUF; T5-XXL and ControlNet require GGUF or safetensors. |
 | animation | Required for new installs: `vaeModelId` (an installed `vae` companion) and `textEncoderModelId` (an installed `t5xxl` companion), both nonblank strings; plus any subset of the [image.animate option table](#animating-an-image-imageanimate) as model defaults, validated as in requests. Unlike other recommendations, these defaults are applied to `image.animate` jobs. |
 
 Samplers: empty (Automatic), `euler`, `euler_a`, `heun`, `dpm2`, `dpm++2m`, `lcm`.
@@ -282,6 +282,13 @@ from the shared Protocol API; the service does not infer model architecture.
 (Illustrious). It is set manually and never changes execution; SDK
 `ModelInfo::promptFormat()` returns `phrases` when it is absent.
 Unknown fields, missing fields, wrong types and out-of-range values are rejected.
+
+A `controlnet` companion holds ControlNet weights for guiding image generation.
+The backend loads standard ControlNet weights only: an SDXL or SD 1.5 ControlNet
+that matches the architecture of the checkpoint it is used with, as a safetensors
+or GGUF file. ControlNet Union, Control-LoRA and T2I-Adapter models are not
+supported, and one ControlNet applies to a job. A ControlNet is not attached to a
+checkpoint: it is installed once as a shared companion and chosen per job.
 
 To replace recommendations on an installed model:
 

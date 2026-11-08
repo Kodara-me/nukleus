@@ -384,6 +384,8 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
             && QFileInfo(job->fileName).suffix().toLower() != "gguf") return fail(tr("MMPROJ companions require GGUF files"));
         if (request.category == ModelCategory::Companion && subtype == "t5xxl" && !isAnimationSourceFile(job->fileName))
             return fail(tr("T5-XXL companions require GGUF or safetensors files"));
+        if (request.category == ModelCategory::Companion && subtype == "controlnet" && !isAnimationSourceFile(job->fileName))
+            return fail(tr("ControlNet companions require GGUF or safetensors files"));
         if (!acceptsFileName(request.category, job->fileName)) return fail(tr("The URL filename is not supported for this model category"));
         job->finalPath = QDir(directoryPath(request.category)).filePath(job->fileName);
         const QFileInfo original(job->fileName);
@@ -467,6 +469,10 @@ bool ModelCatalog::configure(const QString &id, const QJsonObject &options, QStr
     }
     if (category == ModelCategory::Companion && options.value("subtype") == "t5xxl" && !isAnimationSourceFile(info->fileName)) {
         if (error) *error = tr("T5-XXL companions require GGUF or safetensors files");
+        return false;
+    }
+    if (category == ModelCategory::Companion && options.value("subtype") == "controlnet" && !isAnimationSourceFile(info->fileName)) {
+        if (error) *error = tr("ControlNet companions require GGUF or safetensors files");
         return false;
     }
     const auto name = displayName.value_or(info->displayName).trimmed();
