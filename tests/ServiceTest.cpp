@@ -144,6 +144,9 @@ private slots:
     void animationListsOverProtocol_R1_R7_R9();
     void controlNetCompanionIsCataloged_R1();
     void controlNetCompanionIsAcceptedByOptions_R2();
+    void loraCompanionIsCataloged_R1();
+    void loraCompanionNamesAreUnambiguous_R2();
+    void loraCompanionIsAcceptedByOptions_R3();
     void animationRollsBackCanceledAndFailedInstalls_R3();
     void animationRequiresMatchingCompanions_R4_R5();
     void animationAttachesAndRemovesFiles_R6_R7();
@@ -3510,6 +3513,126 @@ void ServiceTest::controlNetCompanionIsAcceptedByOptions_R2()
 {
     QVERIFY(Nukleus::Protocol::validateModelOptions("companion", {{"subtype", "controlnet"}}));
     QVERIFY(!Nukleus::Protocol::validateModelOptions("companion", {{"subtype", "control-net"}}));
+}
+
+void ServiceTest::loraCompanionIsCataloged_R1()
+{
+    TestHttpServer server("weights");
+    QVERIFY(server.start());
+    QTemporaryDir directory;
+    NukleusConfiguration configuration;
+    configuration.port = 0;
+    configuration.modelRootPath = directory.path();
+    NukleusDaemon daemon(configuration);
+    QString error;
+    QVERIFY2(daemon.start(&error), qPrintable(error));
+    Nukleus::ServiceClient client;
+    client.setConfiguration(QUrl(QString("ws://127.0.0.1:%1").arg(daemon.serverPort())), {});
+    client.connectToService();
+    QTRY_VERIFY(client.modelListAvailable());
+    const QJsonObject lora{{"subtype", "lora"}};
+    QVERIFY(!client.installModel(Nukleus::ModelCategory::Companion, server.url("clara.safetensors"), {}, lora,
+        {}, "checkpoint", {}, {}, QString("Clara")).isEmpty());
+    QTRY_COMPARE(client.models(Nukleus::ModelCategory::Companion).size(), 1);
+    QVERIFY(!client.installModel(Nukleus::ModelCategory::Companion, server.url("alex.gguf"), {}, lora,
+        {}, "checkpoint", {}, {}, QString("Alex")).isEmpty());
+    QTRY_COMPARE(client.models(Nukleus::ModelCategory::Companion).size(), 2);
+
+    QWebSocket socket;
+    QList<QJsonObject> messages;
+    connect(&socket, &QWebSocket::textMessageReceived, this, [&](const QString &text) {
+        messages.append(QJsonDocument::fromJson(text.toUtf8()).object());
+    });
+    socket.open(client.endpoint());
+    QTRY_COMPARE(socket.state(), QAbstractSocket::ConnectedState);
+    socket.sendTextMessage("{\"type\":\"authenticate\",\"version\":3}");
+    QTRY_VERIFY(messages.size() >= 2);
+    messages.clear();
+    socket.sendTextMessage("{\"type\":\"models.list\"}");
+    QTRY_VERIFY(!messages.isEmpty());
+    QStringList subtypes;
+    for (const auto &category : messages.first().value("categories").toArray())
+        if (category.toObject().value("category") == "companion")
+            for (const auto &model : category.toObject().value("models").toArray())
+                subtypes.append(model.toObject().value("recommendedOptions").toObject().value("subtype").toString());
+    QCOMPARE(subtypes, (QStringList{"lora", "lora"}));
+
+    // Another file type is refused at install and at configure.
+    QTemporaryDir catalogDirectory;
+    ModelCatalog catalog(catalogDirectory.path(), true);
+    QVERIFY(installCompanion(catalog, server.url("clara.safetensors"), "lora"));
+    QVERIFY(installCompanion(catalog, server.url("alex.gguf"), "lora"));
+    QVERIFY(!installCompanion(catalog, server.url("jade.ckpt"), "lora"));
+    QVERIFY(!installCompanion(catalog, server.url("jade.bin"), "lora"));
+    QVERIFY(installCompanion(catalog, server.url("old_vae.ckpt"), "vae"));
+    QVERIFY(!catalog.configure("companion:old_vae.ckpt", lora, &error, {}, QString("Old VAE")));
+    QCOMPARE(error, QString("LoRA companions require GGUF or safetensors files"));
+    QVERIFY(catalog.configure("companion:clara.safetensors", lora, &error, {}, QString("Clara")));
+}
+
+void ServiceTest::loraCompanionNamesAreUnambiguous_R2()
+{
+    TestHttpServer server("weights");
+    QVERIFY(server.start());
+    QTemporaryDir catalogDirectory;
+    ModelCatalog catalog(catalogDirectory.path(), true);
+    const auto ids = [&catalog] {
+        QStringList result;
+        for (const auto &model : catalog.models(ModelCategory::Companion)) result.append(model.id);
+        result.sort();
+        return result;
+    };
+    const auto subtypeOf = [&catalog](const QString &id) {
+        return catalog.model(ModelCategory::Companion, id)->recommendedOptions.value("subtype").toString();
+    };
+    QString error;
+
+    // Characters that break the <lora:name:weight> tag.
+    for (const auto &name : {"a%3Cb.safetensors", "a%3Eb.safetensors", "a%3Ab.safetensors", "a%7Cb.safetensors"}) {
+        ModelInstallRequest request;
+        request.installId = QString("lora-") + name;
+        request.category = ModelCategory::Companion;
+        request.url = server.url(name);
+        request.displayName = "LoRA";
+        request.recommendedOptions = QJsonObject{{"subtype", "lora"}};
+        QVERIFY2(!catalog.install(request, &error), name);
+        // On Windows, "a:b" is not a plain file name and is refused before the base name rule.
+        if (!QString(name).contains("%3A")) QCOMPARE(error, QString("LoRA companion file names cannot contain <, >, : or |"));
+    }
+    QVERIFY(ids().isEmpty());
+    // The base name is everything before the last dot.
+    QVERIFY(installCompanion(catalog, server.url("vae1.safetensors"), "vae"));
+    QVERIFY(installCompanion(catalog, server.url("clara.v2.safetensors"), "lora"));
+    QCOMPARE(ids(), (QStringList{"companion:clara.v2.safetensors", "companion:vae1.safetensors"}));
+
+    // A LoRA cannot share a base name with another companion, in any letter case.
+    QVERIFY(!installCompanion(catalog, server.url("VAE1.gguf"), "lora"));
+    QVERIFY(!installCompanion(catalog, server.url("CLARA.v2.gguf"), "lora"));
+    // Another companion cannot share a base name with a LoRA, in any letter case.
+    QVERIFY(!installCompanion(catalog, server.url("Clara.V2.ckpt"), "vae"));
+    QVERIFY(!installCompanion(catalog, server.url("clara.v2.gguf"), "mmproj"));
+    // A shorter base name is not the same name.
+    QVERIFY(installCompanion(catalog, server.url("clara.safetensors"), "vae"));
+    QCOMPARE(ids().size(), 3);
+
+    // A name that is taken is suffixed, and the installed name is the one checked.
+    QVERIFY(installCompanion(catalog, server.url("clara.v2.safetensors"), "lora"));
+    QVERIFY(catalog.model(ModelCategory::Companion, "companion:clara.v2-2.safetensors"));
+
+    // Configure applies the same rules and leaves the catalog unchanged.
+    QVERIFY(installCompanion(catalog, server.url("alex.safetensors"), "vae"));
+    QVERIFY(installCompanion(catalog, server.url("ALEX.ckpt"), "vae"));
+    QVERIFY(!catalog.configure("companion:alex.safetensors", {{"subtype", "lora"}}, &error, {}, QString("Alex")));
+    QVERIFY(!error.isEmpty());
+    QCOMPARE(subtypeOf("companion:alex.safetensors"), QString("vae"));
+    QVERIFY(catalog.configure("companion:clara.safetensors", {{"subtype", "vae"}}, &error, {}, QString("Clara")));
+    QVERIFY(catalog.configure("companion:clara.v2.safetensors", {{"subtype", "lora"}}, &error, {}, QString("Clara")));
+}
+
+void ServiceTest::loraCompanionIsAcceptedByOptions_R3()
+{
+    QVERIFY(Nukleus::Protocol::validateModelOptions("companion", {{"subtype", "lora"}}));
+    QVERIFY(!Nukleus::Protocol::validateModelOptions("companion", {{"subtype", "LoRA"}}));
 }
 
 void ServiceTest::animationRollsBackCanceledAndFailedInstalls_R3()

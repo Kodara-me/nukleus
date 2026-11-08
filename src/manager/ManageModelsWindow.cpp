@@ -280,10 +280,11 @@ void ManageModelsWindow::populateModels()
         root->appendRow(branch);
         QHash<QString, QStandardItem*> subtypeBranches;
         if (category.first == "companion") {
-            for (const auto& subtype : {QString("vae"), QString("mmproj"), QString("t5xxl"), QString("controlnet")}) {
+            for (const auto& subtype : {QString("vae"), QString("mmproj"), QString("t5xxl"), QString("controlnet"), QString("lora")}) {
                 auto* group = new QStandardItem(subtype == "vae" ? tr("VAE")
                     : subtype == "mmproj" ? tr("MMPROJ (vision projector)")
-                    : subtype == "controlnet" ? tr("ControlNet") : tr("T5-XXL (animation text encoder)"));
+                    : subtype == "controlnet" ? tr("ControlNet")
+                    : subtype == "lora" ? tr("LoRA") : tr("T5-XXL (animation text encoder)"));
                 group->setEditable(false);
                 group->setIcon(Ardoise::IconProvider::icon(Ardoise::Icon::Folder));
                 group->setData(category.first, Qt::UserRole + 2);
