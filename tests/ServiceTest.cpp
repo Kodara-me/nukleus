@@ -1312,6 +1312,178 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
         QVERIFY(!arguments().contains(name));
     resetCapture();
 
+    // R5: LoRAs are installed companions of subtype lora; the prompt gets one tag per nonzero weight, in order.
+    for (const QString &name : {QString("clara.safetensors"), QString("alex.safetensors"), QString("style.v2.gguf")}) {
+        QFile file(QDir(root).filePath("companion/" + name));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("fixture");
+    }
+    QFile loraCatalog(QDir(root).filePath("companion/metadata.json"));
+    QVERIFY(loraCatalog.open(QIODevice::ReadOnly));
+    QJsonObject loraEntries = QJsonDocument::fromJson(loraCatalog.readAll()).object();
+    loraCatalog.close();
+    for (const QString &name : {QString("clara.safetensors"), QString("alex.safetensors"), QString("style.v2.gguf")})
+        loraEntries.insert(name, QJsonObject{{"recommendedOptions", QJsonObject{{"subtype", "lora"}}}});
+    QVERIFY(loraCatalog.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    loraCatalog.write(QJsonDocument(loraEntries).toJson());
+    loraCatalog.close();
+    const auto loraEntry = [](const QString &name, const QJsonValue &weight = QJsonValue(QJsonValue::Undefined)) {
+        QJsonObject entry{{"modelId", "companion:" + name}};
+        if (!weight.isUndefined()) entry.insert("weight", weight);
+        return entry;
+    };
+    const auto loraOptions = [&](const QJsonObject &base, const QJsonArray &loras) {
+        QJsonObject options = base;
+        options.insert("loras", loras);
+        return options;
+    };
+    // Nine more LoRAs, for the limit of eight.
+    QStringList manyNames;
+    for (int index = 0; index < 9; ++index) manyNames.append(QString("many%1.safetensors").arg(index));
+    for (const QString &name : manyNames) {
+        QFile file(QDir(root).filePath("companion/" + name));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("fixture");
+        loraEntries.insert(name, QJsonObject{{"recommendedOptions", QJsonObject{{"subtype", "lora"}}}});
+    }
+    QVERIFY(loraCatalog.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    loraCatalog.write(QJsonDocument(loraEntries).toJson());
+    loraCatalog.close();
+    const QString loraDirectory = QDir(root).filePath("companion");
+    // R5: the default weight is 1, weights keep the request order, and 0 adds no tag; the directory is the companion one.
+    resetCapture();
+    send("lora-order", loraOptions(valid, {loraEntry("clara.safetensors", 0.8), loraEntry("style.v2.gguf", 0), loraEntry("alex.safetensors"),}));
+    QTRY_VERIFY(terminal("lora-order"));
+    QTRY_COMPARE(images.count(), 1);
+    auto loraArgs = arguments();
+    QCOMPARE(argumentAfter(loraArgs, "--prompt"), QString("test <lora:clara:0.8> <lora:alex:1>"));
+    QCOMPARE(argumentAfter(loraArgs, "--lora-model-dir"), loraDirectory);
+    QCOMPARE(argumentAfter(loraArgs, "--negative-prompt"), QString());
+    // R5: a negative weight is passed as given; the base name is everything before the last dot.
+    resetCapture();
+    send("lora-negative", loraOptions(valid, {loraEntry("style.v2.gguf", -1.5)}));
+    QTRY_VERIFY(terminal("lora-negative"));
+    QTRY_COMPARE(images.count(), 1);
+    QCOMPARE(argumentAfter(arguments(), "--prompt"), QString("test <lora:style.v2:-1.5>"));
+    // R5, R8: only weights of 0 apply nothing, so the job is the same as one without loras.
+    resetCapture();
+    send("lora-zero", loraOptions(valid, {loraEntry("clara.safetensors", 0)}));
+    QTRY_VERIFY(terminal("lora-zero"));
+    QTRY_COMPARE(images.count(), 1);
+    loraArgs = arguments();
+    QCOMPARE(argumentAfter(loraArgs, "--prompt"), QString("test"));
+    QVERIFY(!loraArgs.contains("--lora-model-dir"));
+    // R5: the source, the mask and the ControlNet arguments are those of the same job without loras.
+    resetCapture();
+    QJsonObject loraMasked = controlOptions();
+    loraMasked.insert("hasInput", true);
+    loraMasked.insert("hasMask", true);
+    loraMasked.insert("baseImageStrength", 0.25);
+    send("lora-plain-masked", loraMasked);
+    QTRY_COMPARE(uploadRequests("lora-plain-masked").size(), 1);
+    socket.sendBinaryMessage(image);
+    QTRY_COMPARE(uploadRequests("lora-plain-masked").size(), 2);
+    socket.sendBinaryMessage(maskBytes);
+    QTRY_COMPARE(uploadRequests("lora-plain-masked").size(), 3);
+    socket.sendBinaryMessage(controlBytes);
+    QTRY_VERIFY(terminal("lora-plain-masked"));
+    QTRY_COMPARE(images.count(), 1);
+    const QStringList plainArgs = arguments();
+    resetCapture();
+    send("lora-masked", loraOptions(loraMasked, {loraEntry("clara.safetensors", 0.5)}));
+    QTRY_COMPARE(uploadRequests("lora-masked").size(), 1);
+    QCOMPARE(uploadRequests("lora-masked").first().first, QString("source"));
+    socket.sendBinaryMessage(image);
+    QTRY_COMPARE(uploadRequests("lora-masked").size(), 2);
+    QCOMPARE(uploadRequests("lora-masked").last(), (QPair<QString, int>{"mask", 1}));
+    socket.sendBinaryMessage(maskBytes);
+    QTRY_COMPARE(uploadRequests("lora-masked").size(), 3);
+    QCOMPARE(uploadRequests("lora-masked").last(), (QPair<QString, int>{"control", 2}));
+    socket.sendBinaryMessage(controlBytes);
+    QTRY_VERIFY(terminal("lora-masked"));
+    QTRY_COMPARE(images.count(), 1);
+    loraArgs = arguments();
+    QCOMPARE(readCapture(".mask"), maskBytes);
+    QCOMPARE(readCapture(".control"), controlBytes);
+    for (const QString &name : {QString("--strength"), QString("--control-net"), QString("--control-strength"),
+                                QString("--steps"), QString("--cfg-scale"), QString("--width"), QString("--height")})
+        QCOMPARE(argumentAfter(loraArgs, name), argumentAfter(plainArgs, name));
+    for (const QString &name : {QString("--init-img"), QString("--mask"), QString("--control-image")})
+        QVERIFY(loraArgs.contains(name) && plainArgs.contains(name));
+    QCOMPARE(argumentAfter(loraArgs, "--prompt"), QString("test <lora:clara:0.5>"));
+    QCOMPARE(argumentAfter(loraArgs, "--lora-model-dir"), loraDirectory);
+    // R9: a LoRA used by a job that waits for its uploads cannot be deleted.
+    resetCapture();
+    send("lora-in-use", loraOptions(withOption(valid, "hasInput", true), {loraEntry("clara.safetensors", 0)}));
+    QTRY_COMPARE(uploadRequests("lora-in-use").size(), 1);
+    socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "models.delete"}, {"id", "companion:clara.safetensors"}}).toJson()));
+    QTRY_VERIFY(std::any_of(messages.cbegin(), messages.cend(), [](const QJsonObject &message) {
+        return message.value("code") == "model-in-use"; }));
+    QVERIFY(QFileInfo::exists(QDir(root).filePath("companion/clara.safetensors")));
+    socket.sendBinaryMessage(image);
+    QTRY_VERIFY(terminal("lora-in-use"));
+    QTRY_COMPARE(images.count(), 1);
+
+    // R6: each malformed submission is refused with invalid-request before any upload is requested.
+    QJsonArray eightLoras;
+    for (int index = 0; index < 8; ++index) eightLoras.append(loraEntry(manyNames.at(index)));
+    QJsonArray nineLoras = eightLoras;
+    nineLoras.append(loraEntry(manyNames.at(8)));
+    rejectedBeforeUpload("lora-nine", "image.generate", loraOptions(valid, nineLoras));
+    rejectedBeforeUpload("lora-empty", "image.generate", loraOptions(valid, {}));
+    rejectedBeforeUpload("lora-object", "image.generate", withOption(valid, "loras", QJsonObject{{"modelId", "companion:clara.safetensors"}}));
+    rejectedBeforeUpload("lora-string", "image.generate", withOption(valid, "loras", "companion:clara.safetensors"));
+    rejectedBeforeUpload("lora-null", "image.generate", withOption(valid, "loras", QJsonValue(QJsonValue::Null)));
+    rejectedBeforeUpload("lora-entry-string", "image.generate", loraOptions(valid, {QJsonValue("companion:clara.safetensors")}));
+    rejectedBeforeUpload("lora-entry-key", "image.generate",
+        loraOptions(valid, {QJsonObject{{"modelId", "companion:clara.safetensors"}, {"strength", 1}}}));
+    rejectedBeforeUpload("lora-no-id", "image.generate", loraOptions(valid, {QJsonObject{{"weight", 1}}}));
+    rejectedBeforeUpload("lora-blank", "image.generate", loraOptions(valid, {loraEntry(" ")}));
+    rejectedBeforeUpload("lora-id-number", "image.generate", loraOptions(valid, {QJsonObject{{"modelId", 1}}}));
+    rejectedBeforeUpload("lora-unknown", "image.generate", loraOptions(valid, {loraEntry("absent.safetensors")}));
+    rejectedBeforeUpload("lora-not-lora", "image.generate", loraOptions(valid, {loraEntry("other-vae.safetensors")}));
+    rejectedBeforeUpload("lora-controlnet", "image.generate", loraOptions(valid, {loraEntry("openpose.safetensors")}));
+    rejectedBeforeUpload("lora-wrong-category", "image.generate",
+        loraOptions(valid, {QJsonObject{{"modelId", "image-generation:model.gguf"}}}));
+    rejectedBeforeUpload("lora-bare-id", "image.generate", loraOptions(valid, {QJsonObject{{"modelId", "clara.safetensors"}}}));
+    rejectedBeforeUpload("lora-duplicate", "image.generate",
+        loraOptions(valid, {loraEntry("clara.safetensors", 0.5), loraEntry("clara.safetensors", 0.7)}));
+    int loraWeightIndex = 0;
+    for (const QJsonValue &weight : {QJsonValue(-10.1), QJsonValue(10.1), QJsonValue("0.5"), QJsonValue(true),
+                                     QJsonValue(QJsonValue::Null), QJsonValue(1e300)})
+        rejectedBeforeUpload(QString("lora-weight-bad-%1").arg(loraWeightIndex++), "image.generate",
+            loraOptions(valid, {loraEntry("clara.safetensors", weight)}));
+    rejectedBeforeUpload("lora-on-edit", "image.edit", loraOptions(editBase, {loraEntry("clara.safetensors", 0.5)}));
+    // R6: eight LoRAs are the limit, and -10 and 10 are valid weights.
+    resetCapture();
+    send("lora-eight", loraOptions(valid, eightLoras));
+    QTRY_VERIFY(terminal("lora-eight"));
+    QTRY_COMPARE(images.count(), 1);
+    QCOMPARE(argumentAfter(arguments(), "--prompt").count("<lora:many"), 8);
+    resetCapture();
+    send("lora-limits", loraOptions(valid, {loraEntry("clara.safetensors", -10), loraEntry("alex.safetensors", 10)}));
+    QTRY_VERIFY(terminal("lora-limits"));
+    QTRY_COMPARE(images.count(), 1);
+    QCOMPARE(argumentAfter(arguments(), "--prompt"), QString("test <lora:clara:-10> <lora:alex:10>"));
+
+    // R7: a LoRA tag in either prompt is refused, in any letter case, for generation and editing.
+    rejectedBeforeUpload("tag-prompt", "image.generate", withOption(valid, "prompt", "a <lora:clara:1> portrait"));
+    rejectedBeforeUpload("tag-prompt-case", "image.generate", withOption(valid, "prompt", "a <LoRa:clara:1> portrait"));
+    rejectedBeforeUpload("tag-negative", "image.generate", withOption(valid, "negativePrompt", "<LORA:alex:1>"));
+    rejectedBeforeUpload("tag-with-loras", "image.generate",
+        withOption(loraOptions(valid, {loraEntry("clara.safetensors")}), "prompt", "x <lora:alex:1>"));
+    rejectedBeforeUpload("tag-edit-prompt", "image.edit", withOption(editBase, "prompt", "<lora:clara:1> edit"));
+    rejectedBeforeUpload("tag-edit-negative", "image.edit", withOption(editBase, "negativePrompt", "<lora:clara:1>"));
+    // R7: other angle brackets and a lora word without the tag opening stay valid.
+    resetCapture();
+    send("tag-lookalike", withOption(valid, "prompt", "a <b> lora: clara"));
+    QTRY_VERIFY(terminal("tag-lookalike"));
+    QTRY_COMPARE(images.count(), 1);
+    QCOMPARE(argumentAfter(arguments(), "--prompt"), QString("a <b> lora: clara"));
+
+    // R8: without loras the backend gets no LoRA directory and no tag.
+    resetCapture();
+
     send("automatic", valid);
     QTRY_VERIFY(terminal("automatic"));
     QTRY_COMPARE(images.count(), 1);
@@ -1327,6 +1499,8 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QVERIFY(!args.contains("--control-net"));
     QVERIFY(!args.contains("--control-image"));
     QVERIFY(!args.contains("--control-strength"));
+    QVERIFY(!args.contains("--lora-model-dir"));
+    QCOMPARE(args.value(args.indexOf("--prompt") + 1), QString("test"));
     QCOMPARE(args.value(args.indexOf("--cfg-scale") + 1), QString("5.75"));
     QCOMPARE(args.value(args.indexOf("--steps") + 1), QString("37"));
     QCOMPARE(args.value(args.indexOf("--vae") + 1), QDir(root).filePath(companion));

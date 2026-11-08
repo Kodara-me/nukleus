@@ -78,6 +78,13 @@ enum class ImageOperation
     Edit,
 };
 
+// An installed LoRA (a companion of subtype lora) applied to an image generation.
+struct LoraWeight
+{
+    QString modelId;
+    std::optional<double> weight; // -10 to 10; unset uses the service default (1.0), 0 applies nothing.
+};
+
 struct ImageGenerationRequest
 {
     QString prompt;
@@ -100,6 +107,10 @@ struct ImageGenerationRequest
     QString controlNetModelId;
     QByteArray controlImageData;
     std::optional<double> controlStrength;
+    // Optional LoRAs (1 to 8, distinct ids) applied in this order; combines with the base image, the mask and the
+    // ControlNet, and needs ServiceCapabilities::imageGenerationLora. Generation only: submitEdit refuses them.
+    // The prompts cannot contain LoRA tags.
+    QList<LoraWeight> loras;
     QList<QByteArray> editImages;
     // Generation conditioning images (1–8), sent in order; exclusive with baseImageData.
     QList<QByteArray> referenceImages;
@@ -173,6 +184,7 @@ struct ServiceCapabilities
     bool imageAnimateMp4 = false; // image.animate accepts container mp4 (the service has ffmpeg).
     bool imageGenerationMask = false; // image.generate accepts a mask with the base image (image.generate.mask).
     bool imageGenerationControl = false; // image.generate accepts a ControlNet and its control image (image.generate.control).
+    bool imageGenerationLora = false; // image.generate accepts installed LoRAs with weights (image.generate.lora).
 };
 
 // Result of text.chat.load (load true) or text.chat.unload (load false).

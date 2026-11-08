@@ -224,6 +224,7 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
 {
     if (!request.presetId.isEmpty() && (!m_capabilities.modelRouting || !request.styleId.isEmpty())) return {};
     if (!request.qualityId.isEmpty()) return {};
+    if (!request.loras.isEmpty() && !canGenerateWithLoras()) return {};
     if (!request.referenceImages.isEmpty() && (!request.baseImageData.isEmpty() || request.referenceImages.size() > 8
         || request.referenceImages.contains(QByteArray()))) return {};
     if (!request.maskImageData.isEmpty()
@@ -246,6 +247,15 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
                               {QStringLiteral("modelId"), request.modelId}};
     if (!request.styleId.isEmpty()) options.insert("styleId", request.styleId);
     if (!request.presetId.isEmpty()) options.insert("presetId", request.presetId);
+    if (!request.loras.isEmpty()) {
+        QJsonArray loras;
+        for (const LoraWeight &lora : request.loras) {
+            QJsonObject entry{{QStringLiteral("modelId"), lora.modelId}};
+            if (lora.weight) entry.insert(QStringLiteral("weight"), *lora.weight);
+            loras.append(entry);
+        }
+        options.insert("loras", loras);
+    }
     if (controlled) {
         options.insert("controlNetModelId", request.controlNetModelId);
         if (request.controlStrength) options.insert("controlStrength", *request.controlStrength);
@@ -271,7 +281,7 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
 
 QString ServiceClient::submitEdit(const ImageGenerationRequest &request)
 {
-    if (!request.styleId.isEmpty() || !request.presetId.isEmpty()
+    if (!request.styleId.isEmpty() || !request.presetId.isEmpty() || !request.loras.isEmpty()
         || (!request.qualityId.isEmpty() && !m_capabilities.modelRouting)) return {};
     if (request.editImages.isEmpty() || request.editImages.size() > 8 || request.editImages.contains(QByteArray()) || request.prompt.trimmed().isEmpty()) return {};
     QJsonObject options{{"modelId", request.modelId}, {"inputCount", int(request.editImages.size())}, {"prompt", request.prompt},
@@ -392,6 +402,11 @@ bool ServiceClient::canGenerateWithControl() const
     return m_authenticated && m_capabilities.imageGenerationControl;
 }
 
+bool ServiceClient::canGenerateWithLoras() const
+{
+    return m_authenticated && m_capabilities.imageGenerationLora;
+}
+
 bool ServiceClient::canAnimateMp4() const
 {
     return canAnimate() && m_capabilities.imageAnimateMp4;
@@ -472,7 +487,8 @@ void ServiceClient::handleTextMessage(const QString &message)
             operations.contains("text.chat.images"), operations.contains("image.animate"),
             operations.contains("image.animate.pingPong"), operations.contains("image.animate.mp4"),
             operations.contains("image.generate.mask"),
-            operations.contains("image.generate.control")});
+            operations.contains("image.generate.control"),
+            operations.contains("image.generate.lora")});
         if (m_capabilities.modelRouting) requestModelRouting();
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
@@ -687,7 +703,8 @@ void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
         && m_capabilities.imageAnimatePingPong == capabilities.imageAnimatePingPong
         && m_capabilities.imageAnimateMp4 == capabilities.imageAnimateMp4
         && m_capabilities.imageGenerationMask == capabilities.imageGenerationMask
-        && m_capabilities.imageGenerationControl == capabilities.imageGenerationControl) return;
+        && m_capabilities.imageGenerationControl == capabilities.imageGenerationControl
+        && m_capabilities.imageGenerationLora == capabilities.imageGenerationLora) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
 }

@@ -32,7 +32,7 @@ public:
                 const QString type = message.value(QStringLiteral("type")).toString();
                 if (type == QStringLiteral("authenticate")) {
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"authenticated\"}"));
-                    socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\",\"image.upscale\",\"image.edit\"%1,\"text.chat\",\"text.chat.load\",\"text.chat.unload\"],\"textChatEngines\":[\"server\",\"completion\"]}").arg((m_offerMask ? QStringLiteral(",\"image.generate.mask\"") : QString()) + (m_offerControl ? QStringLiteral(",\"image.generate.control\"") : QString())));
+                    socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\",\"image.upscale\",\"image.edit\"%1,\"text.chat\",\"text.chat.load\",\"text.chat.unload\"],\"textChatEngines\":[\"server\",\"completion\"]}").arg((m_offerMask ? QStringLiteral(",\"image.generate.mask\"") : QString()) + (m_offerControl ? QStringLiteral(",\"image.generate.control\"") : QString()) + (m_offerLora ? QStringLiteral(",\"image.generate.lora\"") : QString())));
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list.result\",\"categories\":[{\"category\":\"image-generation\",\"models\":[{\"id\":\"image-generation:test.safetensors\",\"name\":\"Test\",\"fileName\":\"test.safetensors\",\"bytes\":1,\"modelType\":\"diffusion\",\"explicitContent\":true,\"companionFiles\":{\"clip-l\":\"companions/test.safetensors/clip-l/clip_l.safetensors\"},\"companionFileName\":\"companions/test.safetensors/vae.safetensors\",\"companionRole\":\"vae\",\"displayName\":\"Test\"}]},{\"category\":\"upscaler\",\"models\":[{\"id\":\"upscaler:test.gguf\",\"name\":\"Test 2x\",\"fileName\":\"test.gguf\",\"bytes\":2,\"displayName\":\"Test 2x\"}]},{\"category\":\"llm-chat\",\"models\":[{\"id\":\"llm-chat:test.gguf\",\"name\":\"Test LLM\",\"fileName\":\"llm.gguf\",\"bytes\":3,\"companionFileName\":\"companions/llm.gguf/mmproj.gguf\",\"companionRole\":\"mmproj\",\"displayName\":\"Test LLM\"}]}]}"));
                 } else if (type == "models.configure") {
                     const QJsonObject reply{{"type", "models.configure.completed"}, {"id", message.value("id")}, {"model", QJsonObject{{"recommendedOptions", message.value("recommendedOptions")}}}};
@@ -91,6 +91,7 @@ public:
 
     void offerMask(bool offered) { m_offerMask = offered; }
     void offerControl(bool offered) { m_offerControl = offered; }
+    void offerLora(bool offered) { m_offerLora = offered; }
     bool start() { return m_server.listen(QHostAddress::LocalHost); }
     QString errorString() const { return m_server.errorString(); }
     QUrl endpoint() const { return QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(m_server.serverPort())); }
@@ -117,6 +118,7 @@ private:
     QSet<QWebSocket *> m_controlJobs;
     bool m_offerMask = false;
     bool m_offerControl = false;
+    bool m_offerLora = false;
 };
 }
 
@@ -197,6 +199,7 @@ private slots:
     void supportsMultipleJobs();
     void submitsMaskedGeneration();
     void submitsControlledGeneration();
+    void submitsGenerationWithLoras();
     void installsModelWithCompanion();
     void installsModularCompanionsForExistingModel();
     void reportsConnectionFailure();
@@ -575,6 +578,73 @@ void ServiceSdkTest::submitsControlledGeneration()
     QTRY_COMPARE(finished.count(), 3);
     QCOMPARE(sent(maskedId).value("hasMask").toBool(), true);
     QCOMPARE(service.uploadedImages(), (QList<QByteArray>{"control", "source", "control", "source", "mask", "control"}));
+}
+
+void ServiceSdkTest::submitsGenerationWithLoras()
+{
+    // R4, R10: a service without image.generate.lora reports no capability and gets nothing for a request with loras.
+    {
+        FakeSdkService service; QVERIFY2(service.start(), qPrintable(service.errorString()));
+        Nukleus::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+        QTRY_VERIFY(client.modelListAvailable());
+        QVERIFY(!client.capabilities().imageGenerationLora);
+        QVERIFY(!client.canGenerateWithLoras());
+        Nukleus::ImageGenerationRequest request; request.prompt = QStringLiteral("p");
+        request.modelId = QStringLiteral("image-generation:test.safetensors");
+        request.loras = {{QStringLiteral("companion:clara.safetensors"), std::nullopt}};
+        const int before = int(service.messages().size());
+        QVERIFY(client.submitGeneration(request).isEmpty());
+        QCOMPARE(int(service.messages().size()), before);
+    }
+    FakeSdkService service; service.offerLora(true); service.offerMask(true);
+    QVERIFY2(service.start(), qPrintable(service.errorString()));
+    Nukleus::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+    QTRY_VERIFY(client.modelListAvailable());
+    QTRY_VERIFY(client.canGenerateWithLoras());
+    QVERIFY(client.capabilities().imageGenerationLora);
+    QVERIFY(!client.canGenerateWithControl());
+    QSignalSpy finished(&client, &Nukleus::ServiceClient::imageJobFinished);
+    const auto sent = [&](const QString &jobId) {
+        const auto submit = std::find_if(service.messages().cbegin(), service.messages().cend(), [&](const QJsonObject &message) {
+            return message.value("type").toString() == QStringLiteral("submit") && message.value("jobId").toString() == jobId; });
+        return submit == service.messages().cend() ? QJsonObject() : submit->value("options").toObject();
+    };
+    Nukleus::ImageGenerationRequest request; request.prompt = QStringLiteral("p");
+    request.modelId = QStringLiteral("image-generation:test.safetensors");
+    // R10: without loras the option is not sent.
+    const QString plainId = client.submitGeneration(request);
+    QVERIFY(!plainId.isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(!sent(plainId).contains("loras"));
+    // R10: loras are sent in order, with weight only when set (0 included).
+    request.loras = {{QStringLiteral("companion:clara.safetensors"), 0.8},
+                     {QStringLiteral("companion:alex.safetensors"), std::nullopt},
+                     {QStringLiteral("companion:style.safetensors"), 0.0}};
+    const QString id = client.submitGeneration(request);
+    QVERIFY(!id.isEmpty());
+    QTRY_COMPARE(finished.count(), 2);
+    const QJsonArray loras = sent(id).value("loras").toArray();
+    QCOMPARE(loras.size(), 3);
+    QCOMPARE(loras.at(0).toObject().value("modelId").toString(), QString("companion:clara.safetensors"));
+    QCOMPARE(loras.at(0).toObject().value("weight").toDouble(), 0.8);
+    QCOMPARE(loras.at(1).toObject().value("modelId").toString(), QString("companion:alex.safetensors"));
+    QVERIFY(!loras.at(1).toObject().contains("weight"));
+    QVERIFY(loras.at(2).toObject().contains("weight"));
+    QCOMPARE(loras.at(2).toObject().value("weight").toDouble(), 0.0);
+    QCOMPARE(loras.at(2).toObject().keys().size(), 2);
+    // R10: they combine with a base image and a mask.
+    request.baseImageData = QByteArray("source"); request.maskImageData = QByteArray("mask");
+    const QString maskedId = client.submitGeneration(request);
+    QVERIFY(!maskedId.isEmpty());
+    QTRY_COMPARE(finished.count(), 3);
+    QCOMPARE(sent(maskedId).value("loras").toArray().size(), 3);
+    QCOMPARE(sent(maskedId).value("hasMask").toBool(), true);
+    // R10: submitEdit has no loras; a request that carries them gets an empty job ID and nothing is sent.
+    Nukleus::ImageGenerationRequest edit = request; edit.maskImageData.clear(); edit.baseImageData.clear();
+    edit.editImages = {QByteArray("image")};
+    const int before = int(service.messages().size());
+    QVERIFY(client.submitEdit(edit).isEmpty());
+    QCOMPARE(int(service.messages().size()), before);
 }
 
 void ServiceSdkTest::reportsConnectionFailure()

@@ -145,9 +145,18 @@ void SdCliRunner::runHelp()
 
 bool SdCliRunner::runGeneration(const GenerationRequest &request)
 {
+    // Each LoRA of the request is a tag at the end of the prompt, unless its weight is 0; the directory only
+    // follows a tag, so a job without LoRAs is unchanged.
+    QString prompt = request.prompt;
+    bool loraTag = false;
+    for (const auto &[name, weight] : request.loras) {
+        if (weight == 0) continue;
+        prompt += QStringLiteral(" <lora:%1:%2>").arg(name, QString::number(weight, 'g', 15));
+        loraTag = true;
+    }
     QStringList arguments = {
         request.diffusionModel ? QStringLiteral("--diffusion-model") : QStringLiteral("--model"), request.modelPath,
-        QStringLiteral("--prompt"), request.prompt,
+        QStringLiteral("--prompt"), prompt,
         QStringLiteral("--negative-prompt"), request.negativePrompt,
         QStringLiteral("--width"), QString::number(request.width),
         QStringLiteral("--height"), QString::number(request.height),
@@ -181,6 +190,7 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
                           QStringLiteral("--control-strength"),
                           QString::number(request.controlStrength, 'g', QLocale::FloatingPointShortest)});
     }
+    if (loraTag) arguments.append({QStringLiteral("--lora-model-dir"), request.loraDirectory});
     if (request.clipSkip > 0) arguments.append({QStringLiteral("--clip-skip"), QString::number(request.clipSkip)});
     if (m_requestType != RequestType::None || m_executablePath.isEmpty()) {
         return false;
@@ -373,6 +383,8 @@ void SdCliRunner::logGenerationStart(const GenerationRequest &request, const QSt
         qInfo().noquote() << QStringLiteral("[Nukleus][generation] Control strength: %1")
                                  .arg(request.controlStrength, 0, 'g', 17);
     }
+    for (const auto &[name, weight] : request.loras)
+        qInfo().noquote() << QStringLiteral("[Nukleus][generation] LoRA: %1 (weight %2)").arg(name).arg(weight, 0, 'g', 15);
     qInfo().noquote() << QStringLiteral("[Nukleus][sd-cli] Command:\n%1")
                              .arg(commandLine(arguments));
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QList>
+#include <QPair>
 #include <QString>
 #include <QStringList>
 
@@ -22,6 +24,8 @@ struct GenerationRequest
     QString controlNetPath;
     QString controlImagePath;
     double controlStrength = 0.9;
+    QString loraDirectory; // --lora-model-dir, set when loras is not empty.
+    QList<QPair<QString, double>> loras; // LoRA file name without extension and weight, in request order.
     QString outputPath;
     QString modelPath;
     QString vaePath;

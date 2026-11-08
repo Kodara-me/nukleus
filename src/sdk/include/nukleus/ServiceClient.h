@@ -66,6 +66,8 @@ public:
     bool canGenerateWithMask() const;
     // The service offers image.generate.control: submitGeneration accepts ImageGenerationRequest::controlNetModelId.
     bool canGenerateWithControl() const;
+    // The service offers image.generate.lora: submitGeneration accepts ImageGenerationRequest::loras.
+    bool canGenerateWithLoras() const;
     // Submits an animation with an installed animation model and its start image (and end image, if any);
     // progress arrives through generationProgressChanged and the video through animationFinished.
     QString submitAnimation(const AnimationRequest &request);
