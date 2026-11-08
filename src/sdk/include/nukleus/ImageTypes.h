@@ -94,6 +94,12 @@ struct ImageGenerationRequest
     // Optional mask for image to image (PNG or JPEG, same size as baseImageData): white redraws, black keeps.
     // Needs baseImageData, excludes referenceImages, and needs ServiceCapabilities::imageGenerationMask.
     QByteArray maskImageData;
+    // Optional ControlNet guidance: the id of an installed companion of subtype controlnet and its control image
+    // (PNG or JPEG of width x height), both or neither; excludes referenceImages and needs
+    // ServiceCapabilities::imageGenerationControl. controlStrength left unset uses the service default (0.9).
+    QString controlNetModelId;
+    QByteArray controlImageData;
+    std::optional<double> controlStrength;
     QList<QByteArray> editImages;
     // Generation conditioning images (1–8), sent in order; exclusive with baseImageData.
     QList<QByteArray> referenceImages;
@@ -166,6 +172,7 @@ struct ServiceCapabilities
     bool imageAnimatePingPong = false; // image.animate accepts pingPong (the service has ffmpeg).
     bool imageAnimateMp4 = false; // image.animate accepts container mp4 (the service has ffmpeg).
     bool imageGenerationMask = false; // image.generate accepts a mask with the base image (image.generate.mask).
+    bool imageGenerationControl = false; // image.generate accepts a ControlNet and its control image (image.generate.control).
 };
 
 // Result of text.chat.load (load true) or text.chat.unload (load false).

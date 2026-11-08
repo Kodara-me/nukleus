@@ -47,7 +47,8 @@ bool validGenerationOptions(const QJsonObject &options)
 {
     const QStringList allowed{"modelId", "prompt", "negativePrompt", "width", "height",
         "steps", "cfgScale", "clipSkip", "seed", "sampler", "scheduler",
-        "hasInput", "hasMask", "inputCount", "baseImageStrength", "styleId", "presetId", "qualityId"};
+        "hasInput", "hasMask", "inputCount", "baseImageStrength", "styleId", "presetId", "qualityId",
+        "controlNetModelId", "controlStrength"};
     for (const auto& key : options.keys())
         if (!allowed.contains(key)) return false;
     const auto optionalString = [&options](const QString &key) {
@@ -70,7 +71,10 @@ bool validGenerationOptions(const QJsonObject &options)
         && validChoice("sampler", Nukleus::Protocol::modelSamplers())
         && validChoice("scheduler", Nukleus::Protocol::modelSchedulers())
         && (!options.contains("hasInput") || options.value("hasInput").isBool())
-        && (!options.contains("hasMask") || options.value("hasMask").isBool());
+        && (!options.contains("hasMask") || options.value("hasMask").isBool())
+        && (!options.contains("controlNetModelId")
+            || (options.value("controlNetModelId").isString() && !options.value("controlNetModelId").toString().trimmed().isEmpty()))
+        && (!options.contains("controlStrength") || validNumber(options, "controlStrength", 0, 2, false, false));
 }
 
 constexpr int MaximumChatMessages = 1024;
@@ -329,6 +333,7 @@ struct NukleusDaemon::Submission
     QString llmVisionPath;
     QString clipLPath;
     QString clipGPath;
+    QString controlNetPath;
     bool diffusionModel = false;
     QPointer<QWebSocket> client;
     int expectedInputs = 1;
@@ -348,6 +353,7 @@ struct NukleusDaemon::Job
     QString llmVisionPath;
     QString clipLPath;
     QString clipGPath;
+    QString controlNetPath;
     bool diffusionModel = false;
     QPointer<QWebSocket> client;
     std::unique_ptr<QTemporaryDir> directory = std::make_unique<QTemporaryDir>();
@@ -667,6 +673,32 @@ void NukleusDaemon::submit(QWebSocket *socket, const QJsonObject &message)
             tr("A mask is only supported for image generation from a base image, without reference images"), jobId);
         return;
     }
+    // A ControlNet is chosen per job among the installed companions of subtype controlnet. An unknown
+    // one is a malformed request (invalid-request), not an unavailable model: the client names it itself.
+    const bool controlled = options.contains("controlNetModelId");
+    QString controlNetPath;
+    if (edit && (controlled || options.contains("controlStrength"))) {
+        sendError(socket, QStringLiteral("invalid-request"), tr("A control image is only supported for image generation"), jobId);
+        return;
+    }
+    if (options.contains("controlStrength") && !controlled) {
+        sendError(socket, QStringLiteral("invalid-request"), tr("The control strength needs a ControlNet"), jobId);
+        return;
+    }
+    if (controlled) {
+        if (options.contains("inputCount")) {
+            sendError(socket, QStringLiteral("invalid-request"),
+                tr("A control image is not supported with reference images"), jobId);
+            return;
+        }
+        const QString controlId = options.value("controlNetModelId").toString();
+        const auto controlNet = controlId.startsWith(QStringLiteral("companion:")) ? m_models->modelById(controlId) : std::nullopt;
+        if (!controlNet || controlNet->recommendedOptions.value("subtype").toString() != QStringLiteral("controlnet")) {
+            sendError(socket, QStringLiteral("invalid-request"), tr("The ControlNet is not an installed companion of subtype controlnet"), jobId);
+            return;
+        }
+        controlNetPath = controlNet->filePath;
+    }
     if (!edit && options.contains("inputCount") && (!generate || options.value("hasInput").toBool())) {
         sendError(socket, QStringLiteral("invalid-request"),
             tr("Reference images are only supported for image editing and generation without a base image"), jobId);
@@ -710,13 +742,19 @@ void NukleusDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         return;
     }
     const bool references = options.contains("inputCount");
-    const bool needsInput = edit || upscale || references || options.value(QStringLiteral("hasInput")).toBool();
+    const bool needsInput = edit || upscale || references || controlled || options.value(QStringLiteral("hasInput")).toBool();
     auto submission = std::make_shared<Submission>();
     submission->id = jobId;
     submission->operation = edit ? Operation::Edit : generate ? Operation::Generate : Operation::Upscale;
     submission->options = options;
     submission->routedPrompts = routedPrompts;
     submission->expectedInputs = options.value("hasMask").toBool() ? 2 : options.value("inputCount").toInt(1);
+    if (controlled) {
+        // Source, mask, then the control image: 1 without hasInput, 2 with it, 3 with hasInput and hasMask.
+        const int before = options.value("hasMask").toBool() ? 2 : options.value("hasInput").toBool() ? 1 : 0;
+        submission->expectedInputs = before + 1;
+        submission->controlNetPath = controlNetPath;
+    }
     submission->modelPath = model->filePath;
     if ((generate || edit) && model->companionRole == QStringLiteral("vae") && !model->companionFileName.isEmpty())
         submission->vaePath = QDir(QFileInfo(model->filePath).absolutePath()).filePath(model->companionFileName);
@@ -758,8 +796,13 @@ void NukleusDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     submission->client = socket;
     if (needsInput) {
         m_pendingUploads.insert(socket, submission);
-        send(socket, {{QStringLiteral("type"), QStringLiteral("upload-required")}, {QStringLiteral("jobId"), jobId},
-            {"inputRole", generate && references ? "reference" : "source"}});
+        QJsonObject request{{QStringLiteral("type"), QStringLiteral("upload-required")}, {QStringLiteral("jobId"), jobId},
+            {"inputRole", generate && references ? "reference" : "source"}};
+        if (controlled && !options.value(QStringLiteral("hasInput")).toBool()) {
+            request.insert("inputRole", "control");
+            request.insert("inputIndex", 0);
+        }
+        send(socket, request);
         return;
     }
     auto job = std::make_shared<Job>();
@@ -994,6 +1037,7 @@ bool NukleusDaemon::modelInUse(const QString &path) const
 {
     const auto usesModel = [&path](const auto &job) {
         return job && (job->modelPath == path || job->vaePath == path || job->llmPath == path || job->llmVisionPath == path
+                       || (!job->controlNetPath.isEmpty() && job->controlNetPath == path)
                        || (job->animation && job->animation->files.contains(path)));
     };
     if (usesModel(m_activeJob)) return true;
@@ -1044,10 +1088,29 @@ void NukleusDaemon::processBinaryMessage(QWebSocket* socket, const QByteArray& d
             return;
         }
     }
+    const bool controlImage = submission->operation == Operation::Generate && !submission->controlNetPath.isEmpty()
+        && submission->inputs.size() == submission->expectedInputs - 1;
+    if (controlImage) {
+        // The control image must be a PNG or JPEG of the job size; sizes come from the headers.
+        const QSize controlSize = imageHeaderSize(data);
+        if (chatImageMimeType(data).isEmpty() || !controlSize.isValid()) {
+            m_pendingUploads.remove(socket);
+            sendError(socket, "invalid-image", tr("The control image must be a PNG or JPEG image"), submission->id);
+            return;
+        }
+        const QSize jobSize(submission->options.value("width").toInt(1024), submission->options.value("height").toInt(1024));
+        if (controlSize != jobSize) {
+            m_pendingUploads.remove(socket);
+            sendError(socket, "invalid-image", tr("The control image must have the width and height of the job"), submission->id);
+            return;
+        }
+    }
     submission->inputs.append(data);
     if (submission->inputs.size() < submission->expectedInputs) {
+        const bool controlNext = submission->operation == Operation::Generate && !submission->controlNetPath.isEmpty()
+            && submission->inputs.size() == submission->expectedInputs - 1;
         send(socket, {{QStringLiteral("type"), QStringLiteral("upload-required")}, {QStringLiteral("jobId"), submission->id},
-            {"inputRole", chat ? "image" : animation ? "end" : masked ? "mask" : "reference"}, {"inputIndex", int(submission->inputs.size())}});
+            {"inputRole", chat ? "image" : animation ? "end" : controlNext ? "control" : masked ? "mask" : "reference"}, {"inputIndex", int(submission->inputs.size())}});
         return;
     }
     m_pendingUploads.remove(socket);
@@ -1066,6 +1129,7 @@ void NukleusDaemon::processBinaryMessage(QWebSocket* socket, const QByteArray& d
     job->llmVisionPath = submission->llmVisionPath;
     job->clipLPath = submission->clipLPath;
     job->clipGPath = submission->clipGPath;
+    job->controlNetPath = submission->controlNetPath;
     job->diffusionModel = submission->diffusionModel;
     job->animation = submission->animation;
     job->client = socket;
@@ -1168,6 +1232,11 @@ void NukleusDaemon::runActiveJob()
             request.baseImagePath = m_activeJob->inputPaths.value(0);
             if (o.value(QStringLiteral("hasMask")).toBool()) request.maskImagePath = m_activeJob->inputPaths.value(1);
         }
+        if (!m_activeJob->controlNetPath.isEmpty()) {
+            request.controlNetPath = m_activeJob->controlNetPath;
+            request.controlImagePath = m_activeJob->inputPaths.value(m_activeJob->inputPaths.size() - 1);
+            request.controlStrength = o.value(QStringLiteral("controlStrength")).toDouble(request.controlStrength);
+        }
         if (!m_sdRunner || !m_sdRunner->runGeneration(request)) { sendError(m_activeJob->client, QStringLiteral("start-failed"), tr("Could not start generation"), m_activeJob->id); m_activeJob.reset(); startNextJob(); }
     } else if (m_activeJob->operation == Operation::Upscale) {
         m_activeJob->outputPath = m_activeJob->directory->filePath(QStringLiteral("result.png"));
@@ -1249,6 +1318,7 @@ void NukleusDaemon::sendCapabilities(QWebSocket *socket) const
     if (isImageReady()) {
         operations.append(QStringLiteral("image.generate"));
         operations.append(QStringLiteral("image.generate.mask"));
+        operations.append(QStringLiteral("image.generate.control"));
         operations.append(QStringLiteral("image.upscale"));
         operations.append(QStringLiteral("image.edit"));
         operations.append(QStringLiteral("image.animate"));

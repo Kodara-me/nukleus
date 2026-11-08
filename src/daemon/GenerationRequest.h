@@ -19,6 +19,9 @@ struct GenerationRequest
     QString baseImagePath;
     QString maskImagePath;
     double baseImageStrength = 0.55;
+    QString controlNetPath;
+    QString controlImagePath;
+    double controlStrength = 0.9;
     QString outputPath;
     QString modelPath;
     QString vaePath;

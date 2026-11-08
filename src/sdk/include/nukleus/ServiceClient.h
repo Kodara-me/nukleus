@@ -64,6 +64,8 @@ public:
     bool canAnimateMp4() const;
     // The service offers image.generate.mask: submitGeneration accepts ImageGenerationRequest::maskImageData.
     bool canGenerateWithMask() const;
+    // The service offers image.generate.control: submitGeneration accepts ImageGenerationRequest::controlNetModelId.
+    bool canGenerateWithControl() const;
     // Submits an animation with an installed animation model and its start image (and end image, if any);
     // progress arrives through generationProgressChanged and the video through animationFinished.
     QString submitAnimation(const AnimationRequest &request);

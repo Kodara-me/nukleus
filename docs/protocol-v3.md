@@ -358,6 +358,8 @@ an input upload. Invalid types or ranges return `invalid-request` correlated to
 | baseImageStrength | Optional finite number 0–1; defaults to 0.55 |
 | inputCount | Optional integer 1–8 of reference images; not allowed with `hasInput: true` |
 | hasMask | Optional boolean; defaults to false; needs `hasInput: true`, not allowed with `inputCount` or on `image.edit` (see below) |
+| controlNetModelId | Optional nonblank string: the id of an installed `companion` of subtype `controlnet`; asks for a control image upload (see below); not allowed with `inputCount` or on `image.edit` |
+| controlStrength | Optional finite number 0–2; defaults to 0.9; needs `controlNetModelId` |
 
 With `inputCount`, the service sends one `upload-required` per reference image
 (`inputIndex` 0…n-1, role `reference`); the client answers each with one binary
@@ -394,6 +396,58 @@ from the PNG or JPEG headers); no job is queued. Without `hasMask`, or with
 `ServiceClient::canGenerateWithMask()` (`ServiceCapabilities::imageGenerationMask`);
 `submitGeneration` returns an empty job ID when the mask has no base image, comes with
 reference images, or the service does not report `image.generate.mask`.
+
+### Image generation guided by a ControlNet
+
+`capabilities.operations` includes `image.generate.control` when the image backend is
+ready; a service without it rejects `controlNetModelId` and `controlStrength` as
+unknown options with `invalid-request`. `controlNetModelId` names a `companion` of
+subtype `controlnet` (see the companion subtypes above); the client picks the one
+that matches its checkpoint and the kind of control image it sends. Because the
+client names the ControlNet itself, an id that is not an installed ControlNet
+companion is a malformed request and is rejected with `invalid-request`, not
+`model-unavailable`.
+
+The control image is requested last, after the uploads the other options require:
+the source (`inputRole` `source`, index 0, with `hasInput`), then the mask
+(`inputRole` `mask`, index 1, with `hasMask`), then the control image (`inputRole`
+`control`, with `inputIndex` equal to the number of uploads already received: 0
+without `hasInput`, 1 with `hasInput`, 2 with `hasInput` and `hasMask`). Text to
+image with a ControlNet therefore has one upload, of role `control`. Each upload is
+answered with one binary frame, before the job is queued. The control image is a PNG
+or JPEG of exactly the job's `width` and `height` (1024 when omitted); the service
+uses it as given and does not preprocess it, so the client sends an already
+rendered OpenPose skeleton, depth map or similar.
+
+sd-cli receives the ControlNet's file as `--control-net`, the control image as
+`--control-image` and `controlStrength` as `--control-strength`; every other option,
+the source and the mask included, is passed as for the same job without a control
+image. A scene can thus be generated from a control image alone, and one part of it
+repainted with the scene as source, a mask, the same control image and another
+prompt and seed.
+
+The backend loads standard ControlNet weights matching the checkpoint's architecture
+(SDXL or SD 1.5), one ControlNet per job. ControlNet Union, Control-LoRA and
+T2I-Adapter models are not supported. The service does not check the architecture:
+a ControlNet used with a model of `modelType` `diffusion` (Flux, Qwen Image) or of
+another architecture makes sd-cli fail, reported as `generation-failed`. A ControlNet
+used by a queued or running job cannot be deleted, as for any other model.
+
+`controlNetModelId` that is blank, not a string, or not an installed ControlNet
+companion; `controlStrength` that is not a finite number from 0 to 2 or comes
+without `controlNetModelId`; `controlNetModelId` with `inputCount`; and either
+option on `image.edit` are rejected with `invalid-request` before any upload is
+requested. A control upload that is empty, larger than the image upload limit, not a
+PNG or JPEG, or of another size than the job's `width` and `height` is rejected with
+`invalid-image`; no job is queued. Without `controlNetModelId`, `image.generate` is
+unchanged: the same uploads, no ControlNet arguments. SDK clients fill
+`ImageGenerationRequest::controlNetModelId`, `controlImageData` and, optionally,
+`controlStrength`, and check `ServiceClient::canGenerateWithControl()`
+(`ServiceCapabilities::imageGenerationControl`); `submitGeneration` sends the control
+image after the base image and the mask, and returns an empty job ID, sending
+nothing, when only one of `controlNetModelId` and `controlImageData` is set, when
+they come with `referenceImages`, or when the service does not report
+`image.generate.control`.
 
 Automatic sampler/scheduler flags are omitted from the backend command. Positive
 Clip Skip values are forwarded; -1 omits the flag. CFG and image strength retain

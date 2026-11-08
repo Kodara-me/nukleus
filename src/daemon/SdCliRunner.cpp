@@ -175,6 +175,12 @@ bool SdCliRunner::runGeneration(const GenerationRequest &request)
                           QStringLiteral("--strength"), QString::number(request.baseImageStrength, 'g', 17)});
         if (!request.maskImagePath.isEmpty()) arguments.append({QStringLiteral("--mask"), request.maskImagePath});
     }
+    if (!request.controlNetPath.isEmpty() && !request.controlImagePath.isEmpty()) {
+        arguments.append({QStringLiteral("--control-net"), request.controlNetPath,
+                          QStringLiteral("--control-image"), request.controlImagePath,
+                          QStringLiteral("--control-strength"),
+                          QString::number(request.controlStrength, 'g', QLocale::FloatingPointShortest)});
+    }
     if (request.clipSkip > 0) arguments.append({QStringLiteral("--clip-skip"), QString::number(request.clipSkip)});
     if (m_requestType != RequestType::None || m_executablePath.isEmpty()) {
         return false;
@@ -360,6 +366,12 @@ void SdCliRunner::logGenerationStart(const GenerationRequest &request, const QSt
                                  .arg(request.baseImageStrength, 0, 'f', 2);
         if (!request.maskImagePath.isEmpty())
             qInfo().noquote() << QStringLiteral("[Nukleus][generation] Mask image: %1").arg(request.maskImagePath);
+    }
+    if (!request.controlNetPath.isEmpty()) {
+        qInfo().noquote() << QStringLiteral("[Nukleus][generation] ControlNet: %1").arg(request.controlNetPath);
+        qInfo().noquote() << QStringLiteral("[Nukleus][generation] Control image: %1").arg(request.controlImagePath);
+        qInfo().noquote() << QStringLiteral("[Nukleus][generation] Control strength: %1")
+                                 .arg(request.controlStrength, 0, 'g', 17);
     }
     qInfo().noquote() << QStringLiteral("[Nukleus][sd-cli] Command:\n%1")
                              .arg(commandLine(arguments));

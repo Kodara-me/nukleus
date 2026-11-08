@@ -228,6 +228,9 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
         || request.referenceImages.contains(QByteArray()))) return {};
     if (!request.maskImageData.isEmpty()
         && (request.baseImageData.isEmpty() || !request.referenceImages.isEmpty() || !canGenerateWithMask())) return {};
+    const bool controlled = !request.controlNetModelId.isEmpty() || !request.controlImageData.isEmpty() || request.controlStrength.has_value();
+    if (controlled && (request.controlNetModelId.isEmpty() || request.controlImageData.isEmpty()
+        || !request.referenceImages.isEmpty() || !canGenerateWithControl())) return {};
     QJsonObject options{{QStringLiteral("prompt"), request.prompt},
                               {QStringLiteral("negativePrompt"), request.negativePrompt},
                               {QStringLiteral("sampler"), request.sampler},
@@ -243,6 +246,18 @@ QString ServiceClient::submitGeneration(const ImageGenerationRequest &request)
                               {QStringLiteral("modelId"), request.modelId}};
     if (!request.styleId.isEmpty()) options.insert("styleId", request.styleId);
     if (!request.presetId.isEmpty()) options.insert("presetId", request.presetId);
+    if (controlled) {
+        options.insert("controlNetModelId", request.controlNetModelId);
+        if (request.controlStrength) options.insert("controlStrength", *request.controlStrength);
+        QList<QByteArray> images;
+        if (!request.baseImageData.isEmpty()) images.append(request.baseImageData);
+        if (!request.maskImageData.isEmpty()) {
+            options.insert("hasMask", true);
+            images.append(request.maskImageData);
+        }
+        images.append(request.controlImageData);
+        return submit(ImageOperation::Generate, options, images);
+    }
     if (!request.referenceImages.isEmpty()) {
         options.insert("inputCount", int(request.referenceImages.size()));
         return submit(ImageOperation::Generate, options, request.referenceImages);
@@ -372,6 +387,11 @@ bool ServiceClient::canGenerateWithMask() const
     return m_authenticated && m_capabilities.imageGenerationMask;
 }
 
+bool ServiceClient::canGenerateWithControl() const
+{
+    return m_authenticated && m_capabilities.imageGenerationControl;
+}
+
 bool ServiceClient::canAnimateMp4() const
 {
     return canAnimate() && m_capabilities.imageAnimateMp4;
@@ -451,7 +471,8 @@ void ServiceClient::handleTextMessage(const QString &message)
             operations.contains("text.chat.load") && operations.contains("text.chat.unload"),
             operations.contains("text.chat.images"), operations.contains("image.animate"),
             operations.contains("image.animate.pingPong"), operations.contains("image.animate.mp4"),
-            operations.contains("image.generate.mask")});
+            operations.contains("image.generate.mask"),
+            operations.contains("image.generate.control")});
         if (m_capabilities.modelRouting) requestModelRouting();
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
@@ -665,7 +686,8 @@ void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
         && m_capabilities.imageAnimate == capabilities.imageAnimate
         && m_capabilities.imageAnimatePingPong == capabilities.imageAnimatePingPong
         && m_capabilities.imageAnimateMp4 == capabilities.imageAnimateMp4
-        && m_capabilities.imageGenerationMask == capabilities.imageGenerationMask) return;
+        && m_capabilities.imageGenerationMask == capabilities.imageGenerationMask
+        && m_capabilities.imageGenerationControl == capabilities.imageGenerationControl) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
 }
