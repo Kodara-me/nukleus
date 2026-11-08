@@ -251,6 +251,7 @@ void ServiceTest::findsSdCliFromEnvironment_R3()
         QCOMPARE(capabilities().value("operations").toArray().contains("image.generate"), offered);
         // R1: masked image to image is offered with the image backend.
         QCOMPARE(capabilities().value("operations").toArray().contains("image.generate.mask"), offered);
+        QCOMPARE(capabilities().value("operations").toArray().contains("image.generate.control"), offered);
     };
 
     // The variable names an sd-cli that is not on PATH.
@@ -753,6 +754,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
                      "\"$@\"; do\n if [ \"$previous\" = --output ]; then cp \"$NUKLEUS_TEST_IMAGE\" "
                      "\"$argument\"; fi\n"
                      " if [ \"$previous\" = --ref-image ]; then cp \"$argument\" \"$NUKLEUS_TEST_ARGS.source\"; fi\n"
+                     " if [ \"$previous\" = --control-image ]; then cp \"$argument\" \"$NUKLEUS_TEST_ARGS.control\"; fi\n"
                      " if [ \"$previous\" = --mask ]; then cp \"$argument\" \"$NUKLEUS_TEST_ARGS.mask\"; fi\n previous=\"$argument\"\ndone\nexit 0\n");
     executable.close();
     QVERIFY(executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
@@ -984,6 +986,7 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     const auto resetCapture = [&] {
         QFile::remove(capture);
         QFile::remove(capture + ".mask");
+        QFile::remove(capture + ".control");
         images.clear();
         messages.clear();
     };
@@ -1105,6 +1108,207 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     }
     resetCapture();
 
+    // R4, R5: the control image is requested last; sd-cli gets the ControlNet, the image and the strength.
+    QVERIFY(QDir().mkpath(QDir(root).filePath("companion")));
+    for (const QString &name : {QString("openpose.safetensors"), QString("other-vae.safetensors")}) {
+        QFile file(QDir(root).filePath("companion/" + name));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("fixture");
+    }
+    QFile controlCatalog(QDir(root).filePath("companion/metadata.json"));
+    QVERIFY(controlCatalog.open(QIODevice::WriteOnly));
+    controlCatalog.write(QJsonDocument(QJsonObject{
+        {"openpose.safetensors", QJsonObject{{"recommendedOptions", QJsonObject{{"subtype", "controlnet"}}}}},
+        {"other-vae.safetensors", QJsonObject{{"recommendedOptions", QJsonObject{{"subtype", "vae"}}}}}}).toJson());
+    controlCatalog.close();
+    const QString controlNetId = "companion:openpose.safetensors";
+    const QByteArray controlBytes = headerPng(896, 1152);
+    const auto controlOptions = [&] {
+        QJsonObject options = valid;
+        options.insert("controlNetModelId", controlNetId);
+        return options;
+    };
+    const auto readCapture = [&](const QString &suffix) {
+        QFile file(capture + suffix);
+        return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+    };
+    const auto argumentAfter = [](const QStringList &args, const QString &name) {
+        const int position = args.indexOf(name);
+        return position < 0 ? QString() : args.value(position + 1);
+    };
+    // R4, R5: text to image has one upload, of role control and index 0; the strength defaults to 0.9.
+    resetCapture();
+    send("control-text", controlOptions());
+    QTRY_COMPARE(uploadRequests("control-text").size(), 1);
+    QCOMPARE(uploadRequests("control-text").first(), (QPair<QString, int>{"control", 0}));
+    QVERIFY(!terminal("control-text"));
+    socket.sendBinaryMessage(controlBytes);
+    QTRY_VERIFY(terminal("control-text"));
+    QTRY_COMPARE(images.count(), 1);
+    auto controlArgs = arguments();
+    QCOMPARE(argumentAfter(controlArgs, "--control-net"), QDir(root).filePath("companion/openpose.safetensors"));
+    QVERIFY(!argumentAfter(controlArgs, "--control-image").isEmpty());
+    QCOMPARE(readCapture(".control"), controlBytes);
+    QCOMPARE(argumentAfter(controlArgs, "--control-strength"), QString("0.9"));
+    QVERIFY(!controlArgs.contains("--init-img"));
+    QVERIFY(!controlArgs.contains("--mask"));
+    QCOMPARE(argumentAfter(controlArgs, "--steps"), QString("37"));
+    QCOMPARE(argumentAfter(controlArgs, "--cfg-scale"), QString("5.75"));
+    // A JPEG control image of the job size is accepted, and controlStrength is passed as given.
+    resetCapture();
+    send("control-jpeg", withOption(controlOptions(), "controlStrength", 1.25));
+    QTRY_COMPARE(uploadRequests("control-jpeg").size(), 1);
+    socket.sendBinaryMessage(headerJpeg(896, 1152));
+    QTRY_VERIFY(terminal("control-jpeg"));
+    QTRY_COMPARE(images.count(), 1);
+    QCOMPARE(argumentAfter(arguments(), "--control-strength"), QString("1.25"));
+    for (const double strength : {0.0, 2.0}) {
+        resetCapture();
+        const QString id = QString("control-strength-%1").arg(strength);
+        send(id, withOption(controlOptions(), "controlStrength", strength));
+        QTRY_COMPARE(uploadRequests(id).size(), 1);
+        socket.sendBinaryMessage(controlBytes);
+        QTRY_VERIFY(terminal(id));
+        QTRY_COMPARE(images.count(), 1);
+        QCOMPARE(argumentAfter(arguments(), "--control-strength").toDouble(), strength);
+    }
+    // R4, R5: image to image asks for the source, then the control image (index 1).
+    resetCapture();
+    send("control-image", withOption(withOption(controlOptions(), "hasInput", true), "baseImageStrength", 0.25));
+    QTRY_COMPARE(uploadRequests("control-image").size(), 1);
+    QCOMPARE(uploadRequests("control-image").first().first, QString("source"));
+    socket.sendBinaryMessage(image);
+    QTRY_COMPARE(uploadRequests("control-image").size(), 2);
+    QCOMPARE(uploadRequests("control-image").last(), (QPair<QString, int>{"control", 1}));
+    socket.sendBinaryMessage(controlBytes);
+    QTRY_VERIFY(terminal("control-image"));
+    QTRY_COMPARE(images.count(), 1);
+    controlArgs = arguments();
+    QVERIFY(controlArgs.contains("--init-img"));
+    QCOMPARE(argumentAfter(controlArgs, "--strength"), QString("0.25"));
+    QVERIFY(!controlArgs.contains("--mask"));
+    QCOMPARE(argumentAfter(controlArgs, "--control-net"), QDir(root).filePath("companion/openpose.safetensors"));
+    QCOMPARE(readCapture(".control"), controlBytes);
+    QVERIFY(argumentAfter(controlArgs, "--init-img") != argumentAfter(controlArgs, "--control-image"));
+    // R4, R5: masked image to image asks for the source, the mask (index 1), then the control image (index 2).
+    resetCapture();
+    QJsonObject controlMasked = controlOptions();
+    controlMasked.insert("hasInput", true);
+    controlMasked.insert("hasMask", true);
+    controlMasked.insert("baseImageStrength", 0.25);
+    send("control-masked", controlMasked);
+    QTRY_COMPARE(uploadRequests("control-masked").size(), 1);
+    QCOMPARE(uploadRequests("control-masked").first().first, QString("source"));
+    socket.sendBinaryMessage(image);
+    QTRY_COMPARE(uploadRequests("control-masked").size(), 2);
+    QCOMPARE(uploadRequests("control-masked").last(), (QPair<QString, int>{"mask", 1}));
+    socket.sendBinaryMessage(maskBytes);
+    QTRY_COMPARE(uploadRequests("control-masked").size(), 3);
+    QCOMPARE(uploadRequests("control-masked").last(), (QPair<QString, int>{"control", 2}));
+    QVERIFY(!terminal("control-masked"));
+    socket.sendBinaryMessage(controlBytes);
+    QTRY_VERIFY(terminal("control-masked"));
+    QTRY_COMPARE(images.count(), 1);
+    controlArgs = arguments();
+    QVERIFY(controlArgs.contains("--init-img"));
+    QCOMPARE(argumentAfter(controlArgs, "--strength"), QString("0.25"));
+    QVERIFY(argumentAfter(controlArgs, "--mask") != argumentAfter(controlArgs, "--control-image"));
+    QCOMPARE(readCapture(".mask"), maskBytes);
+    QCOMPARE(readCapture(".control"), controlBytes);
+    QCOMPARE(argumentAfter(controlArgs, "--control-net"), QDir(root).filePath("companion/openpose.safetensors"));
+    // A ControlNet used by a job that waits for its uploads cannot be deleted.
+    resetCapture();
+    send("control-in-use", controlOptions());
+    QTRY_COMPARE(uploadRequests("control-in-use").size(), 1);
+    socket.sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{{"type", "models.delete"}, {"id", controlNetId}}).toJson()));
+    QTRY_VERIFY(std::any_of(messages.cbegin(), messages.cend(), [](const QJsonObject &message) {
+        return message.value("code") == "model-in-use"; }));
+    QVERIFY(QFileInfo::exists(QDir(root).filePath("companion/openpose.safetensors")));
+    socket.sendBinaryMessage(controlBytes);
+    QTRY_VERIFY(terminal("control-in-use"));
+    QTRY_COMPARE(images.count(), 1);
+
+    // R6: each malformed submission is refused before any upload is requested.
+    rejectedBeforeUpload("control-blank", "image.generate", withOption(controlOptions(), "controlNetModelId", " "));
+    rejectedBeforeUpload("control-empty", "image.generate", withOption(controlOptions(), "controlNetModelId", ""));
+    rejectedBeforeUpload("control-number", "image.generate", withOption(controlOptions(), "controlNetModelId", 1));
+    rejectedBeforeUpload("control-null", "image.generate",
+        withOption(controlOptions(), "controlNetModelId", QJsonValue(QJsonValue::Null)));
+    rejectedBeforeUpload("control-unknown", "image.generate",
+        withOption(controlOptions(), "controlNetModelId", "companion:absent.safetensors"));
+    rejectedBeforeUpload("control-not-controlnet", "image.generate",
+        withOption(controlOptions(), "controlNetModelId", "companion:other-vae.safetensors"));
+    rejectedBeforeUpload("control-wrong-category", "image.generate",
+        withOption(controlOptions(), "controlNetModelId", "image-generation:model.gguf"));
+    rejectedBeforeUpload("control-bare-id", "image.generate",
+        withOption(controlOptions(), "controlNetModelId", "openpose.safetensors"));
+    int strengthIndex = 0;
+    for (const QJsonValue &strength : {QJsonValue(-0.1), QJsonValue(2.1), QJsonValue("0.5"), QJsonValue(true),
+                                       QJsonValue(QJsonValue::Null)})
+        rejectedBeforeUpload(QString("control-strength-bad-%1").arg(strengthIndex++), "image.generate",
+            withOption(controlOptions(), "controlStrength", strength));
+    rejectedBeforeUpload("strength-alone", "image.generate", withOption(valid, "controlStrength", 0.5));
+    rejectedBeforeUpload("control-references", "image.generate", withOption(controlOptions(), "inputCount", 2));
+    rejectedBeforeUpload("control-on-edit", "image.edit", withOption(editBase, "controlNetModelId", controlNetId));
+    rejectedBeforeUpload("strength-on-edit", "image.edit", withOption(editBase, "controlStrength", 0.5));
+
+    // R7: a bad control image is refused with invalid-image after its upload, and no job is queued.
+    const auto rejectedControl = [&](const QString &id, const QJsonObject &options, const QByteArray &control) {
+        resetCapture();
+        send(id, options);
+        const int before = options.value("hasMask").toBool() ? 2 : options.value("hasInput").toBool() ? 1 : 0;
+        for (int index = 0; index < before; ++index) {
+            QTRY_COMPARE(uploadRequests(id).size(), index + 1);
+            socket.sendBinaryMessage(index == 0 ? image : maskBytes);
+        }
+        QTRY_COMPARE(uploadRequests(id).size(), before + 1);
+        QCOMPARE(uploadRequests(id).last(), (QPair<QString, int>{"control", before}));
+        socket.sendBinaryMessage(control);
+        QTRY_VERIFY(terminal(id));
+        QCOMPARE(messages.last().value("code").toString(), QString("invalid-image"));
+        QCOMPARE(messages.last().value("jobId").toString(), id);
+        QVERIFY(std::none_of(messages.cbegin(), messages.cend(), [](const QJsonObject &message) {
+            return message.value("type") == "queued"; }));
+        QVERIFY(images.isEmpty());
+        QVERIFY(!QFileInfo::exists(capture));
+    };
+    rejectedControl("control-empty-upload", controlOptions(), QByteArray());
+    rejectedControl("control-large", controlOptions(), headerPng(896, 1152, 2048));
+    rejectedControl("control-gif", controlOptions(), QByteArray("GIF89a\x80\x03\x80\x04", 10));
+    rejectedControl("control-truncated-png", controlOptions(), controlBytes.left(20));
+    rejectedControl("control-wider", controlOptions(), headerPng(897, 1152));
+    rejectedControl("control-taller", controlOptions(), headerPng(896, 1153));
+    rejectedControl("control-swapped", controlOptions(), headerPng(1152, 896));
+    rejectedControl("control-jpeg-wrong", controlOptions(), headerJpeg(896, 1151));
+    // Without width and height the job size is 1024x1024.
+    QJsonObject defaultSize = controlOptions();
+    defaultSize.remove("width");
+    defaultSize.remove("height");
+    rejectedControl("control-default-size", defaultSize, controlBytes);
+    rejectedControl("control-bad-with-source", withOption(controlOptions(), "hasInput", true), headerPng(1, 1));
+    rejectedControl("control-bad-with-mask", controlMasked, headerPng(1, 1));
+    // A job refused that way leaves the connection free for the next one.
+    resetCapture();
+    send("control-after-refusals", defaultSize);
+    QTRY_COMPARE(uploadRequests("control-after-refusals").size(), 1);
+    socket.sendBinaryMessage(headerPng(1024, 1024));
+    QTRY_VERIFY(terminal("control-after-refusals"));
+    QTRY_COMPARE(images.count(), 1);
+
+    // R8: without controlNetModelId nothing changes: same uploads, no ControlNet arguments.
+    resetCapture();
+    send("no-control-masked", maskedOptions());
+    QTRY_COMPARE(uploadRequests("no-control-masked").size(), 1);
+    socket.sendBinaryMessage(image);
+    QTRY_COMPARE(uploadRequests("no-control-masked").size(), 2);
+    socket.sendBinaryMessage(maskBytes);
+    QTRY_VERIFY(terminal("no-control-masked"));
+    QTRY_COMPARE(images.count(), 1);
+    QCOMPARE(uploadRequests("no-control-masked").size(), 2);
+    for (const QString &name : {QString("--control-net"), QString("--control-image"), QString("--control-strength")})
+        QVERIFY(!arguments().contains(name));
+    resetCapture();
+
     send("automatic", valid);
     QTRY_VERIFY(terminal("automatic"));
     QTRY_COMPARE(images.count(), 1);
@@ -1117,6 +1321,9 @@ void ServiceTest::generatesWithValidatedOptionsAndVae()
     QVERIFY(!args.contains("--sampling-method"));
     QVERIFY(!args.contains("--scheduler"));
     QVERIFY(!args.contains("--clip-skip"));
+    QVERIFY(!args.contains("--control-net"));
+    QVERIFY(!args.contains("--control-image"));
+    QVERIFY(!args.contains("--control-strength"));
     QCOMPARE(args.value(args.indexOf("--cfg-scale") + 1), QString("5.75"));
     QCOMPARE(args.value(args.indexOf("--steps") + 1), QString("37"));
     QCOMPARE(args.value(args.indexOf("--vae") + 1), QDir(root).filePath(companion));

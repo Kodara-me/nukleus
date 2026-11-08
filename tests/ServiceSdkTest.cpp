@@ -9,6 +9,7 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QSet>
 #include <QWebSocket>
 #include <QWebSocketServer>
 #include <QtTest>
@@ -31,7 +32,7 @@ public:
                 const QString type = message.value(QStringLiteral("type")).toString();
                 if (type == QStringLiteral("authenticate")) {
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"authenticated\"}"));
-                    socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\",\"image.upscale\",\"image.edit\"%1,\"text.chat\",\"text.chat.load\",\"text.chat.unload\"],\"textChatEngines\":[\"server\",\"completion\"]}").arg(m_offerMask ? QStringLiteral(",\"image.generate.mask\"") : QString()));
+                    socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\",\"image.upscale\",\"image.edit\"%1,\"text.chat\",\"text.chat.load\",\"text.chat.unload\"],\"textChatEngines\":[\"server\",\"completion\"]}").arg((m_offerMask ? QStringLiteral(",\"image.generate.mask\"") : QString()) + (m_offerControl ? QStringLiteral(",\"image.generate.control\"") : QString())));
                     socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list.result\",\"categories\":[{\"category\":\"image-generation\",\"models\":[{\"id\":\"image-generation:test.safetensors\",\"name\":\"Test\",\"fileName\":\"test.safetensors\",\"bytes\":1,\"modelType\":\"diffusion\",\"explicitContent\":true,\"companionFiles\":{\"clip-l\":\"companions/test.safetensors/clip-l/clip_l.safetensors\"},\"companionFileName\":\"companions/test.safetensors/vae.safetensors\",\"companionRole\":\"vae\",\"displayName\":\"Test\"}]},{\"category\":\"upscaler\",\"models\":[{\"id\":\"upscaler:test.gguf\",\"name\":\"Test 2x\",\"fileName\":\"test.gguf\",\"bytes\":2,\"displayName\":\"Test 2x\"}]},{\"category\":\"llm-chat\",\"models\":[{\"id\":\"llm-chat:test.gguf\",\"name\":\"Test LLM\",\"fileName\":\"llm.gguf\",\"bytes\":3,\"companionFileName\":\"companions/llm.gguf/mmproj.gguf\",\"companionRole\":\"mmproj\",\"displayName\":\"Test LLM\"}]}]}"));
                 } else if (type == "models.configure") {
                     const QJsonObject reply{{"type", "models.configure.completed"}, {"id", message.value("id")}, {"model", QJsonObject{{"recommendedOptions", message.value("recommendedOptions")}}}};
@@ -56,10 +57,14 @@ public:
                                 {"json", QJsonObject{{"speech", "*smiles* Hello"}}},
                                 {"usage", QJsonObject{{"promptTokens", 42}, {"completionTokens", 7}}}};
                         socket->sendTextMessage(QString::fromUtf8(QJsonDocument(reply).toJson(QJsonDocument::Compact)));
-                    } else if (options.value("hasInput").toBool()) {
+                    } else if (options.value("hasInput").toBool() || options.contains("controlNetModelId")) {
+                        const bool controlled = options.contains("controlNetModelId");
                         m_uploadJobs.insert(socket, jobId);
-                        m_expectedUploads.insert(socket, options.value("hasMask").toBool() ? 2 : 1);
-                        socket->sendTextMessage(options.value("hasMask").toBool()
+                        m_expectedUploads.insert(socket, (options.value("hasMask").toBool() ? 2 : options.value("hasInput").toBool() ? 1 : 0) + (controlled ? 1 : 0));
+                        if (controlled) m_controlJobs.insert(socket);
+                        if (!options.value("hasInput").toBool())
+                            socket->sendTextMessage(QStringLiteral("{\"type\":\"upload-required\",\"jobId\":\"%1\",\"inputRole\":\"control\",\"inputIndex\":0}").arg(jobId));
+                        else socket->sendTextMessage(options.value("hasMask").toBool() || controlled
                             ? QStringLiteral("{\"type\":\"upload-required\",\"jobId\":\"%1\",\"inputRole\":\"source\",\"inputIndex\":0}").arg(jobId)
                             : QStringLiteral("{\"type\":\"upload-required\",\"jobId\":\"%1\"}").arg(jobId));
                     } else {
@@ -71,12 +76,13 @@ public:
                 m_uploadedImages.append(data);
                 if (++m_receivedUploads[socket] < m_expectedUploads.value(socket, 1)) {
                     // A masked job: the source arrived, the mask is next.
-                    socket->sendTextMessage(QStringLiteral("{\"type\":\"upload-required\",\"jobId\":\"%1\",\"inputRole\":\"mask\",\"inputIndex\":1}")
-                        .arg(m_uploadJobs.value(socket)));
+                    socket->sendTextMessage(QStringLiteral("{\"type\":\"upload-required\",\"jobId\":\"%1\",\"inputRole\":\"%2\",\"inputIndex\":%3}")
+                        .arg(m_uploadJobs.value(socket), m_controlJobs.contains(socket) && m_receivedUploads[socket] == m_expectedUploads.value(socket) - 1 ? QStringLiteral("control") : QStringLiteral("mask")).arg(m_receivedUploads[socket]));
                     return;
                 }
                 m_receivedUploads.remove(socket);
                 m_expectedUploads.remove(socket);
+                m_controlJobs.remove(socket);
                 const QString jobId = m_uploadJobs.take(socket);
                 complete(socket, jobId, data.isEmpty() ? QByteArray("sdk-result") : QByteArray("sdk-result"));
             });
@@ -84,6 +90,7 @@ public:
     }
 
     void offerMask(bool offered) { m_offerMask = offered; }
+    void offerControl(bool offered) { m_offerControl = offered; }
     bool start() { return m_server.listen(QHostAddress::LocalHost); }
     QString errorString() const { return m_server.errorString(); }
     QUrl endpoint() const { return QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(m_server.serverPort())); }
@@ -107,7 +114,9 @@ private:
     QList<QByteArray> m_uploadedImages;
     QHash<QWebSocket *, int> m_expectedUploads;
     QHash<QWebSocket *, int> m_receivedUploads;
+    QSet<QWebSocket *> m_controlJobs;
     bool m_offerMask = false;
+    bool m_offerControl = false;
 };
 }
 
@@ -187,6 +196,7 @@ private slots:
     void submitsTextChat();
     void supportsMultipleJobs();
     void submitsMaskedGeneration();
+    void submitsControlledGeneration();
     void installsModelWithCompanion();
     void installsModularCompanionsForExistingModel();
     void reportsConnectionFailure();
@@ -495,6 +505,76 @@ void ServiceSdkTest::submitsMaskedGeneration()
     QVERIFY(plain != service.messages().cend());
     QVERIFY(!plain->value("options").toObject().contains("hasMask"));
     QCOMPARE(service.uploadedImages().size(), 3);
+}
+
+void ServiceSdkTest::submitsControlledGeneration()
+{
+    // R3, R9: a service without image.generate.control gets nothing for a controlled request.
+    {
+        FakeSdkService service; QVERIFY2(service.start(), qPrintable(service.errorString()));
+        Nukleus::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+        QTRY_VERIFY(client.modelListAvailable());
+        QVERIFY(!client.capabilities().imageGenerationControl);
+        QVERIFY(!client.canGenerateWithControl());
+        Nukleus::ImageGenerationRequest request; request.prompt = QStringLiteral("p");
+        request.modelId = QStringLiteral("image-generation:test.safetensors");
+        request.controlNetModelId = QStringLiteral("companion:pose.safetensors"); request.controlImageData = QByteArray("control");
+        const int before = int(service.messages().size());
+        QVERIFY(client.submitGeneration(request).isEmpty());
+        QCOMPARE(int(service.messages().size()), before);
+    }
+    FakeSdkService service; service.offerControl(true); service.offerMask(true);
+    QVERIFY2(service.start(), qPrintable(service.errorString()));
+    Nukleus::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+    QTRY_VERIFY(client.modelListAvailable());
+    QTRY_VERIFY(client.canGenerateWithControl());
+    QVERIFY(client.capabilities().imageGenerationControl);
+    QSignalSpy finished(&client, &Nukleus::ServiceClient::imageJobFinished);
+    Nukleus::ImageGenerationRequest request; request.prompt = QStringLiteral("p");
+    request.modelId = QStringLiteral("image-generation:test.safetensors");
+    const auto sent = [&](const QString &jobId) {
+        const auto submit = std::find_if(service.messages().cbegin(), service.messages().cend(), [&](const QJsonObject &message) {
+            return message.value("type").toString() == QStringLiteral("submit") && message.value("jobId").toString() == jobId; });
+        return submit == service.messages().cend() ? QJsonObject() : submit->value("options").toObject();
+    };
+    // R9: only one of the ControlNet and the control image, or reference images, and nothing is sent.
+    const int before = int(service.messages().size());
+    Nukleus::ImageGenerationRequest modelOnly = request; modelOnly.controlNetModelId = QStringLiteral("companion:pose.safetensors");
+    QVERIFY(client.submitGeneration(modelOnly).isEmpty());
+    Nukleus::ImageGenerationRequest imageOnly = request; imageOnly.controlImageData = QByteArray("control");
+    QVERIFY(client.submitGeneration(imageOnly).isEmpty());
+    Nukleus::ImageGenerationRequest withReferences = request;
+    withReferences.controlNetModelId = QStringLiteral("companion:pose.safetensors"); withReferences.controlImageData = QByteArray("control");
+    withReferences.referenceImages = {QByteArray("reference")};
+    QVERIFY(client.submitGeneration(withReferences).isEmpty());
+    Nukleus::ImageGenerationRequest maskWithoutBase = request; maskWithoutBase.maskImageData = QByteArray("mask");
+    maskWithoutBase.controlNetModelId = QStringLiteral("companion:pose.safetensors"); maskWithoutBase.controlImageData = QByteArray("control");
+    QVERIFY(client.submitGeneration(maskWithoutBase).isEmpty());
+    QCOMPARE(int(service.messages().size()), before);
+    // R9: text to image sends the ControlNet and uploads the control image alone; the strength is left out when unset.
+    request.controlNetModelId = QStringLiteral("companion:pose.safetensors"); request.controlImageData = QByteArray("control");
+    const QString textId = client.submitGeneration(request);
+    QVERIFY(!textId.isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    QCOMPARE(sent(textId).value("controlNetModelId").toString(), QString("companion:pose.safetensors"));
+    QVERIFY(!sent(textId).contains("controlStrength"));
+    QVERIFY(!sent(textId).contains("hasMask"));
+    QCOMPARE(sent(textId).value("hasInput").toBool(), false);
+    QCOMPARE(service.uploadedImages(), (QList<QByteArray>{"control"}));
+    // R9: the control image follows the base image, and controlStrength is sent when set.
+    request.baseImageData = QByteArray("source"); request.controlStrength = 1.25;
+    const QString imageId = client.submitGeneration(request);
+    QVERIFY(!imageId.isEmpty());
+    QTRY_COMPARE(finished.count(), 2);
+    QCOMPARE(sent(imageId).value("controlStrength").toDouble(), 1.25);
+    QCOMPARE(service.uploadedImages(), (QList<QByteArray>{"control", "source", "control"}));
+    // R9: with a mask the order is source, mask, control.
+    request.maskImageData = QByteArray("mask");
+    const QString maskedId = client.submitGeneration(request);
+    QVERIFY(!maskedId.isEmpty());
+    QTRY_COMPARE(finished.count(), 3);
+    QCOMPARE(sent(maskedId).value("hasMask").toBool(), true);
+    QCOMPARE(service.uploadedImages(), (QList<QByteArray>{"control", "source", "control", "source", "mask", "control"}));
 }
 
 void ServiceSdkTest::reportsConnectionFailure()
