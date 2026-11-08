@@ -382,6 +382,7 @@ an input upload. Invalid types or ranges return `invalid-request` correlated to
 | hasMask | Optional boolean; defaults to false; needs `hasInput: true`, not allowed with `inputCount` or on `image.edit` (see below) |
 | controlNetModelId | Optional nonblank string: the id of an installed `companion` of subtype `controlnet`; asks for a control image upload (see below); not allowed with `inputCount` or on `image.edit` |
 | controlStrength | Optional finite number 0–2; defaults to 0.9; needs `controlNetModelId` |
+| loras | Optional array of 1–8 objects `{"modelId", "weight"}` (no other key): `modelId` a nonblank string naming an installed `companion` of subtype `lora`, distinct within the array; `weight` an optional finite number -10–10, default 1.0; not allowed on `image.edit` (see below) |
 
 With `inputCount`, the service sends one `upload-required` per reference image
 (`inputIndex` 0…n-1, role `reference`); the client answers each with one binary
@@ -470,6 +471,57 @@ image after the base image and the mask, and returns an empty job ID, sending
 nothing, when only one of `controlNetModelId` and `controlImageData` is set, when
 they come with `referenceImages`, or when the service does not report
 `image.generate.control`.
+
+### Image generation with LoRAs
+
+`capabilities.operations` includes `image.generate.lora` when the image backend is
+ready; a service without it rejects `loras` as an unknown option with
+`invalid-request`. Each entry names a `companion` of subtype `lora` (see the
+companion subtypes above) and, optionally, a weight:
+
+```json
+"loras": [{"modelId": "companion:clara.safetensors", "weight": 0.8},
+          {"modelId": "companion:alex.safetensors"}]
+```
+
+Because the client names each LoRA itself, an id that is not an installed LoRA
+companion is a malformed request and is rejected with `invalid-request`, not
+`model-unavailable`. `loras` adds no upload and combines with `hasInput`,
+`hasMask`, `controlNetModelId` and `inputCount`: every other option, the source,
+the mask and the ControlNet included, is passed to sd-cli as for the same job
+without `loras`. A weight of 0 applies nothing, as for the animation LoRAs; a
+negative weight is allowed.
+
+The service applies the LoRAs: it appends ` <lora:NAME:W>` to the prompt it passes
+to sd-cli, once per nonzero weight and in request order, where NAME is the LoRA
+file name without its last extension, and passes the companion directory as
+`--lora-model-dir` when at least one tag was added. Results never echo the tags.
+Without `loras`, or with only weights of 0, the backend receives no LoRA directory
+and no tag. A LoRA used by a queued, waiting or running job cannot be deleted
+(`model-in-use`), as for any other file a job uses.
+
+Clients cannot write LoRA tags themselves: an `image.generate` or `image.edit`
+whose `prompt` or `negativePrompt` contains `<lora:`, in any letter case, is
+rejected with `invalid-request` before any upload is requested, with or without
+`loras`. The check covers the client's text only. A style, preset or quality
+prefix is configured on the service and is not checked: one that contains a LoRA
+tag loads that file from the companion directory as soon as `loras` sets
+`--lora-model-dir`, so keep LoRA tags out of the prefixes.
+
+`loras` that is not an array of 1 to 8 objects, an entry with a key other than
+`modelId` and `weight`, a `modelId` that is blank, not a string, not an installed
+LoRA companion or repeated in the array, a `weight` that is not a finite number
+from -10 to 10, and `loras` on `image.edit` are rejected with `invalid-request`
+before any upload is requested. As for companions in general, the service does not
+check that a LoRA's layers match the checkpoint: the client picks LoRAs trained for
+the checkpoint's architecture, and a mismatch is not detected by the service.
+
+SDK clients fill `ImageGenerationRequest::loras` (a list of `LoraWeight`, `modelId`
+and an optional `weight`) and check `ServiceClient::canGenerateWithLoras()`
+(`ServiceCapabilities::imageGenerationLora`). `submitGeneration` sends `loras`, with
+`weight` only when it is set, and returns an empty job ID, sending nothing, when the
+service does not report `image.generate.lora`. `submitEdit` returns an empty job ID,
+sending nothing, when `loras` is not empty, since `image.edit` has no LoRAs.
 
 Automatic sampler/scheduler flags are omitted from the backend command. Positive
 Clip Skip values are forwarded; -1 omits the flag. CFG and image strength retain

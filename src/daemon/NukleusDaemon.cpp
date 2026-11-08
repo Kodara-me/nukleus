@@ -43,14 +43,34 @@ bool validNumber(const QJsonObject &object, const QString &name, double minimum,
         && (!integer || std::floor(number) == number);
 }
 
+constexpr int MaximumGenerationLoras = 8;
+
 bool validGenerationOptions(const QJsonObject &options)
 {
     const QStringList allowed{"modelId", "prompt", "negativePrompt", "width", "height",
         "steps", "cfgScale", "clipSkip", "seed", "sampler", "scheduler",
         "hasInput", "hasMask", "inputCount", "baseImageStrength", "styleId", "presetId", "qualityId",
-        "controlNetModelId", "controlStrength"};
+        "controlNetModelId", "controlStrength", "loras"};
     for (const auto& key : options.keys())
         if (!allowed.contains(key)) return false;
+    // LoRA tags are the service's to write, from the loras option: a client tag could name any companion file.
+    for (const auto &key : {QStringLiteral("prompt"), QStringLiteral("negativePrompt")})
+        if (options.value(key).toString().contains(QStringLiteral("<lora:"), Qt::CaseInsensitive)) return false;
+    if (options.contains("loras")) {
+        const QJsonValue loras = options.value("loras");
+        if (!loras.isArray() || loras.toArray().isEmpty() || loras.toArray().size() > MaximumGenerationLoras) return false;
+        QStringList seen;
+        for (const auto &entry : loras.toArray()) {
+            if (!entry.isObject()) return false;
+            const QJsonObject lora = entry.toObject();
+            for (const auto &key : lora.keys())
+                if (key != QStringLiteral("modelId") && key != QStringLiteral("weight")) return false;
+            const QString id = lora.value("modelId").toString();
+            if (!lora.value("modelId").isString() || id.trimmed().isEmpty() || seen.contains(id)) return false;
+            if (lora.contains("weight") && !validNumber(lora, "weight", -10, 10, false, false)) return false;
+            seen.append(id);
+        }
+    }
     const auto optionalString = [&options](const QString &key) {
         return !options.contains(key) || options.value(key).isString();
     };
@@ -334,6 +354,7 @@ struct NukleusDaemon::Submission
     QString clipLPath;
     QString clipGPath;
     QString controlNetPath;
+    QList<QPair<QString, double>> loras; // Installed LoRA file and weight, in request order.
     bool diffusionModel = false;
     QPointer<QWebSocket> client;
     int expectedInputs = 1;
@@ -354,6 +375,7 @@ struct NukleusDaemon::Job
     QString clipLPath;
     QString clipGPath;
     QString controlNetPath;
+    QList<QPair<QString, double>> loras;
     bool diffusionModel = false;
     QPointer<QWebSocket> client;
     std::unique_ptr<QTemporaryDir> directory = std::make_unique<QTemporaryDir>();
@@ -699,6 +721,25 @@ void NukleusDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         }
         controlNetPath = controlNet->filePath;
     }
+    // LoRAs are chosen per job among the installed companions of subtype lora; like the ControlNet, an
+    // unknown one is a malformed request. They add no upload and combine with source, mask and ControlNet.
+    QList<QPair<QString, double>> loras;
+    if (options.contains("loras")) {
+        if (edit) {
+            sendError(socket, QStringLiteral("invalid-request"), tr("LoRAs are only supported for image generation"), jobId);
+            return;
+        }
+        for (const auto &entry : options.value("loras").toArray()) {
+            const QJsonObject lora = entry.toObject();
+            const QString loraId = lora.value("modelId").toString();
+            const auto loraModel = loraId.startsWith(QStringLiteral("companion:")) ? m_models->modelById(loraId) : std::nullopt;
+            if (!loraModel || loraModel->recommendedOptions.value("subtype").toString() != QStringLiteral("lora")) {
+                sendError(socket, QStringLiteral("invalid-request"), tr("The LoRA is not an installed companion of subtype lora"), jobId);
+                return;
+            }
+            loras.append({loraModel->filePath, lora.value("weight").toDouble(1.0)});
+        }
+    }
     if (!edit && options.contains("inputCount") && (!generate || options.value("hasInput").toBool())) {
         sendError(socket, QStringLiteral("invalid-request"),
             tr("Reference images are only supported for image editing and generation without a base image"), jobId);
@@ -755,6 +796,7 @@ void NukleusDaemon::submit(QWebSocket *socket, const QJsonObject &message)
         submission->expectedInputs = before + 1;
         submission->controlNetPath = controlNetPath;
     }
+    submission->loras = loras;
     submission->modelPath = model->filePath;
     if ((generate || edit) && model->companionRole == QStringLiteral("vae") && !model->companionFileName.isEmpty())
         submission->vaePath = QDir(QFileInfo(model->filePath).absolutePath()).filePath(model->companionFileName);
@@ -816,6 +858,7 @@ void NukleusDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     job->llmVisionPath = submission->llmVisionPath;
     job->clipLPath = submission->clipLPath;
     job->clipGPath = submission->clipGPath;
+    job->loras = submission->loras;
     job->diffusionModel = submission->diffusionModel;
     job->client = socket;
     enqueue(job);
@@ -1038,6 +1081,7 @@ bool NukleusDaemon::modelInUse(const QString &path) const
     const auto usesModel = [&path](const auto &job) {
         return job && (job->modelPath == path || job->vaePath == path || job->llmPath == path || job->llmVisionPath == path
                        || (!job->controlNetPath.isEmpty() && job->controlNetPath == path)
+                       || std::any_of(job->loras.cbegin(), job->loras.cend(), [&path](const auto &lora) { return lora.first == path; })
                        || (job->animation && job->animation->files.contains(path)));
     };
     if (usesModel(m_activeJob)) return true;
@@ -1130,6 +1174,7 @@ void NukleusDaemon::processBinaryMessage(QWebSocket* socket, const QByteArray& d
     job->clipLPath = submission->clipLPath;
     job->clipGPath = submission->clipGPath;
     job->controlNetPath = submission->controlNetPath;
+    job->loras = submission->loras;
     job->diffusionModel = submission->diffusionModel;
     job->animation = submission->animation;
     job->client = socket;
@@ -1237,6 +1282,9 @@ void NukleusDaemon::runActiveJob()
             request.controlImagePath = m_activeJob->inputPaths.value(m_activeJob->inputPaths.size() - 1);
             request.controlStrength = o.value(QStringLiteral("controlStrength")).toDouble(request.controlStrength);
         }
+        for (const auto &[path, weight] : m_activeJob->loras)
+            request.loras.append({QFileInfo(path).completeBaseName(), weight});
+        if (!m_activeJob->loras.isEmpty()) request.loraDirectory = QFileInfo(m_activeJob->loras.first().first).absolutePath();
         if (!m_sdRunner || !m_sdRunner->runGeneration(request)) { sendError(m_activeJob->client, QStringLiteral("start-failed"), tr("Could not start generation"), m_activeJob->id); m_activeJob.reset(); startNextJob(); }
     } else if (m_activeJob->operation == Operation::Upscale) {
         m_activeJob->outputPath = m_activeJob->directory->filePath(QStringLiteral("result.png"));
@@ -1319,6 +1367,7 @@ void NukleusDaemon::sendCapabilities(QWebSocket *socket) const
         operations.append(QStringLiteral("image.generate"));
         operations.append(QStringLiteral("image.generate.mask"));
         operations.append(QStringLiteral("image.generate.control"));
+        operations.append(QStringLiteral("image.generate.lora"));
         operations.append(QStringLiteral("image.upscale"));
         operations.append(QStringLiteral("image.edit"));
         operations.append(QStringLiteral("image.animate"));
