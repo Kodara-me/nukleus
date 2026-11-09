@@ -84,7 +84,7 @@ from an elevated PowerShell.
   a path is under `C:\Users\...` (for llama.cpp, `winget install ggml.llamacpp --scope machine`),
   and warns, without stopping, about a tool it cannot find.
 - Optional, to train LoRAs: the kohya-ss/sd-scripts trainer with its `venv`, outside `C:\Users`,
-  installed from [LoRA training](lora-training.md#windows) and given with `-LoraTrainer`
+  installed from [LoRA training](lora-training.md#windows) and given with `-LoraTrainer`.
 
 ### Installing and updating
 

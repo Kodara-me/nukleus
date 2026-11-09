@@ -352,6 +352,12 @@ try {
     Assert-Match $run.Out '(?m)^    NUKLEUS_LORA_TRAINER=D:\\gone\\sd-scripts$' 'R15: it is still kept'
     Assert-NoMatch $run.Out '(?m)^\+ icacls D:\\gone' 'R15: nothing is granted on a directory that does not exist'
 
+    # R15, D13: a stored trainer under C:\Users is refused like a new one, and nothing is granted on it.
+    $profileState = New-InstalledState @{ imagePath = "`"$installDir\nukleusd.exe`" --listen 127.0.0.1 --port 9384"; environment = @('NUKLEUS_LORA_TRAINER=C:\Users\alice\sd-scripts') } $null $true $false @('Nukleus')
+    $run = Invoke-Script $install @('-BuildDir', $buildDir, '-QtDir', $qtDir) $profileState
+    Assert-Refusal $run 'NUKLEUS_LORA_TRAINER' 'R15: a stored trainer under C:\Users'
+    Assert-Match $run.Err ([regex]::Escape('C:\Users\alice\sd-scripts')) 'R15: the refusal names the stored path'
+
     # R15: with neither the option nor a stored value, nothing is stored and nothing is said.
     $run = Invoke-Script $install $backendArgs $null
     Assert-NoMatch $run.Out 'NUKLEUS_LORA_TRAINER' 'R15: no trainer, nothing stored'
