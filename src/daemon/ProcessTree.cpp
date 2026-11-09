@@ -19,6 +19,8 @@
 #include <unistd.h>
 #ifdef Q_OS_LINUX
 #include <sys/prctl.h>
+#include <QDir>
+#include <QFile>
 #endif
 #endif
 
@@ -29,6 +31,32 @@ constexpr int PollIntervalMs = 20;
 constexpr qint64 TerminateGraceMs = 3000;
 // A process that survives SIGKILL for this long is stuck in the kernel; stop waiting for it.
 constexpr qint64 GiveUpMs = 30000;
+
+#ifdef Q_OS_LINUX
+// True when a process of the group is alive. kill(-pgid, 0) also succeeds while the group only holds
+// zombies, which stay until their parent reaps them; a parent that never does (a container's PID 1) would
+// keep the group "running" forever, so every process of the group is looked at: only a state other than Z counts.
+bool groupHasLiveProcess(pid_t group)
+{
+    const QStringList entries = QDir(QStringLiteral("/proc")).entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString &entry : entries) {
+        bool numeric = false;
+        entry.toLongLong(&numeric);
+        if (!numeric) continue;
+        QFile file(QStringLiteral("/proc/%1/stat").arg(entry));
+        if (!file.open(QIODevice::ReadOnly)) continue;
+        const QByteArray line = file.readLine();
+        // "pid (comm) state ppid pgrp ...": the name may hold spaces and parentheses, so start after the last ')'.
+        const qsizetype close = line.lastIndexOf(')');
+        if (close < 0) continue;
+        const QList<QByteArray> fields = line.mid(close + 1).trimmed().split(' ');
+        if (fields.size() < 3) continue;
+        if (fields.at(0) == "Z" || fields.at(0) == "X") continue;
+        if (fields.at(2).toLongLong() == static_cast<qint64>(group)) return true;
+    }
+    return false;
+}
+#endif
 }
 
 ProcessTree::ProcessTree(QObject *parent)
@@ -138,7 +166,12 @@ bool ProcessTree::isRunning() const
     return information.ActiveProcesses > 0;
 #else
     if (m_group <= 0) return false;
-    return ::kill(-static_cast<pid_t>(m_group), 0) == 0 || errno == EPERM;
+    const bool exists = ::kill(-static_cast<pid_t>(m_group), 0) == 0 || errno == EPERM;
+#ifdef Q_OS_LINUX
+    return exists && groupHasLiveProcess(static_cast<pid_t>(m_group));
+#else
+    return exists;
+#endif
 #endif
 }
 

@@ -963,8 +963,10 @@ service starts; restart the service after installing or changing the trainer.
 Importing PyTorch is not part of it: a broken GPU stack is reported by the job.
 Without the capability, a `lora.train` submission fails with `backend-not-ready`,
 correlated to the `jobId`, before any upload is requested. Nothing limits the
-operation to one platform; AMD states that its ROCm PyTorch wheels for Windows have
-no training support, so the guide covers Linux.
+operation to one platform. AMD states that its ROCm PyTorch wheels for Windows have
+no training support; the guide describes the Windows setup that was installed and
+checked (PyTorch sees the GPU), but no training job has been run there yet, and the
+Linux setup is not yet verified.
 
 **Submission.** The images travel through the upload flow, one binary frame per
 image, and the captions in the options:
@@ -1040,6 +1042,7 @@ or not a model installation (`models.install`) is in progress. It then sends the
 | `model-unavailable` | `baseModelId` names no installed model. |
 | `invalid-image` | An upload is empty, too large, or not a PNG or JPEG. |
 | `queue-full` | The queue is full, as for every job. |
+| `start-failed` | The service could not prepare the job locally (captions, `dataset.toml`, caches) or could not start the trainer. |
 | `generation-failed` | The trainer exited with another code or wrote no output file: the message holds the trainer command, its exit code and up to 4096 trailing characters of its error output. It is also sent when the output cannot be installed because its base name, ignoring case, is now held by an installed companion or by a file a model installation is downloading, or because copying it into the companion directory failed: the message names that cause. |
 
 A failed job leaves the model catalog unchanged and no file of the job in the

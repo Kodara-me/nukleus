@@ -8,21 +8,71 @@ from the pinned steps below, and give the directory to the service with
 sd-cli, llama-server and ffmpeg, as a child of the service with the rights of the
 service account.
 
-The guide covers Linux with an AMD GPU and ROCm, the setup that AMD supports for
-training. AMD states that its ROCm PyTorch wheels for Windows have "No ML training
-support". Nukleus does not block the operation on Windows: it is offered whenever
-`NUKLEUS_LORA_TRAINER` names a working trainer. If you try it there and it fails, train
-on Linux and keep installing the resulting file as a LoRA companion.
+The guide covers two setups with an AMD GPU:
+
+- **Windows** with AMD's ROCm 7.2.1 PyTorch wheels. This is the installation that was
+  actually done and checked (PyTorch sees an RX 7900 XTX), but AMD states that these
+  wheels have "No ML training support" and no training job has been run there yet.
+- **Linux** with ROCm, the setup that AMD supports for training. These steps are **not
+  yet verified**: nobody has run them. Only the sd-scripts commit is aligned with the
+  Windows installation; the other versions come from the ROCm 6.1 era and may need
+  adjusting.
+
+Nukleus does not block the operation on either platform: it is offered whenever
+`NUKLEUS_LORA_TRAINER` names a working trainer. If training fails on Windows, train on
+Linux and keep installing the resulting file as a LoRA companion.
 
 Training and image generation share the GPU. A `lora.train` job waits for the queue
 like any other job, unloads llama-server before it runs, and holds the GPU until it
 ends: expect image jobs to wait, and 1500 steps at 1024 pixels to take tens of
 minutes.
 
-## Versions
+## Windows
 
-Everything below is pinned. Other versions may work, but these are the ones the steps
-were written for.
+Verified on Windows 11 with an AMD Radeon RX 7900 XTX. Run these in an administrator
+PowerShell with network access; you do this, not Nukleus.
+
+| Component | Version |
+| --- | --- |
+| Python | 3.12.10, installed for all users in `C:\Program Files\Python312` |
+| kohya-ss/sd-scripts | commit `cb70b96` ("Merge pull request #2477 from kohya-ss/dev"), in `C:\Tools\sd-scripts` |
+| venv | `C:\Tools\sd-scripts\venv` |
+| ROCm wheels | AMD's ROCm 7.2.1 wheels from `https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/` |
+| PyTorch | `2.9.1+rocm7.2.1` (torch and torchaudio 2.9.1+rocm7.2.1, torchvision 0.24.1+rocm7.2.1, cp312) |
+
+Result on that machine: torch `2.9.1+rocm7.2.1`, `torch.cuda.is_available()` true, device
+"AMD Radeon RX 7900 XTX"; transformers 5.17.0, diffusers 0.40.0, accelerate 1.15.0.
+
+1. Install Python 3.12.10 for all users (`C:\Program Files\Python312`).
+2. Get sd-scripts at the pinned commit (a shallow clone does not hold it):
+
+   ```powershell
+   git clone https://github.com/kohya-ss/sd-scripts.git C:\Tools\sd-scripts
+   git -C C:\Tools\sd-scripts checkout cb70b96
+   ```
+
+3. Create the venv:
+   `& "C:\Program Files\Python312\python.exe" -m venv C:\Tools\sd-scripts\venv`.
+4. Install AMD's wheels from the repository above with the venv's `pip`, in this order:
+   first `rocm_sdk_core`, `rocm_sdk_devel`, `rocm_sdk_libraries_custom` and
+   `rocm-7.2.1.tar.gz`; then `torch-2.9.1+rocm7.2.1`, `torchaudio-2.9.1+rocm7.2.1` and
+   `torchvision-0.24.1+rocm7.2.1` (cp312). Use the exact file names listed in that
+   directory.
+5. Install sd-scripts' requirements:
+   `C:\Tools\sd-scripts\venv\Scripts\pip install -r C:\Tools\sd-scripts\requirements.txt`.
+6. Check: `C:\Tools\sd-scripts\venv\Scripts\python -c "import torch; print(torch.__version__, torch.cuda.is_available())"`
+   prints `2.9.1+rocm7.2.1 True`.
+7. Fill the tokenizer cache as in step 6 of the Linux steps, into
+   `C:\Tools\sd-scripts\tokenizers`.
+8. Set `NUKLEUS_LORA_TRAINER=C:\Tools\sd-scripts` for the service and restart it.
+
+No training job has been run on this setup yet.
+
+## Linux (not yet verified)
+
+### Versions
+
+Everything below is pinned, but unverified. Other versions may work.
 
 | Component | Version |
 | --- | --- |
@@ -30,7 +80,7 @@ were written for.
 | PyTorch | 2.4.1+rocm6.1 |
 | torchvision | 0.19.1+rocm6.1 |
 | PyTorch wheel index | `https://download.pytorch.org/whl/rocm6.1` |
-| kohya-ss/sd-scripts | tag `v0.9.1` |
+| kohya-ss/sd-scripts | commit `cb70b96`, as on Windows |
 | Host | the amdgpu kernel driver of ROCm 6.1 or newer, and a GPU that ROCm supports (an RX 7900 XTX is `gfx1100`) |
 
 The PyTorch wheels bring their own ROCm 6.1 libraries; the host needs the kernel driver
@@ -70,10 +120,11 @@ downloads anything, and you do it, not Nukleus.
    sudo make install
    ```
 
-3. Get sd-scripts at the pinned tag:
+3. Get sd-scripts at the pinned commit (a shallow clone does not hold it):
 
    ```sh
-   sudo git clone --branch v0.9.1 --depth 1 https://github.com/kohya-ss/sd-scripts.git /opt/sd-scripts
+   sudo git clone https://github.com/kohya-ss/sd-scripts.git /opt/sd-scripts
+   sudo git -C /opt/sd-scripts checkout cb70b96
    ```
 
 4. Create the `venv` beside the scripts with that Python:

@@ -183,7 +183,7 @@ int main(int argc, char **argv)
     const std::string self = selfPath();
     const fs::path trainer = fs::path(self).parent_path().parent_path().parent_path();
     if (arguments.size() == 1 && arguments.front() == "--version") {
-        std::puts("Python 3.10.12");
+        std::puts("Python 3.12.10");
         return std::atoi(value(readControl(trainer, ""), "versionExit", "0").c_str());
     }
     if (arguments.empty()) return 2;

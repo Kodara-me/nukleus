@@ -12,7 +12,8 @@ public:
     // Caches the LoRA trainer's libraries write (ROCm kernels, compiler output, ...), kept between jobs.
     static QString trainerCachePath();
     // Removes everything under trainingPath(). Returns false, naming the entry, when one cannot be removed.
-    static bool emptyTrainingPath(QString *errorMessage = nullptr);    static QString modelsPath();
+    static bool emptyTrainingPath(QString *errorMessage = nullptr);
+    static QString modelsPath();
     static QString upscaleModelsPath();
     static QString chatModelsPath();
     static QString legacyDataRoot();
