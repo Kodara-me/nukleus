@@ -541,7 +541,8 @@ void ModelCatalog::removeTrainedLoraLeftovers() const
     if (directoryPath(ModelCategory::Companion).isEmpty()) return;
     const QDir companions(directoryPath(ModelCategory::Companion));
     for (const QFileInfo &leftover : companions.entryInfoList({QStringLiteral("*") + QLatin1String(TrainedLoraStagingSuffix)}, QDir::Files | QDir::Hidden))
-        QFile::remove(leftover.absoluteFilePath());
+        if (!QFile::remove(leftover.absoluteFilePath()))
+            qWarning().noquote() << QStringLiteral("[Nukleus] Could not remove the half-copied trained file %1; a training of the same name will fail to install.").arg(leftover.absoluteFilePath());
 }
 
 void ModelCatalog::cancel(const QString &installId)
