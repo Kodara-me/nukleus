@@ -148,6 +148,41 @@ struct AnimationResult
     QString message;
 };
 
+// One training image of a lora.train request with its caption.
+struct LoraTrainingImage
+{
+    QByteArray data; // PNG or JPEG.
+    QString caption; // Nonblank, at most 1000 characters.
+};
+
+// A lora.train request: trains a LoRA for an installed SDXL checkpoint and installs it as a lora companion.
+// A setting left unset uses the service default (docs/protocol-v3.md, "Training a LoRA").
+struct LoraTrainingRequest
+{
+    QString baseModelId; // An installed SDXL image-generation checkpoint.
+    QString outputName;  // 1 to 64 characters of A-Z, a-z, 0-9, _ and -; installed as <outputName>.safetensors.
+    QList<LoraTrainingImage> images; // 1 to 64 images, uploaded in this order.
+    std::optional<int> networkDim;
+    std::optional<double> networkAlpha;
+    std::optional<int> maxTrainSteps;
+    std::optional<double> learningRate;
+    std::optional<int> resolution;
+    std::optional<qint64> seed; // -1 picks a random seed.
+    std::optional<bool> trainTextEncoder;
+};
+
+struct LoraTrainingResult
+{
+    QString jobId;
+    bool succeeded = false;
+    QString modelId; // The installed LoRA: companion:<outputName>.safetensors.
+    int steps = 0;
+    qint64 seed = 0; // The seed that was used.
+    qint64 durationMs = -1;
+    QString errorCode;
+    QString message;
+};
+
 struct ImageUpscaleRequest
 {
     QByteArray sourceImageData;
@@ -185,6 +220,7 @@ struct ServiceCapabilities
     bool imageGenerationMask = false; // image.generate accepts a mask with the base image (image.generate.mask).
     bool imageGenerationControl = false; // image.generate accepts a ControlNet and its control image (image.generate.control).
     bool imageGenerationLora = false; // image.generate accepts installed LoRAs with weights (image.generate.lora).
+    bool loraTraining = false; // lora.train trains a LoRA and installs it as a lora companion.
 };
 
 // Result of text.chat.load (load true) or text.chat.unload (load false).
@@ -274,6 +310,8 @@ Q_DECLARE_METATYPE(Nukleus::ImageUpscaleRequest)
 Q_DECLARE_METATYPE(Nukleus::ImageJobResult)
 Q_DECLARE_METATYPE(Nukleus::AnimationRequest)
 Q_DECLARE_METATYPE(Nukleus::AnimationResult)
+Q_DECLARE_METATYPE(Nukleus::LoraTrainingRequest)
+Q_DECLARE_METATYPE(Nukleus::LoraTrainingResult)
 Q_DECLARE_METATYPE(Nukleus::PromptEnhancementRequest)
 Q_DECLARE_METATYPE(Nukleus::PromptEnhancementResult)
 Q_DECLARE_METATYPE(Nukleus::TextChatRequest)

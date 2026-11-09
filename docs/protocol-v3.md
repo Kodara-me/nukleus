@@ -1076,4 +1076,17 @@ directory (`trainer-cache` in the service's data directory, which holds `HOME` a
 Hugging Face, ROCm and compiler caches). Offline mode is a request to the Hugging Face
 libraries, not a network block.
 
-The progress stage is `GenerationProgressStage::Training` in the SDK.
+**SDK.** Clients check `ServiceClient::canTrainLoras()`
+(`ServiceCapabilities::loraTraining`, true when the service reports `lora.train`) and
+call `submitLoraTraining(LoraTrainingRequest)`. The request holds `baseModelId`,
+`outputName`, `images` (a list of `LoraTrainingImage`, each with its PNG or JPEG `data`
+and its `caption`, so images and captions always match) and the optional settings
+`networkDim`, `networkAlpha`, `maxTrainSteps`, `learningRate`, `resolution`, `seed` and
+`trainTextEncoder`; `settings` in the options holds only the values that are set, and is
+left out when none is. The SDK answers each `upload-required` with the image of that
+index. It returns an empty job ID, and sends nothing, when the service does not report
+`lora.train` or the request has no image; every other check is the service's. Progress
+arrives through `generationProgressChanged` with the stage
+`GenerationProgressStage::Training`, and `loraTrainingFinished(LoraTrainingResult)`
+carries the `modelId` of the installed LoRA, the `steps`, the `seed` and `durationMs`, or
+the error code and message.
