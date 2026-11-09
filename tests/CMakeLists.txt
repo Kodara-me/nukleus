@@ -16,8 +16,12 @@ add_executable(nukleus-test
     ../src/daemon/NukleusDaemon.h
     ../src/daemon/LlamaServerRunner.cpp
     ../src/daemon/LlamaServerRunner.h
+    ../src/daemon/LoraTrainerRunner.cpp
+    ../src/daemon/LoraTrainerRunner.h
     ../src/daemon/ModelCatalog.cpp
     ../src/daemon/ModelCatalog.h
+    ../src/daemon/ProcessTree.cpp
+    ../src/daemon/ProcessTree.h
     ../src/daemon/SdCliRunner.cpp
     ../src/daemon/SdCliRunner.h
     ../src/daemon/SdCliProgressParser.cpp
@@ -37,6 +41,15 @@ target_link_libraries(nukleus-fake-llama-server PRIVATE Qt6::Network)
 add_dependencies(nukleus-test nukleus-fake-llama-server)
 target_compile_definitions(nukleus-test PRIVATE
     NUKLEUS_FAKE_LLAMA_SERVER="$<TARGET_FILE:nukleus-fake-llama-server>")
+# Stand-in for the LoRA trainer's Python (venv/bin/python, venv\Scripts\python.exe), copied into a fake trainer
+# directory by the tests; it uses only the C++ runtime, linked statically on Windows so the copy runs anywhere.
+add_executable(nukleus-fake-lora-trainer FakeLoraTrainer.cpp)
+if(MSVC)
+    set_property(TARGET nukleus-fake-lora-trainer PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+add_dependencies(nukleus-test nukleus-fake-lora-trainer)
+target_compile_definitions(nukleus-test PRIVATE
+    NUKLEUS_FAKE_LORA_TRAINER="$<TARGET_FILE:nukleus-fake-lora-trainer>")
 add_test(NAME nukleus-test COMMAND nukleus-test)
 
 # Stand-in for the daemon in the test of its children's lifetime, which Windows alone needs.

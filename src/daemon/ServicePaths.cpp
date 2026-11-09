@@ -1,6 +1,7 @@
 #include "ServicePaths.h"
 
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QObject>
 #include <QStandardPaths>
@@ -11,6 +12,35 @@ QString ServicePaths::dataRoot()
 {
     const QString dataPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
     return dataPath.isEmpty() ? QString() : QDir(dataPath).filePath(QStringLiteral("nukleus"));
+}
+
+QString ServicePaths::trainingPath()
+{
+    const QString root = dataRoot();
+    return root.isEmpty() ? QString() : QDir(root).filePath(QStringLiteral("training"));
+}
+
+QString ServicePaths::trainerCachePath()
+{
+    const QString root = dataRoot();
+    return root.isEmpty() ? QString() : QDir(root).filePath(QStringLiteral("trainer-cache"));
+}
+
+bool ServicePaths::emptyTrainingPath(QString *errorMessage)
+{
+    const QString path = trainingPath();
+    if (path.isEmpty() || !QFileInfo::exists(path)) return true;
+    const QDir directory(path);
+    bool emptied = true;
+    for (const QFileInfo &entry : directory.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System)) {
+        const bool removed = entry.isDir() && !entry.isSymLink() ? QDir(entry.absoluteFilePath()).removeRecursively()
+                                                                 : QFile::remove(entry.absoluteFilePath());
+        if (!removed) {
+            emptied = false;
+            if (errorMessage) *errorMessage = QObject::tr("Could not remove %1").arg(entry.absoluteFilePath());
+        }
+    }
+    return emptied;
 }
 
 QString ServicePaths::modelsPath()

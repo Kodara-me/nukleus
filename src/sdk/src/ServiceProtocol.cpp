@@ -12,6 +12,7 @@ QString stageName(Nukleus::GenerationProgressStage stage)
     case Nukleus::GenerationProgressStage::Starting: return QStringLiteral("starting");
     case Nukleus::GenerationProgressStage::LoadingModel: return QStringLiteral("loading-model");
     case Nukleus::GenerationProgressStage::Sampling: return QStringLiteral("sampling");
+    case Nukleus::GenerationProgressStage::Training: return QStringLiteral("training");
     case Nukleus::GenerationProgressStage::Decoding: return QStringLiteral("decoding");
     case Nukleus::GenerationProgressStage::Saving: return QStringLiteral("saving");
     case Nukleus::GenerationProgressStage::Complete: return QStringLiteral("complete");
@@ -28,6 +29,7 @@ Nukleus::GenerationProgressStage stageFromName(const QString &name)
         {QStringLiteral("starting"), Nukleus::GenerationProgressStage::Starting},
         {QStringLiteral("loading-model"), Nukleus::GenerationProgressStage::LoadingModel},
         {QStringLiteral("sampling"), Nukleus::GenerationProgressStage::Sampling},
+        {QStringLiteral("training"), Nukleus::GenerationProgressStage::Training},
         {QStringLiteral("decoding"), Nukleus::GenerationProgressStage::Decoding},
         {QStringLiteral("saving"), Nukleus::GenerationProgressStage::Saving},
         {QStringLiteral("complete"), Nukleus::GenerationProgressStage::Complete},

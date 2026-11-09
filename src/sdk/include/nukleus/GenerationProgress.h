@@ -14,6 +14,7 @@ enum class GenerationProgressStage
     Starting,
     LoadingModel,
     Sampling,
+    Training,
     Decoding,
     Saving,
     Complete,

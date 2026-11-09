@@ -5,6 +5,7 @@
 
 #include "FfmpegRunner.h"
 #include "LlamaServerRunner.h"
+#include "LoraTrainerRunner.h"
 #include "SdCliRunner.h"
 
 #include <QElapsedTimer>
@@ -20,6 +21,7 @@
 #include <vector>
 
 class ModelCatalog;
+class QThread;
 class QWebSocket;
 class QWebSocketServer;
 class SdCliRunner;
@@ -51,6 +53,9 @@ struct NukleusConfiguration
     int llamaServerIdleMs = defaultLlamaServerIdleMs();
     // Optional post-processing tool of video jobs (ping-pong loops); its features are offered only when it runs.
     QString ffmpeg = qEnvironmentVariable("NUKLEUS_FFMPEG", "ffmpeg");
+    // The kohya-ss/sd-scripts directory that trains LoRAs (lora.train): it holds sdxl_train_network.py and the
+    // Python environment in venv. The operation is offered only when it runs; there is no default.
+    QString loraTrainer = qEnvironmentVariable("NUKLEUS_LORA_TRAINER");
 };
 
 class NukleusDaemon final : public QObject
@@ -64,7 +69,7 @@ public:
     quint16 serverPort() const;
 
 private:
-    enum class Operation { Generate, Upscale, Edit, PromptEnhance, TextChat, TextChatLoad, TextChatUnload, Animate };
+    enum class Operation { Generate, Upscale, Edit, PromptEnhance, TextChat, TextChatLoad, TextChatUnload, Animate, TrainLora };
     // An image.animate job's sd-cli run, resolved at submission; the uploads and output complete its arguments.
     struct AnimationPlan
     {
@@ -86,6 +91,18 @@ private:
     {
         QString prompt;
         QString negativePrompt;
+    };
+    // A lora.train job's folder on disk (ServicePaths::trainingPath()), removed with the last holder.
+    struct TrainingFolder;
+    // A lora.train job, resolved at submission; the uploads and the trainer's output complete it.
+    struct TrainingPlan
+    {
+        QString outputName;
+        QString baseModelPath;
+        QStringList captions;
+        QStringList imageFiles; // Uploaded images, as file names under the folder's dataset directory.
+        QJsonObject settings; // Every setting of the request, defaults and the chosen seed included.
+        std::shared_ptr<TrainingFolder> folder;
     };
     struct Submission;
     struct Job;
@@ -123,6 +140,14 @@ private:
     void submitTextChat(QWebSocket* socket, const QJsonObject& message, Operation operation);
     void submitTextChatUnload(QWebSocket* socket, const QJsonObject& message);
     void submitAnimation(QWebSocket *socket, const QJsonObject &message);
+    void submitLoraTraining(QWebSocket *socket, const QJsonObject &message);
+    bool trainingNameReserved(const QString &outputName) const;
+    void receiveTrainingImage(QWebSocket *socket, const std::shared_ptr<Submission> &submission, const QByteArray &data);
+    void startLoraTraining();
+    void handleLoraTrainerFinished(const LoraTrainerResult &result);
+    void installTrainedLora(const std::shared_ptr<Job> &job);
+    // Removes the job's folder and, with a code, sends the failure; then starts the next job.
+    void endLoraTraining(const std::shared_ptr<Job> &job, const QString &errorCode = {}, const QString &errorMessage = {});
     // Returns sd-cli's video, or starts its post-processing and returns false while it runs.
     bool finishAnimation(Job &job, const SdCliGenerationResult &result);
     void sendAnimationVideo(const Job &job, const QString &path, int frames);
@@ -161,6 +186,8 @@ private:
     bool m_promptOutputExceeded = false;
     std::unique_ptr<LlamaServerRunner> m_llamaServer;
     std::unique_ptr<FfmpegRunner> m_ffmpeg;
+    std::unique_ptr<LoraTrainerRunner> m_loraTrainer; // Set only when the trainer is ready.
+    std::unique_ptr<QThread> m_copyThread; // Copies a trained file into the companion directory.
     QElapsedTimer m_activeJobClock;
     mutable QHash<QString, QStringList> m_chatTemplates; // Built-in chat template names per llama.cpp executable.
     mutable std::optional<SdCliHelp> m_sdCliHelp;

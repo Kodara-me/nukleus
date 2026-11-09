@@ -10,6 +10,7 @@
 #include <QDir>
 #include <cmath>
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <optional>
 #include <tuple>
@@ -21,9 +22,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPointer>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSize>
 #include <QStandardPaths>
+#include <QThread>
 #include <QUuid>
 #include <QWebSocket>
 #include <QWebSocketServer>
@@ -95,6 +98,38 @@ bool validGenerationOptions(const QJsonObject &options)
         && (!options.contains("controlNetModelId")
             || (options.value("controlNetModelId").isString() && !options.value("controlNetModelId").toString().trimmed().isEmpty()))
         && (!options.contains("controlStrength") || validNumber(options, "controlStrength", 0, 2, false, false));
+}
+
+constexpr int MaximumTrainingImages = 64;
+constexpr int MaximumTrainingCaptionCharacters = 1000;
+
+// The settings of a lora.train request with their defaults applied and a random seed in place of -1, or
+// nothing when a key or a value is invalid.
+std::optional<QJsonObject> trainingSettings(const QJsonObject &settings)
+{
+    static const QStringList allowed{"networkDim", "networkAlpha", "maxTrainSteps", "learningRate", "resolution", "seed", "trainTextEncoder"};
+    for (const auto &key : settings.keys())
+        if (!allowed.contains(key)) return std::nullopt;
+    if (!validNumber(settings, "networkDim", 1, 128, true, false)
+        || !validNumber(settings, "networkAlpha", 0, 128, false, false)
+        || !validNumber(settings, "maxTrainSteps", 1, 20000, true, false)
+        || !validNumber(settings, "learningRate", 0, 0.01, false, false)
+        || !validNumber(settings, "resolution", 512, 2048, true, false)
+        || !validNumber(settings, "seed", -1, std::numeric_limits<int>::max(), true, false))
+        return std::nullopt;
+    if ((settings.contains("networkAlpha") && settings.value("networkAlpha").toDouble() <= 0)
+        || (settings.contains("learningRate") && settings.value("learningRate").toDouble() <= 0)
+        || (settings.contains("resolution") && settings.value("resolution").toInt() % 64 != 0)
+        || (settings.contains("trainTextEncoder") && !settings.value("trainTextEncoder").isBool()))
+        return std::nullopt;
+    const int dimension = settings.value("networkDim").toInt(16);
+    int seed = settings.value("seed").toInt(-1);
+    if (seed == -1) seed = QRandomGenerator::global()->bounded(0, std::numeric_limits<int>::max());
+    return QJsonObject{{"networkDim", dimension}, {"networkAlpha", settings.value("networkAlpha").toDouble(dimension / 2.0)},
+                       {"maxTrainSteps", settings.value("maxTrainSteps").toInt(1500)},
+                       {"learningRate", settings.value("learningRate").toDouble(0.0001)},
+                       {"resolution", settings.value("resolution").toInt(1024)}, {"seed", seed},
+                       {"trainTextEncoder", settings.value("trainTextEncoder").toBool(false)}};
 }
 
 constexpr int MaximumChatMessages = 1024;
@@ -341,6 +376,14 @@ QString cleanChatReply(QString text, const QJsonArray &stops)
 
 }
 
+struct NukleusDaemon::TrainingFolder
+{
+    QString path;
+    explicit TrainingFolder(QString folder) : path(std::move(folder)) {}
+    ~TrainingFolder() { remove(); }
+    void remove() const { if (!path.isEmpty()) QDir(path).removeRecursively(); }
+};
+
 struct NukleusDaemon::Submission
 {
     QString id;
@@ -360,6 +403,7 @@ struct NukleusDaemon::Submission
     int expectedInputs = 1;
     QList<QByteArray> inputs;
     std::optional<AnimationPlan> animation;
+    std::optional<TrainingPlan> training;
 };
 
 struct NukleusDaemon::Job
@@ -384,6 +428,8 @@ struct NukleusDaemon::Job
     std::optional<AnimationPlan> animation;
     int resultFrames = 0; // Frames of the video ffmpeg writes, while it post-processes sd-cli's.
     bool looped = false; // ffmpeg is making the ping-pong loop, not only encoding.
+    std::optional<TrainingPlan> training;
+    bool canceled = false; // The submitting client left while the job ran.
 };
 
 NukleusDaemon::NukleusDaemon(NukleusConfiguration configuration, QObject *parent)
@@ -470,6 +516,7 @@ NukleusDaemon::~NukleusDaemon()
     m_promptProcess.disconnect(this);
     m_promptProcess.kill();
     m_promptProcess.waitForFinished(3000);
+    if (m_copyThread) m_copyThread->wait();
 }
 
 bool NukleusDaemon::start(QString *errorMessage)
@@ -491,6 +538,12 @@ bool NukleusDaemon::start(QString *errorMessage)
     }
     if (m_configuration.modelRootPath.isEmpty() && !ServicePaths::ensureModelDirectories(errorMessage)) return false;
     if (!m_configuration.catalogRootPath.isEmpty() && !m_models->ensureStorage(errorMessage)) return false;
+    // A training job's folder and a half-copied trained file do not survive a restart. Done before the service
+    // listens, so that no installation can start in between.
+    QString leftoverError;
+    if (!ServicePaths::emptyTrainingPath(&leftoverError))
+        qWarning().noquote() << QStringLiteral("[Nukleus] Training leftovers remain: %1").arg(leftoverError);
+    m_models->removeTrainedLoraLeftovers();
     m_servers.clear();
     QList<QHostAddress> addresses{QHostAddress(QStringLiteral("127.0.0.1"))};
     if (!m_configuration.listenAddress.isLoopback()) addresses.append(m_configuration.listenAddress);
@@ -531,6 +584,22 @@ void NukleusDaemon::initializeBackend()
         });
         connect(m_sdRunner.get(), &SdCliRunner::generationFinished, this, &NukleusDaemon::handleGenerationFinished);
         connect(m_sdRunner.get(), &SdCliRunner::upscaleFinished, this, &NukleusDaemon::handleUpscaleFinished);
+    }
+    // The trainer is checked once, here: restart the service after installing or changing it. Importing PyTorch is
+    // not part of the check; a broken GPU stack is reported by the job.
+    if (!m_configuration.loraTrainer.isEmpty()) {
+        auto trainer = std::make_unique<LoraTrainerRunner>(QDir(m_configuration.loraTrainer).absolutePath());
+        if (trainer->isReady()) {
+            m_loraTrainer = std::move(trainer);
+            connect(m_loraTrainer.get(), &LoraTrainerRunner::progressChanged, this, [this](const Nukleus::GenerationProgress &progress) {
+                if (m_activeJob && m_activeJob->operation == Operation::TrainLora) sendProgress(*m_activeJob, progress);
+            });
+            // Queued, so that a run ending while a job is being started or canceled never re-enters the queue logic.
+            connect(m_loraTrainer.get(), &LoraTrainerRunner::finished, this, &NukleusDaemon::handleLoraTrainerFinished, Qt::QueuedConnection);
+        } else {
+            qWarning().noquote() << QStringLiteral("[Nukleus] NUKLEUS_LORA_TRAINER (%1) holds no sdxl_train_network.py with a working venv Python: lora.train is unavailable.")
+                                        .arg(m_configuration.loraTrainer);
+        }
     }
 }
 
@@ -604,15 +673,17 @@ void NukleusDaemon::submit(QWebSocket *socket, const QJsonObject &message)
     const bool textChatLoad = operationName == QStringLiteral("text.chat.load");
     const bool textChatUnload = operationName == QStringLiteral("text.chat.unload");
     const bool animate = operationName == QStringLiteral("image.animate");
+    const bool trainLora = operationName == QStringLiteral("lora.train");
     QJsonObject options = message.value(QStringLiteral("options")).toObject();
     const QString jobId = message.value(QStringLiteral("jobId")).toString();
     bool duplicateId = jobForId(jobId) != nullptr;
     for (const auto &pending : m_pendingUploads) {
         duplicateId = duplicateId || pending->id == jobId;
     }
-    if ((!generate && !upscale && !edit && !promptEnhance && !textChat && !textChatLoad && !textChatUnload && !animate)
+    if ((!generate && !upscale && !edit && !promptEnhance && !textChat && !textChatLoad && !textChatUnload && !animate && !trainLora)
         || jobId.isEmpty() || duplicateId) { sendError(socket, QStringLiteral("invalid-request"), tr("Invalid job request"), jobId); return; }
     if (animate) { submitAnimation(socket, message); return; }
+    if (trainLora) { submitLoraTraining(socket, message); return; }
     if (promptEnhance) { submitPromptEnhancement(socket, message); return; }
     if (textChat || textChatLoad) { submitTextChat(socket, message, textChat ? Operation::TextChat : Operation::TextChatLoad); return; }
     if (textChatUnload) { submitTextChatUnload(socket, message); return; }
@@ -1103,6 +1174,7 @@ void NukleusDaemon::processBinaryMessage(QWebSocket* socket, const QByteArray& d
         sendError(socket, "invalid-image", tr("The image upload is empty or too large"), submission->id);
         return;
     }
+    if (submission->operation == Operation::TrainLora) { receiveTrainingImage(socket, submission, data); return; }
     const bool chat = submission->operation == Operation::TextChat;
     const bool animation = submission->operation == Operation::Animate;
     if ((chat || animation) && chatImageMimeType(data).isEmpty()) {
@@ -1232,6 +1304,10 @@ void NukleusDaemon::runActiveJob()
         m_activeJob.reset(); broadcastQueuePositions(); startNextJob();
         return;
     }
+    if (m_activeJob->operation == Operation::TrainLora) {
+        startLoraTraining();
+        return;
+    }
     if (m_activeJob->operation == Operation::PromptEnhance) {
         startPromptEnhancement();
         return;
@@ -1344,7 +1420,11 @@ void NukleusDaemon::cancelJobsFor(QWebSocket *socket)
     while (!m_queue.isEmpty()) { const auto job = m_queue.dequeue(); if (job->client != socket) kept.enqueue(job); }
     m_queue = std::move(kept);
     if (m_activeJob && m_activeJob->client == socket) {
-        if (usesLlamaServer(*m_activeJob)) m_llamaServer->cancel();
+        if (m_activeJob->operation == Operation::TrainLora) {
+            m_activeJob->canceled = true;
+            if (m_loraTrainer) m_loraTrainer->cancel();
+        }
+        else if (usesLlamaServer(*m_activeJob)) m_llamaServer->cancel();
         else if (m_activeJob->operation == Operation::Animate && m_ffmpeg->isRunning()) m_ffmpeg->cancel();
         else if (m_activeJob->operation == Operation::PromptEnhance || m_activeJob->operation == Operation::TextChat)
             m_promptProcess.kill();
@@ -1360,7 +1440,7 @@ void NukleusDaemon::broadcastQueuePositions()
 
 void NukleusDaemon::sendCapabilities(QWebSocket *socket) const
 {
-    const QString state = isImageReady() || isPromptEnhancementReady() ? QStringLiteral("ready") : QStringLiteral("unavailable");
+    const QString state = isImageReady() || isPromptEnhancementReady() || m_loraTrainer ? QStringLiteral("ready") : QStringLiteral("unavailable");
     QJsonArray operations;
     operations.append("model-routing");
     if (isImageReady()) {
@@ -1376,6 +1456,7 @@ void NukleusDaemon::sendCapabilities(QWebSocket *socket) const
             operations.append(QStringLiteral("image.animate.mp4"));
         }
     }
+    if (m_loraTrainer) operations.append(QStringLiteral("lora.train"));
     if (isPromptEnhancementReady()) operations.append("prompt.enhance");
     const auto chatEngines = readyTextChatEngines();
     if (!chatEngines.isEmpty()) operations.append("text.chat");
@@ -2164,4 +2245,309 @@ void NukleusDaemon::deleteCompanion(QWebSocket* socket, const QJsonObject& messa
         return;
     }
     send(socket, {{"type", "error"}, {"code", code}, {"id", id}, {"role", role}, {"message", error}});
+}
+
+void NukleusDaemon::submitLoraTraining(QWebSocket *socket, const QJsonObject &message)
+{
+    const QString jobId = message.value("jobId").toString();
+    const QJsonObject options = message.value("options").toObject();
+    const auto invalid = [&](const QString &detail) { sendError(socket, "invalid-request", detail, jobId); };
+    if (!m_loraTrainer) {
+        sendError(socket, "backend-not-ready", tr("LoRA training is unavailable: no usable LoRA trainer is configured"), jobId);
+        return;
+    }
+    for (const auto &key : options.keys())
+        if (!QStringList{"baseModelId", "outputName", "captions", "settings"}.contains(key)) {
+            invalid(tr("Unknown LoRA training option: %1").arg(key));
+            return;
+        }
+    if (!message.value("options").isObject() || !options.value("baseModelId").isString()
+        || options.value("baseModelId").toString().trimmed().isEmpty()) {
+        invalid(tr("A base model is required"));
+        return;
+    }
+    const QString outputName = options.value("outputName").toString();
+    if (!options.value("outputName").isString()
+        || !QRegularExpression(QRegularExpression::anchoredPattern(QStringLiteral("[A-Za-z0-9_-]{1,64}"))).match(outputName).hasMatch()) {
+        invalid(tr("The output name must be 1 to 64 characters of A-Z, a-z, 0-9, _ and -"));
+        return;
+    }
+    for (const ModelInfo &companion : m_models->models(ModelCategory::Companion))
+        if (QFileInfo(companion.fileName).completeBaseName().compare(outputName, Qt::CaseInsensitive) == 0) {
+            invalid(tr("The name %1 is already held by an installed companion").arg(outputName));
+            return;
+        }
+    if (trainingNameReserved(outputName)) {
+        invalid(tr("The name %1 is already held by another LoRA training job").arg(outputName));
+        return;
+    }
+    QStringList captions;
+    const QJsonValue captionValues = options.value("captions");
+    if (!captionValues.isArray() || captionValues.toArray().isEmpty() || captionValues.toArray().size() > MaximumTrainingImages) {
+        invalid(tr("Captions must be an array of 1 to %1 texts").arg(MaximumTrainingImages));
+        return;
+    }
+    for (const auto &caption : captionValues.toArray()) {
+        if (!caption.isString() || caption.toString().trimmed().isEmpty() || caption.toString().size() > MaximumTrainingCaptionCharacters) {
+            invalid(tr("Every caption must be a text of 1 to %1 characters").arg(MaximumTrainingCaptionCharacters));
+            return;
+        }
+        captions.append(caption.toString());
+    }
+    if (options.contains("settings") && !options.value("settings").isObject()) {
+        invalid(tr("Training settings must be an object"));
+        return;
+    }
+    const std::optional<QJsonObject> settings = trainingSettings(options.value("settings").toObject());
+    if (!settings) {
+        invalid(tr("Invalid training settings"));
+        return;
+    }
+    const QString baseModelId = options.value("baseModelId").toString();
+    const std::optional<ModelInfo> base = m_models->modelById(baseModelId);
+    if (!base) { sendError(socket, "model-unavailable", tr("The requested model is unavailable"), jobId); return; }
+    if (!baseModelId.startsWith(QStringLiteral("image-generation:")) || base->modelType != QStringLiteral("checkpoint")
+        || QFileInfo(base->filePath).suffix().compare(QStringLiteral("safetensors"), Qt::CaseInsensitive) != 0) {
+        invalid(tr("The base model must be an image-generation checkpoint stored as a .safetensors file"));
+        return;
+    }
+    if (m_pendingUploads.contains(socket)) {
+        sendError(socket, "upload-in-progress", tr("Finish the pending image upload before submitting another job"), jobId);
+        return;
+    }
+    if (m_queue.size() >= MaximumQueuedJobs) { sendError(socket, "queue-full", tr("The service queue is full"), jobId); return; }
+    const QString trainingRoot = ServicePaths::trainingPath();
+    auto folder = std::make_shared<TrainingFolder>(trainingRoot.isEmpty() ? QString()
+        : QDir(trainingRoot).filePath(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+    if (folder->path.isEmpty() || !QDir().mkpath(QDir(folder->path).filePath(QStringLiteral("dataset")))) {
+        sendError(socket, "storage-error", tr("Could not create the training folder"), jobId);
+        return;
+    }
+    auto submission = std::make_shared<Submission>();
+    submission->id = jobId;
+    submission->operation = Operation::TrainLora;
+    submission->options = options;
+    submission->modelPath = base->filePath;
+    submission->client = socket;
+    submission->expectedInputs = int(captions.size());
+    submission->training = TrainingPlan{outputName, base->filePath, captions, {}, *settings, folder};
+    m_pendingUploads.insert(socket, submission);
+    send(socket, {{QStringLiteral("type"), QStringLiteral("upload-required")}, {QStringLiteral("jobId"), jobId},
+                  {"inputRole", "training"}, {"inputIndex", 0}});
+}
+
+bool NukleusDaemon::trainingNameReserved(const QString &outputName) const
+{
+    const auto named = [&outputName](const auto &item) {
+        return item && item->training && item->training->outputName.compare(outputName, Qt::CaseInsensitive) == 0;
+    };
+    if (named(m_activeJob)) return true;
+    for (const auto &job : m_queue)
+        if (named(job)) return true;
+    for (auto it = m_pendingUploads.cbegin(); it != m_pendingUploads.cend(); ++it)
+        if (named(it.value())) return true;
+    return false;
+}
+
+void NukleusDaemon::receiveTrainingImage(QWebSocket *socket, const std::shared_ptr<Submission> &submission, const QByteArray &data)
+{
+    TrainingPlan &plan = *submission->training;
+    const QString mime = chatImageMimeType(data);
+    if (mime.isEmpty()) {
+        m_pendingUploads.remove(socket);
+        sendError(socket, "invalid-image", tr("Training images must be PNG or JPEG"), submission->id);
+        return;
+    }
+    // Written as it arrives, so that a waiting or queued job holds no image in memory.
+    const QString name = QStringLiteral("%1.%2").arg(plan.imageFiles.size(), 3, 10, QLatin1Char('0'))
+                             .arg(mime == QStringLiteral("image/jpeg") ? QStringLiteral("jpg") : QStringLiteral("png"));
+    QFile image(QDir(plan.folder->path).filePath(QStringLiteral("dataset/") + name));
+    if (!image.open(QIODevice::WriteOnly) || image.write(data) != data.size()) {
+        m_pendingUploads.remove(socket);
+        sendError(socket, "storage-error", tr("Could not save image upload"), submission->id);
+        return;
+    }
+    image.close();
+    plan.imageFiles.append(name);
+    if (plan.imageFiles.size() < plan.captions.size()) {
+        send(socket, {{QStringLiteral("type"), QStringLiteral("upload-required")}, {QStringLiteral("jobId"), submission->id},
+                      {"inputRole", "training"}, {"inputIndex", int(plan.imageFiles.size())}});
+        return;
+    }
+    m_pendingUploads.remove(socket);
+    if (m_queue.size() >= MaximumQueuedJobs) {
+        sendError(socket, "queue-full", tr("The service queue is full"), submission->id);
+        return;
+    }
+    auto job = std::make_shared<Job>();
+    job->id = submission->id;
+    job->operation = Operation::TrainLora;
+    job->options = submission->options;
+    job->modelPath = submission->modelPath;
+    job->training = plan;
+    job->client = socket;
+    enqueue(job);
+}
+
+void NukleusDaemon::startLoraTraining()
+{
+    const auto job = m_activeJob;
+    const TrainingPlan &plan = *job->training;
+    const auto progress = [this, &job](Nukleus::GenerationProgressStage stage, int percentage, const QString &text) {
+        sendProgress(*job, {stage, std::nullopt, std::nullopt, percentage, text});
+    };
+    progress(Nukleus::GenerationProgressStage::Preparing, 0, tr("Preparing the training data"));
+    const QDir folder(plan.folder->path);
+    const auto fail = [&](const QString &detail) { endLoraTraining(job, QStringLiteral("start-failed"), detail); };
+    const auto write = [](const QString &path, const QByteArray &bytes) {
+        QFile file(path);
+        return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
+    };
+    // The caption of an image is the text of the file beside it with the same name.
+    for (int index = 0; index < plan.imageFiles.size(); ++index) {
+        const QString caption = folder.filePath(QStringLiteral("dataset/") + QFileInfo(plan.imageFiles.at(index)).completeBaseName() + QStringLiteral(".txt"));
+        if (!write(caption, plan.captions.at(index).toUtf8())) { fail(tr("Could not write the training captions")); return; }
+    }
+    const QJsonObject &s = plan.settings;
+    const QString dataset = QStringLiteral(
+        "[general]\n"
+        "shuffle_caption = false\n"
+        "caption_extension = \".txt\"\n"
+        "keep_tokens = 0\n"
+        "\n"
+        "[[datasets]]\n"
+        "resolution = %1\n"
+        "batch_size = 1\n"
+        "enable_bucket = true\n"
+        "min_bucket_reso = 256\n"
+        "max_bucket_reso = 2048\n"
+        "bucket_reso_steps = 64\n"
+        "\n"
+        "  [[datasets.subsets]]\n"
+        "  image_dir = \"dataset\"\n"
+        "  num_repeats = 1\n"
+        "  caption_extension = \".txt\"\n").arg(s.value("resolution").toInt());
+    if (!write(folder.filePath(QStringLiteral("dataset.toml")), dataset.toUtf8()) || !folder.mkpath(QStringLiteral("output"))) {
+        fail(tr("Could not write the dataset configuration"));
+        return;
+    }
+    const auto number = [](double value) { return QString::number(value, 'f', QLocale::FloatingPointShortest); };
+    QStringList arguments = {
+        QStringLiteral("--pretrained_model_name_or_path"), plan.baseModelPath,
+        QStringLiteral("--dataset_config"), QStringLiteral("dataset.toml"),
+        QStringLiteral("--output_dir"), QStringLiteral("output"),
+        QStringLiteral("--output_name"), plan.outputName,
+        QStringLiteral("--save_model_as"), QStringLiteral("safetensors"),
+        QStringLiteral("--network_module"), QStringLiteral("networks.lora"),
+        QStringLiteral("--network_dim"), QString::number(s.value("networkDim").toInt()),
+        QStringLiteral("--network_alpha"), number(s.value("networkAlpha").toDouble()),
+        QStringLiteral("--learning_rate"), number(s.value("learningRate").toDouble()),
+        QStringLiteral("--max_train_steps"), QString::number(s.value("maxTrainSteps").toInt()),
+        QStringLiteral("--seed"), QString::number(s.value("seed").toInt()),
+        QStringLiteral("--tokenizer_cache_dir"), QDir(m_loraTrainer->directory()).filePath(QStringLiteral("tokenizers")),
+        QStringLiteral("--mixed_precision"), QStringLiteral("bf16"),
+        QStringLiteral("--save_precision"), QStringLiteral("fp16"),
+        QStringLiteral("--optimizer_type"), QStringLiteral("AdamW"),
+        QStringLiteral("--gradient_checkpointing"),
+        QStringLiteral("--cache_latents"),
+        QStringLiteral("--sdpa"),
+        QStringLiteral("--max_data_loader_n_workers"), QStringLiteral("0")};
+    if (!s.value("trainTextEncoder").toBool()) arguments.append(QStringLiteral("--network_train_unet_only"));
+    // Offline, with every cache and home directory inside the service's own data: no library falls back to a
+    // home directory the service account does not have, and ROCm's kernel caches persist between jobs.
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(QStringLiteral("HF_HUB_OFFLINE"), QStringLiteral("1"));
+    environment.insert(QStringLiteral("TRANSFORMERS_OFFLINE"), QStringLiteral("1"));
+    environment.insert(QStringLiteral("PYTHONDONTWRITEBYTECODE"), QStringLiteral("1"));
+    environment.insert(QStringLiteral("PYTHONUNBUFFERED"), QStringLiteral("1"));
+    const QString cachePath = ServicePaths::trainerCachePath();
+    const QDir cache(cachePath);
+    const QList<QPair<QString, QString>> cacheDirectories = {
+        {"HOME", "home"}, {"HF_HOME", "huggingface"}, {"XDG_CACHE_HOME", "xdg"}, {"TORCHINDUCTOR_CACHE_DIR", "torchinductor"},
+        {"TRITON_CACHE_DIR", "triton"}, {"MPLCONFIGDIR", "matplotlib"}, {"MIOPEN_USER_DB_PATH", "miopen/db"},
+        {"MIOPEN_CUSTOM_CACHE_DIR", "miopen/cache"}};
+    for (const auto &[variable, directory] : cacheDirectories) {
+        if (cachePath.isEmpty() || !cache.mkpath(directory)) { fail(tr("Could not create the trainer cache")); return; }
+        environment.insert(variable, cache.filePath(directory));
+    }
+    if (!m_loraTrainer->run(arguments, plan.folder->path, environment, s.value("maxTrainSteps").toInt())) {
+        fail(tr("Could not start LoRA training"));
+        return;
+    }
+    progress(Nukleus::GenerationProgressStage::LoadingModel, 2, tr("Loading the model"));
+}
+
+void NukleusDaemon::endLoraTraining(const std::shared_ptr<Job> &job, const QString &errorCode, const QString &errorMessage)
+{
+    // The folder goes before the client hears of the end of the job.
+    if (job->training) job->training->folder->remove();
+    if (!errorCode.isEmpty()) sendError(job->client, errorCode, errorMessage, job->id);
+    if (m_activeJob == job) m_activeJob.reset();
+    broadcastQueuePositions();
+    startNextJob();
+}
+
+void NukleusDaemon::handleLoraTrainerFinished(const LoraTrainerResult &result)
+{
+    if (!m_activeJob || m_activeJob->operation != Operation::TrainLora) return;
+    const auto job = m_activeJob;
+    if (job->canceled || job->client.isNull()) { endLoraTraining(job); return; }
+    const QString output = QDir(job->training->folder->path).filePath(QStringLiteral("output/") + job->training->outputName + QStringLiteral(".safetensors"));
+    if (!result.succeeded || !QFileInfo(output).isFile()) {
+        QString detail = result.succeeded ? tr("LoRA training wrote no output file")
+                                          : tr("LoRA training failed (exit code %1)").arg(result.exitCode);
+        detail += tr("\nCommand:\n%1").arg(result.command);
+        const QString diagnostic = result.standardError.trimmed().right(4096);
+        if (!diagnostic.isEmpty()) detail += tr("\nTrainer error:\n%1").arg(diagnostic);
+        endLoraTraining(job, QStringLiteral("generation-failed"), detail);
+        return;
+    }
+    installTrainedLora(job);
+}
+
+void NukleusDaemon::installTrainedLora(const std::shared_ptr<Job> &job)
+{
+    const QString outputName = job->training->outputName;
+    const QString source = QDir(job->training->folder->path).filePath(QStringLiteral("output/") + outputName + QStringLiteral(".safetensors"));
+    QString staging;
+    QString error;
+    if (!m_models->prepareTrainedLoraStaging(outputName, &staging, &error)) {
+        endLoraTraining(job, QStringLiteral("generation-failed"), tr("Could not install the trained LoRA: %1").arg(error));
+        return;
+    }
+    sendProgress(*job, {Nukleus::GenerationProgressStage::Saving, std::nullopt, std::nullopt, 97, tr("Installing the trained LoRA")});
+    // 100–200 MB, to a file system that may differ from the job's: copied off the event loop thread.
+    auto copied = std::make_shared<std::atomic_bool>(false);
+    m_copyThread.reset(QThread::create([source, staging, copied] { copied->store(QFile::copy(source, staging)); }));
+    connect(m_copyThread.get(), &QThread::finished, this, [this, job, outputName, staging, copied] {
+        m_copyThread->wait();
+        m_copyThread.reset();
+        if (job->canceled || job->client.isNull()) {
+            QFile::remove(staging);
+            endLoraTraining(job);
+            return;
+        }
+        QString error;
+        if (!copied->load()) {
+            QFile::remove(staging);
+            endLoraTraining(job, QStringLiteral("generation-failed"), tr("Could not copy the trained LoRA into the companion directory"));
+            return;
+        }
+        // One synchronous call on the event loop thread: it interleaves with no installation's metadata write.
+        const std::optional<ModelInfo> installed = m_models->registerTrainedLora(staging, outputName, &error);
+        if (!installed) {
+            QFile::remove(staging);
+            endLoraTraining(job, QStringLiteral("generation-failed"), tr("Could not install the trained LoRA: %1").arg(error));
+            return;
+        }
+        sendProgress(*job, {Nukleus::GenerationProgressStage::Complete, std::nullopt, std::nullopt, 100, tr("LoRA training complete")});
+        job->training->folder->remove();
+        send(job->client, {{"type", "result"}, {"jobId", job->id}, {"operation", "lora.train"}, {"modelId", installed->id},
+                           {"steps", job->training->settings.value("maxTrainSteps").toInt()},
+                           {"seed", job->training->settings.value("seed").toInt()}, {"durationMs", m_activeJobClock.elapsed()}});
+        m_activeJob.reset();
+        broadcastQueuePositions();
+        startNextJob();
+    }, Qt::QueuedConnection);
+    m_copyThread->start();
 }
