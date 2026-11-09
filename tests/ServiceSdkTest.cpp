@@ -120,6 +120,71 @@ private:
     bool m_offerControl = false;
     bool m_offerLora = false;
 };
+
+// A service that speaks lora.train: one upload-required per caption, in order, each sent after the previous
+// image arrived, then queued, running, a training progress and the result (or, for the output name "broken", an error).
+class FakeTrainingService final : public QObject
+{
+public:
+    explicit FakeTrainingService()
+        : m_server(QStringLiteral("sdk-training-test"), QWebSocketServer::NonSecureMode, this)
+    {
+        connect(&m_server, &QWebSocketServer::newConnection, this, [this] {
+            QWebSocket *socket = m_server.nextPendingConnection();
+            connect(socket, &QWebSocket::textMessageReceived, this, [this, socket](const QString &text) {
+                const QJsonObject message = QJsonDocument::fromJson(text.toUtf8()).object();
+                m_messages.append(message);
+                const QString type = message.value("type").toString();
+                if (type == "authenticate") {
+                    socket->sendTextMessage(QStringLiteral("{\"type\":\"authenticated\"}"));
+                    socket->sendTextMessage(QStringLiteral("{\"type\":\"capabilities\",\"state\":\"ready\",\"operations\":[\"image.generate\"%1]}")
+                        .arg(m_offerTraining ? QStringLiteral(",\"lora.train\"") : QString()));
+                    socket->sendTextMessage(QStringLiteral("{\"type\":\"models.list.result\",\"categories\":[]}"));
+                } else if (type == "submit") {
+                    m_jobId = message.value("jobId").toString();
+                    m_captions = message.value("options").toObject().value("captions").toArray().size();
+                    m_outputName = message.value("options").toObject().value("outputName").toString();
+                    m_received = 0;
+                    requestUpload(socket);
+                }
+            });
+            connect(socket, &QWebSocket::binaryMessageReceived, this, [this, socket](const QByteArray &data) {
+                m_uploads.append(data);
+                if (++m_received < m_captions) { requestUpload(socket); return; }
+                const QString id = m_jobId;
+                socket->sendTextMessage(QStringLiteral("{\"type\":\"queued\",\"jobId\":\"%1\"}").arg(id));
+                socket->sendTextMessage(QStringLiteral("{\"type\":\"running\",\"jobId\":\"%1\"}").arg(id));
+                socket->sendTextMessage(QStringLiteral("{\"type\":\"progress\",\"jobId\":\"%1\",\"progress\":{\"stage\":\"training\",\"currentStep\":120,\"totalSteps\":1500,\"percentage\":12,\"statusText\":\"Training step 120 / 1500\"}}").arg(id));
+                if (m_outputName == "broken")
+                    socket->sendTextMessage(QStringLiteral("{\"type\":\"error\",\"jobId\":\"%1\",\"code\":\"generation-failed\",\"message\":\"trainer exited with code 1\"}").arg(id));
+                else
+                    socket->sendTextMessage(QStringLiteral("{\"type\":\"result\",\"jobId\":\"%1\",\"operation\":\"lora.train\",\"modelId\":\"companion:%2.safetensors\",\"steps\":1500,\"seed\":184467,\"durationMs\":2710000}").arg(id, m_outputName));
+            });
+        });
+    }
+
+    void offerTraining(bool offered) { m_offerTraining = offered; }
+    bool start() { return m_server.listen(QHostAddress::LocalHost); }
+    QString errorString() const { return m_server.errorString(); }
+    QUrl endpoint() const { return QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(m_server.serverPort())); }
+    const QList<QJsonObject> &messages() const { return m_messages; }
+    const QList<QByteArray> &uploads() const { return m_uploads; }
+
+private:
+    void requestUpload(QWebSocket *socket)
+    {
+        socket->sendTextMessage(QStringLiteral("{\"type\":\"upload-required\",\"jobId\":\"%1\",\"inputRole\":\"training\",\"inputIndex\":%2}").arg(m_jobId).arg(m_received));
+    }
+
+    QWebSocketServer m_server;
+    QList<QJsonObject> m_messages;
+    QList<QByteArray> m_uploads;
+    QString m_jobId;
+    QString m_outputName;
+    int m_captions = 0;
+    int m_received = 0;
+    bool m_offerTraining = true;
+};
 }
 
 class ServiceSdkTest final : public QObject
@@ -200,6 +265,7 @@ private slots:
     void submitsMaskedGeneration();
     void submitsControlledGeneration();
     void submitsGenerationWithLoras();
+    void submitsLoraTraining();
     void installsModelWithCompanion();
     void installsModularCompanionsForExistingModel();
     void reportsConnectionFailure();
@@ -645,6 +711,105 @@ void ServiceSdkTest::submitsGenerationWithLoras()
     const int before = int(service.messages().size());
     QVERIFY(client.submitEdit(edit).isEmpty());
     QCOMPARE(int(service.messages().size()), before);
+}
+
+void ServiceSdkTest::submitsLoraTraining()
+{
+    const auto request = [] {
+        Nukleus::LoraTrainingRequest r;
+        r.baseModelId = QStringLiteral("image-generation:test.safetensors");
+        r.outputName = QStringLiteral("clara");
+        r.images = {{QByteArray("first"), QStringLiteral("clara, standing")}, {QByteArray("second"), QStringLiteral("clara, sitting")}};
+        return r;
+    };
+    // R14: a service that does not report lora.train gives no capability, an empty job ID and nothing sent.
+    {
+        FakeTrainingService service; service.offerTraining(false);
+        QVERIFY2(service.start(), qPrintable(service.errorString()));
+        Nukleus::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+        QTRY_VERIFY(client.modelListAvailable());
+        QVERIFY(!client.capabilities().loraTraining);
+        QVERIFY(!client.canTrainLoras());
+        const int before = int(service.messages().size());
+        QVERIFY(client.submitLoraTraining(request()).isEmpty());
+        QCOMPARE(int(service.messages().size()), before);
+    }
+    FakeTrainingService service;
+    QVERIFY2(service.start(), qPrintable(service.errorString()));
+    Nukleus::ServiceClient client; client.setConfiguration(service.endpoint(), {}); client.connectToService();
+    QTRY_VERIFY(client.canTrainLoras());
+    QVERIFY(client.capabilities().loraTraining);
+    QSignalSpy progress(&client, &Nukleus::ServiceClient::generationProgressChanged);
+    QSignalSpy finished(&client, &Nukleus::ServiceClient::loraTrainingFinished);
+    const auto sent = [&](const QString &jobId) {
+        const auto submit = std::find_if(service.messages().cbegin(), service.messages().cend(), [&](const QJsonObject &message) {
+            return message.value("type").toString() == QStringLiteral("submit") && message.value("jobId").toString() == jobId; });
+        return submit == service.messages().cend() ? QJsonObject() : *submit;
+    };
+    // R14: no image, nothing to train, nothing sent.
+    {
+        auto empty = request(); empty.images.clear();
+        const int before = int(service.messages().size());
+        QVERIFY(client.submitLoraTraining(empty).isEmpty());
+        QCOMPARE(int(service.messages().size()), before);
+    }
+    // R14: with no setting set, the options hold no settings; the images go up in order and the result arrives.
+    const QString id = client.submitLoraTraining(request());
+    QVERIFY(!id.isEmpty());
+    QTRY_COMPARE(finished.count(), 1);
+    const QJsonObject submit = sent(id);
+    QCOMPARE(submit.value("operation").toString(), QString("lora.train"));
+    const QJsonObject options = submit.value("options").toObject();
+    QCOMPARE(options.keys(), (QStringList{"baseModelId", "captions", "outputName"}));
+    QCOMPARE(options.value("baseModelId").toString(), QString("image-generation:test.safetensors"));
+    QCOMPARE(options.value("outputName").toString(), QString("clara"));
+    QCOMPARE(options.value("captions").toArray(), (QJsonArray{"clara, standing", "clara, sitting"}));
+    QCOMPARE(service.uploads(), (QList<QByteArray>{"first", "second"}));
+    // R14: progress carries the Training stage.
+    QVERIFY(!progress.isEmpty());
+    QCOMPARE(progress.last().at(0).toString(), id);
+    const auto stage = progress.last().at(1).value<Nukleus::GenerationProgress>();
+    QVERIFY(stage.stage == Nukleus::GenerationProgressStage::Training);
+    QCOMPARE(stage.currentStep.value_or(-1), 120);
+    QCOMPARE(stage.totalSteps.value_or(-1), 1500);
+    // R14: the result carries the model id, the steps and the seed.
+    const auto result = finished.last().at(0).value<Nukleus::LoraTrainingResult>();
+    QCOMPARE(result.jobId, id);
+    QVERIFY(result.succeeded);
+    QCOMPARE(result.modelId, QString("companion:clara.safetensors"));
+    QCOMPARE(result.steps, 1500);
+    QCOMPARE(result.seed, qint64(184467));
+    QCOMPARE(result.durationMs, qint64(2710000));
+    QVERIFY(result.errorCode.isEmpty());
+    // R14: only the settings that are set are sent, 0 and false included.
+    auto tuned = request();
+    tuned.networkDim = 32; tuned.maxTrainSteps = 800; tuned.seed = -1; tuned.trainTextEncoder = false;
+    const QString tunedId = client.submitLoraTraining(tuned);
+    QVERIFY(!tunedId.isEmpty());
+    QTRY_COMPARE(finished.count(), 2);
+    const QJsonObject settings = sent(tunedId).value("options").toObject().value("settings").toObject();
+    QCOMPARE(settings.keys(), (QStringList{"maxTrainSteps", "networkDim", "seed", "trainTextEncoder"}));
+    QCOMPARE(settings.value("networkDim").toInt(), 32);
+    QCOMPARE(settings.value("maxTrainSteps").toInt(), 800);
+    QCOMPARE(settings.value("seed").toInteger(), qint64(-1));
+    QCOMPARE(settings.value("trainTextEncoder").toBool(true), false);
+    auto full = request();
+    full.networkAlpha = 8.0; full.learningRate = 0.0002; full.resolution = 768;
+    const QString fullId = client.submitLoraTraining(full);
+    QTRY_COMPARE(finished.count(), 3);
+    QCOMPARE(sent(fullId).value("options").toObject().value("settings").toObject().keys(),
+             (QStringList{"learningRate", "networkAlpha", "resolution"}));
+    // R14: an error reaches loraTrainingFinished with its code and message.
+    auto broken = request(); broken.outputName = QStringLiteral("broken");
+    const QString brokenId = client.submitLoraTraining(broken);
+    QVERIFY(!brokenId.isEmpty());
+    QTRY_COMPARE(finished.count(), 4);
+    const auto failure = finished.last().at(0).value<Nukleus::LoraTrainingResult>();
+    QCOMPARE(failure.jobId, brokenId);
+    QVERIFY(!failure.succeeded);
+    QCOMPARE(failure.errorCode, QString("generation-failed"));
+    QCOMPARE(failure.message, QString("trainer exited with code 1"));
+    QVERIFY(failure.modelId.isEmpty());
 }
 
 void ServiceSdkTest::reportsConnectionFailure()

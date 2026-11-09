@@ -71,6 +71,12 @@ public:
     // Submits an animation with an installed animation model and its start image (and end image, if any);
     // progress arrives through generationProgressChanged and the video through animationFinished.
     QString submitAnimation(const AnimationRequest &request);
+    // The service offers lora.train: submitLoraTraining trains a LoRA and installs it as a lora companion.
+    bool canTrainLoras() const;
+    // Uploads the images in order, then trains; progress arrives through generationProgressChanged (stage
+    // GenerationProgressStage::Training) and the outcome through loraTrainingFinished. Returns an empty job ID,
+    // sending nothing, when the service does not offer lora.train or the request has no image.
+    QString submitLoraTraining(const LoraTrainingRequest &request);
 signals:
     void serviceStateChanged(Nukleus::ServiceConnectionState state, const QString &code, const QString &detail);
     void capabilitiesChanged(const Nukleus::ServiceCapabilities &capabilities);
@@ -92,6 +98,7 @@ signals:
     void chatFinished(const Nukleus::TextChatResult& result);
     void chatModelFinished(const Nukleus::ChatModelResult& result);
     void animationFinished(const Nukleus::AnimationResult &result);
+    void loraTrainingFinished(const Nukleus::LoraTrainingResult &result);
 private:
     QString defaultLlmModelId(const QString &role) const;
     struct PendingJob
@@ -104,6 +111,7 @@ private:
         QString chatModelOperation; // "text.chat.load" or "text.chat.unload".
         QString prompt;
         QString negativePrompt;
+        bool loraTraining = false;
         bool animation = false;
         int frames = 0;
         int fps = 0;
