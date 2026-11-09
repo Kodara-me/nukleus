@@ -432,6 +432,39 @@ QString ServiceClient::submitAnimation(const AnimationRequest &request)
     return jobId;
 }
 
+bool ServiceClient::canTrainLoras() const
+{
+    return m_authenticated && m_capabilities.loraTraining;
+}
+
+QString ServiceClient::submitLoraTraining(const LoraTrainingRequest &request)
+{
+    if (!canTrainLoras() || request.images.isEmpty()) return {};
+    const QString jobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    PendingJob job;
+    job.loraTraining = true;
+    QJsonArray captions;
+    // The service asks for the images one at a time, in caption order.
+    for (const LoraTrainingImage &image : request.images) {
+        job.inputImages.append(image.data);
+        captions.append(image.caption);
+    }
+    m_pendingJobs.insert(jobId, job);
+    QJsonObject settings;
+    if (request.networkDim) settings.insert("networkDim", *request.networkDim);
+    if (request.networkAlpha) settings.insert("networkAlpha", *request.networkAlpha);
+    if (request.maxTrainSteps) settings.insert("maxTrainSteps", *request.maxTrainSteps);
+    if (request.learningRate) settings.insert("learningRate", *request.learningRate);
+    if (request.resolution) settings.insert("resolution", *request.resolution);
+    if (request.seed) settings.insert("seed", *request.seed);
+    if (request.trainTextEncoder) settings.insert("trainTextEncoder", *request.trainTextEncoder);
+    QJsonObject options{{"baseModelId", request.baseModelId}, {"outputName", request.outputName}, {"captions", captions}};
+    if (!settings.isEmpty()) options.insert("settings", settings);
+    m_socket->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"type", "submit"}, {"jobId", jobId}, {"operation", "lora.train"}, {"options", options}}).toJson(QJsonDocument::Compact)));
+    return jobId;
+}
+
 QString ServiceClient::submit(ImageOperation operation, const QJsonObject &options, const QList<QByteArray> &inputImages)
 {
     QString modelId = options.value("modelId").toString();
@@ -488,7 +521,8 @@ void ServiceClient::handleTextMessage(const QString &message)
             operations.contains("image.animate.pingPong"), operations.contains("image.animate.mp4"),
             operations.contains("image.generate.mask"),
             operations.contains("image.generate.control"),
-            operations.contains("image.generate.lora")});
+            operations.contains("image.generate.lora"),
+            operations.contains("lora.train")});
         if (m_capabilities.modelRouting) requestModelRouting();
         const QString state = object.value(QStringLiteral("state")).toString();
         emit serviceStateChanged(state == QStringLiteral("ready") ? ServiceConnectionState::Ready : ServiceConnectionState::Authenticated, state, {});
@@ -651,6 +685,25 @@ void ServiceClient::handleTextMessage(const QString &message)
             emit chatModelFinished(result);
             return;
         }
+        if (m_pendingJobs.value(jobId).loraTraining) {
+            // The trained LoRA stays on the service: the result carries its id and no binary frame.
+            if (object.value("operation") != "lora.train" || !object.value("modelId").isString()
+                || object.value("modelId").toString().isEmpty()) {
+                failJob(jobId, "invalid-result", tr("The service returned an invalid LoRA training result"));
+                return;
+            }
+            m_pendingJobs.remove(jobId);
+            emit jobStateChanged(jobId, JobState::Completed, -1);
+            LoraTrainingResult result;
+            result.jobId = jobId;
+            result.succeeded = true;
+            result.modelId = object.value("modelId").toString();
+            result.steps = object.value("steps").toInt();
+            result.seed = object.value("seed").toInteger();
+            result.durationMs = object.value("durationMs").toInteger(-1);
+            emit loraTrainingFinished(result);
+            return;
+        }
         if (m_pendingJobs.value(jobId).textChat) {
             if (object.value("operation") != "text.chat" || !object.value("text").isString()
                 || object.value("text").toString().trimmed().isEmpty()) {
@@ -704,7 +757,8 @@ void ServiceClient::updateCapabilities(const ServiceCapabilities &capabilities)
         && m_capabilities.imageAnimateMp4 == capabilities.imageAnimateMp4
         && m_capabilities.imageGenerationMask == capabilities.imageGenerationMask
         && m_capabilities.imageGenerationControl == capabilities.imageGenerationControl
-        && m_capabilities.imageGenerationLora == capabilities.imageGenerationLora) return;
+        && m_capabilities.imageGenerationLora == capabilities.imageGenerationLora
+        && m_capabilities.loraTraining == capabilities.loraTraining) return;
     m_capabilities = capabilities;
     emit capabilitiesChanged(m_capabilities);
 }
@@ -768,6 +822,13 @@ void ServiceClient::failJob(const QString &jobId, const QString &errorCode, cons
         result.errorCode = errorCode;
         result.message = message;
         emit chatModelFinished(result);
+    }
+    else if (job.loraTraining) {
+        LoraTrainingResult result;
+        result.jobId = jobId;
+        result.errorCode = errorCode;
+        result.message = message;
+        emit loraTrainingFinished(result);
     }
     else if (job.animation) emit animationFinished({jobId, false, {}, {}, 0, 0, errorCode, message});
     else emit imageJobFinished({jobId, job.operation, false, {}, job.mimeType, errorCode, message});
