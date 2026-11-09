@@ -16,7 +16,7 @@ Install or update nukleusd and the model manager.
 .PARAMETER InstallWebService
 Install or update the web service (nukleus-web).
 Every path option (-BuildDir, -QtDir, -ModelsDir, -ConfigDir, -SdCli, -LlamaServer,
--LlamaCompletion, -Ffmpeg and -StateFile) may be relative: it is resolved against the current
+-LlamaCompletion, -Ffmpeg, -LoraTrainer and -StateFile) may be relative: it is resolved against the current
 PowerShell location, not the process working directory.
 
 .PARAMETER BuildDir
@@ -41,6 +41,10 @@ Path of llama-server.exe (default: found on PATH).
 Path of llama-completion.exe (default: found on PATH).
 .PARAMETER Ffmpeg
 Path of ffmpeg.exe (default: found on PATH).
+.PARAMETER LoraTrainer
+Directory of the kohya-ss/sd-scripts trainer, with its Python environment in <DIR>\venv (docs\lora-training.md).
+Stored as NUKLEUS_LORA_TRAINER and kept on later runs; optional, and nothing is stored or warned about
+without it.
 .PARAMETER WebListen
 LAN IPv4 address of the web interface, added to 127.0.0.1 on port 9385.
 .PARAMETER WebBackendHost
@@ -68,6 +72,7 @@ param(
     [string]$LlamaServer,
     [string]$LlamaCompletion,
     [string]$Ffmpeg,
+    [string]$LoraTrainer,
     [string]$WebListen,
     [string]$WebBackendHost,
     [string]$WebBackendToken,
@@ -199,6 +204,7 @@ $SdCli = Resolve-OptionPath $SdCli
 $LlamaServer = Resolve-OptionPath $LlamaServer
 $LlamaCompletion = Resolve-OptionPath $LlamaCompletion
 $Ffmpeg = Resolve-OptionPath $Ffmpeg
+$LoraTrainer = Resolve-OptionPath $LoraTrainer
 $StateFile = Resolve-OptionPath $StateFile
 
 $programFiles = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
@@ -291,6 +297,7 @@ $backendModelsDir = $defaultModelsDir
 $backendConfigDir = $defaultConfigDir
 $backendEnvironment = [ordered]@{}
 $toolPaths = [ordered]@{}
+$loraTrainerPath = $null
 if ($doBackend) {
     if ($existingBackend) {
         $value = Get-CommandLineOption $existingBackend.ImagePath 'listen'
@@ -333,6 +340,39 @@ if ($doBackend) {
             $warnings += "Warning: $($tool.Label) was not found at $path."
         }
         $toolPaths[$tool.Variable] = $path
+    }
+
+    # The LoRA trainer: a directory, optional. An option wins, then the stored value; with neither,
+    # nothing is stored and nothing is said.
+    if ($LoraTrainer) {
+        $trainerDir = $LoraTrainer.TrimEnd('\', '/')
+        if (-not (Test-AbsolutePath $trainerDir)) {
+            Stop-Install "-LoraTrainer must resolve to a path on a local drive (for example C:\Tools\sd-scripts), not $trainerDir."
+        }
+        if (Test-UnderUserProfile ($trainerDir + '\')) {
+            Stop-Install ("The LoRA trainer is at $trainerDir, under a user profile that the service account cannot read. " +
+                'Move it outside C:\Users (for example C:\Tools\sd-scripts) and pass that directory with -LoraTrainer.')
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $trainerDir 'sdxl_train_network.py') -PathType Leaf)) {
+            Stop-Install "-LoraTrainer $trainerDir holds no sdxl_train_network.py: pass the kohya-ss/sd-scripts directory (docs\lora-training.md)."
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $trainerDir 'venv\Scripts\python.exe') -PathType Leaf)) {
+            Stop-Install "-LoraTrainer $trainerDir holds no venv\Scripts\python.exe: create the venv inside it (docs\lora-training.md)."
+        }
+        $venvConfig = Join-Path $trainerDir 'venv\pyvenv.cfg'
+        if (Test-Path -LiteralPath $venvConfig -PathType Leaf) {
+            $homeLine = Get-Content -LiteralPath $venvConfig | Where-Object { $_ -match '^\s*home\s*=' } | Select-Object -First 1
+            if ($homeLine) {
+                $venvHome = ($homeLine -replace '^\s*home\s*=\s*', '').Trim().TrimEnd('\', '/')
+                if (Test-UnderUserProfile ($venvHome + '\')) {
+                    Stop-Install ("The venv of -LoraTrainer $trainerDir is based on the Python in $venvHome, under a user profile that the service account cannot read. " +
+                        'Install Python for all users (C:\Program Files\Python312), recreate the venv from it (docs\lora-training.md) and pass -LoraTrainer again.')
+                }
+            }
+        }
+        $loraTrainerPath = $trainerDir
+    } elseif ($backendEnvironment.Contains('NUKLEUS_LORA_TRAINER') -and $backendEnvironment['NUKLEUS_LORA_TRAINER']) {
+        $loraTrainerPath = $backendEnvironment['NUKLEUS_LORA_TRAINER']
     }
 }
 
@@ -479,6 +519,7 @@ if ($doBackend) {
     $backendEnvironment['TEMP'] = $tmpDir
     $backendEnvironment['TMP'] = $tmpDir
     foreach ($key in $toolPaths.Keys) { $backendEnvironment[$key] = $toolPaths[$key] }
+    if ($loraTrainerPath) { $backendEnvironment['NUKLEUS_LORA_TRAINER'] = $loraTrainerPath }
     Set-ServiceEnvironment $ServiceName $backendEnvironment
 }
 if ($doWeb) {
@@ -534,6 +575,15 @@ if ($doBackend) {
         if ($openedToolDirs.ContainsKey($toolDir)) { continue }
         $openedToolDirs[$toolDir] = $true
         Grant-Access $toolDir @("${ServiceAccount}:(OI)(CI)RX") $false $true
+    }
+    # The LoRA trainer runs under the service account too: its directory (scripts and venv) is opened
+    # to it, read and execute only, when the account cannot run the venv's Python. The Python the
+    # venv is based on is not touched: it is under Program Files, or the installer refused it.
+    if ($loraTrainerPath -and (Test-Path -LiteralPath $loraTrainerPath -PathType Container)) {
+        $trainerPython = Join-Path $loraTrainerPath 'venv\Scripts\python.exe'
+        if ((Test-Path -LiteralPath $trainerPython -PathType Leaf) -and -not (Test-ExecutableByAccount $trainerPython $ServiceAccount)) {
+            Grant-Access $loraTrainerPath @("${ServiceAccount}:(OI)(CI)RX") $false $true
+        }
     }
     if ($ConfigDir) { Grant-Access $backendConfigDir @("${ServiceAccount}:(OI)(CI)M") $false }
     if ($newToken -or $installing -or -not $tokenIsSet) {

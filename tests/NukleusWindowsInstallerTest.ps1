@@ -312,6 +312,84 @@ try {
     Assert-NoMatch $run.Out '(?m)^\+ icacls .*System32.* /grant' 'Tool access: a tool every user can run is left alone'
     Assert-NoMatch $run.Out '(?m)^\+ icacls .*(:\(OI\)\(CI\)RX|:RX).*nukleus-web' 'Tool access: the web account is not given the tools'
 
+    # ---- The LoRA trainer (R15) ---------------------------------------------------------------
+    # Fixtures live under ProgramData: the temporary directory is under a user profile, which the
+    # installer refuses.
+    function New-TrainerFixture([string]$Directory, [string]$VenvHome, [switch]$NoScript, [switch]$NoPython) {
+        New-Item -ItemType Directory -Path (Join-Path $Directory 'venv\Scripts') -Force | Out-Null
+        if (-not $NoScript) { New-Item -ItemType File -Path (Join-Path $Directory 'sdxl_train_network.py') | Out-Null }
+        if (-not $NoPython) { Copy-Item -LiteralPath (Join-Path $system32 'whoami.exe') -Destination (Join-Path $Directory 'venv\Scripts\python.exe') }
+        if ($VenvHome) { Set-Content -LiteralPath (Join-Path $Directory 'venv\pyvenv.cfg') -Value @("home = $VenvHome", 'include-system-site-packages = false', 'version = 3.12.10') }
+    }
+    $trainerRoot = Join-Path $env:ProgramData ('nukleus-installer-test-trainer-' + [guid]::NewGuid().ToString('N'))
+    $allUsersHome = 'C:\Program Files\Python312'
+    $backendArgs = @('-InstallBackend', '-BuildDir', $buildDir, '-QtDir', $qtDir) + $tools
+
+    $trainer = Join-Path $trainerRoot 'sd-scripts'
+    New-TrainerFixture $trainer $allUsersHome
+    & (Join-Path $system32 'icacls.exe') $trainer /grant '*S-1-5-32-545:(OI)(CI)RX' /T | Out-Null
+
+    # R15: stored as an absolute path; a trailing separator is dropped; a relative path is resolved.
+    $run = Invoke-Script $install ($backendArgs + @('-LoraTrainer', (($trainer -replace '\\', '/') + '/'))) $null
+    Assert-That ($run.Code -eq 0) "R15: a valid trainer is accepted (got $($run.Code)): $($run.Err)"
+    Assert-Match $run.Out ('(?m)^    NUKLEUS_LORA_TRAINER=' + [regex]::Escape($trainer) + '$') 'R15: the trainer path is stored'
+    Assert-NoMatch $run.Out ('(?m)^\+ icacls ' + [regex]::Escape($trainer)) 'R15: a trainer every user can run is left alone'
+    $run = Invoke-Script $install ($backendArgs + @('-LoraTrainer', 'sd-scripts')) $null -Location $trainerRoot
+    Assert-Match $run.Out ('(?m)^    NUKLEUS_LORA_TRAINER=' + [regex]::Escape($trainer) + '$') 'R15: a relative trainer path is stored as its absolute path'
+
+    # R15: kept on a later run without the option; the option replaces it.
+    $storedState = New-InstalledState @{ imagePath = "`"$installDir\nukleusd.exe`" --listen 127.0.0.1 --port 9384"; environment = @("NUKLEUS_LORA_TRAINER=$trainer") } $null $true $false @('Nukleus')
+    $run = Invoke-Script $install @('-BuildDir', $buildDir, '-QtDir', $qtDir) $storedState
+    Assert-That ($run.Code -eq 0) "R15: an update with a stored trainer exits 0 (got $($run.Code)): $($run.Err)"
+    Assert-Match $run.Out ('(?m)^    NUKLEUS_LORA_TRAINER=' + [regex]::Escape($trainer) + '$') 'R15: the stored trainer is kept without the option'
+    $otherTrainer = Join-Path $trainerRoot 'other-scripts'
+    New-TrainerFixture $otherTrainer $allUsersHome
+    $run = Invoke-Script $install @('-BuildDir', $buildDir, '-QtDir', $qtDir, '-LoraTrainer', $otherTrainer) $storedState
+    Assert-Match $run.Out ('(?m)^    NUKLEUS_LORA_TRAINER=' + [regex]::Escape($otherTrainer) + '$') 'R15: the option replaces the stored trainer'
+    $staleState = New-InstalledState @{ imagePath = "`"$installDir\nukleusd.exe`" --listen 127.0.0.1 --port 9384"; environment = @('NUKLEUS_LORA_TRAINER=D:\gone\sd-scripts') } $null $true $false @('Nukleus')
+    $run = Invoke-Script $install @('-BuildDir', $buildDir, '-QtDir', $qtDir) $staleState
+    Assert-That ($run.Code -eq 0) 'R15: a stored trainer that no longer exists does not stop an update'
+    Assert-Match $run.Out '(?m)^    NUKLEUS_LORA_TRAINER=D:\\gone\\sd-scripts$' 'R15: it is still kept'
+    Assert-NoMatch $run.Out '(?m)^\+ icacls D:\\gone' 'R15: nothing is granted on a directory that does not exist'
+
+    # R15: with neither the option nor a stored value, nothing is stored and nothing is said.
+    $run = Invoke-Script $install $backendArgs $null
+    Assert-NoMatch $run.Out 'NUKLEUS_LORA_TRAINER' 'R15: no trainer, nothing stored'
+    Assert-NoMatch $run.Out '(?i)lora|trainer' 'R15: no trainer, no warning'
+
+    # R15: each refusal names the option and plans nothing.
+    $profileTrainer = Join-Path $env:SystemDrive 'Users\alice\sd-scripts'
+    $run = Invoke-Script $install ($backendArgs + @('-LoraTrainer', $profileTrainer)) $null
+    Assert-Refusal $run '-LoraTrainer' 'R15: a trainer under C:\Users'
+    Assert-Match $run.Err ([regex]::Escape($profileTrainer)) 'R15: the refusal names the path'
+    $noScript = Join-Path $trainerRoot 'no-script'
+    New-TrainerFixture $noScript $allUsersHome -NoScript
+    $run = Invoke-Script $install ($backendArgs + @('-LoraTrainer', $noScript)) $null
+    Assert-Refusal $run '-LoraTrainer.*sdxl_train_network\.py' 'R15: a directory without sdxl_train_network.py'
+    $noPython = Join-Path $trainerRoot 'no-python'
+    New-TrainerFixture $noPython $allUsersHome -NoPython
+    $run = Invoke-Script $install ($backendArgs + @('-LoraTrainer', $noPython)) $null
+    Assert-Refusal $run '-LoraTrainer.*venv\\Scripts\\python\.exe' 'R15: a directory without venv\Scripts\python.exe'
+    $userHome = Join-Path $env:SystemDrive 'Users\alice\AppData\Local\Programs\Python\Python312'
+    $perUser = Join-Path $trainerRoot 'per-user-python'
+    New-TrainerFixture $perUser $userHome
+    $run = Invoke-Script $install ($backendArgs + @('-LoraTrainer', $perUser)) $null
+    Assert-Refusal $run '-LoraTrainer' 'R15: a venv based on a per-user Python'
+    Assert-Match $run.Err ([regex]::Escape($userHome)) 'R15: the refusal names the Python home'
+    $run = Invoke-Script $install ($backendArgs + @('-LoraTrainer', (Join-Path $trainerRoot 'missing'))) $null
+    Assert-Refusal $run '-LoraTrainer' 'R15: a directory that does not exist'
+
+    # R15: a trainer the service account cannot run is opened to it, read and execute only, recursively.
+    $restrictedTrainer = Join-Path $trainerRoot 'restricted-scripts'
+    New-TrainerFixture $restrictedTrainer $allUsersHome
+    & (Join-Path $system32 'icacls.exe') (Join-Path $restrictedTrainer 'venv\Scripts\python.exe') /inheritance:r /grant:r '*S-1-5-32-544:F' "${env:USERDOMAIN}\${env:USERNAME}:F" | Out-Null
+    $run = Invoke-Script $install ($backendArgs + @('-LoraTrainer', $restrictedTrainer)) $null
+    Assert-That ($run.Code -eq 0) "R15: a restricted trainer is accepted (got $($run.Code)): $($run.Err)"
+    Assert-Match $run.Out ('(?m)^\+ icacls ' + [regex]::Escape($restrictedTrainer) + ' /grant NT SERVICE\\nukleus:\(OI\)\(CI\)RX /T$') 'R15: the trainer directory is opened to the daemon account, read and execute, recursively'
+    Assert-NoMatch $run.Out '(?m)^\+ icacls C:\\Program Files' 'R15: the Python the venv is based on is not touched'
+    Assert-NoMatch $run.Out '(?m)^\+ icacls .*Users\\' 'R15: nothing under C:\Users is touched'
+    Assert-NoMatch $run.Out '(?m)^\+ icacls .*(:\(OI\)\(CI\)RX|:RX).*nukleus-web' 'R15: the web account is not given the trainer'
+
     # R1: a relative -StateFile is read from the PowerShell location by both scripts.
     $run = Invoke-Script $install @('-BuildDir', 'build', '-QtDir', $qtDir) $installed -Location $work -RelativeState
     Assert-Match $run.Out '(?m)^Updating Nukleus\.' 'R1: the installer reads a relative -StateFile from the PowerShell location'
@@ -390,6 +468,7 @@ try {
 finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
     if ($restrictedDir) { Remove-Item -LiteralPath $restrictedDir -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($trainerRoot) { Remove-Item -LiteralPath $trainerRoot -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 if ($failures.Count -gt 0) {
