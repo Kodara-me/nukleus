@@ -64,7 +64,26 @@ Result on that machine: torch `2.9.1+rocm7.2.1`, `torch.cuda.is_available()` tru
    prints `2.9.1+rocm7.2.1 True`.
 7. Fill the tokenizer cache as in step 6 of the Linux steps, into
    `C:\Tools\sd-scripts\tokenizers`.
-8. Set `NUKLEUS_LORA_TRAINER=C:\Tools\sd-scripts` for the service and restart it.
+8. Give the directory to the installer, from the Nukleus checkout, in an elevated
+   PowerShell (the other options are the ones of [the deployment guide](deployment.md#windows);
+   components and settings already installed are kept):
+
+   ```powershell
+   scripts\install-nukleus.ps1 -BuildDir build-msvc -QtDir C:\Qt\6.8.3\msvc2022_64 -LoraTrainer C:\Tools\sd-scripts
+   ```
+
+   The installer stores the path as `NUKLEUS_LORA_TRAINER`, opens the directory to the
+   service account (`NT SERVICE\nukleus`, read and execute, only when that account cannot
+   already run `venv\Scripts\python.exe`) and restarts the service, which checks the trainer
+   at startup. Run it again after changing the trainer; without `-LoraTrainer` the stored
+   path is kept. Add `-DryRun` first to read the plan.
+9. Check that `capabilities.operations` of the service includes `lora.train`.
+
+The installer refuses, before changing anything, a trainer under `C:\Users`, a directory
+without `sdxl_train_network.py` or `venv\Scripts\python.exe`, and a venv created from a
+per-user Python (`home` in `venv\pyvenv.cfg` under `C:\Users`, as with Python installed
+"for me only"): the service account cannot read a user profile. Install Python for all
+users (step 1) and recreate the venv from it (step 3).
 
 No training job has been run on this setup yet.
 

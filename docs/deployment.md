@@ -83,6 +83,8 @@ from an elevated PowerShell.
   and `-Ffmpeg` or else found on the installing session's `PATH`. It stops before any change when
   a path is under `C:\Users\...` (for llama.cpp, `winget install ggml.llamacpp --scope machine`),
   and warns, without stopping, about a tool it cannot find.
+- Optional, to train LoRAs: the kohya-ss/sd-scripts trainer with its `venv`, outside `C:\Users`,
+  installed from [LoRA training](lora-training.md#windows) and given with `-LoraTrainer`
 
 ### Installing and updating
 
@@ -94,7 +96,7 @@ The component rule is the Linux one: every component already installed is update
 that is not installed is added only by its flag, and a machine with nothing installed needs
 `-InstallBackend` (`nukleusd` and the manager), `-InstallWebService` (`nukleus-web`) or both.
 
-Relative paths given to the path options (`-BuildDir`, `-QtDir`, `-ModelsDir`, `-ConfigDir`, `-SdCli`, `-LlamaServer`, `-LlamaCompletion`, `-Ffmpeg`) are resolved against the current PowerShell location, and the stored paths are the absolute results. `-ModelsDir` and `-ConfigDir` must resolve to a path on a local drive (for example `D:\nukleus\models`); a network (UNC) path is refused.
+Relative paths given to the path options (`-BuildDir`, `-QtDir`, `-ModelsDir`, `-ConfigDir`, `-SdCli`, `-LlamaServer`, `-LlamaCompletion`, `-Ffmpeg`, `-LoraTrainer`) are resolved against the current PowerShell location, and the stored paths are the absolute results. `-ModelsDir` and `-ConfigDir` must resolve to a path on a local drive (for example `D:\nukleus\models`); a network (UNC) path is refused.
 
 | Option | Meaning |
 | --- | --- |
@@ -103,6 +105,7 @@ Relative paths given to the path options (`-BuildDir`, `-QtDir`, `-ModelsDir`, `
 | `-Token TOKEN` | LAN token, stored in `config\token`. Without it, the existing token is kept, and an interactive session gets a masked prompt; a non-interactive one stops before any change. |
 | `-ModelsDir DIR`, `-ConfigDir DIR` | Another weight directory and another configuration directory (the catalogue is `<ConfigDir>\catalog\`), always together. Created when missing, never emptied, their permissions kept apart from write access for the daemon's account. The token stays in `%ProgramData%\Nukleus\config\`. |
 | `-SdCli`, `-LlamaServer`, `-LlamaCompletion`, `-Ffmpeg` | Paths of the runtime tools. |
+| `-LoraTrainer DIR` | Directory of the LoRA trainer ([LoRA training](lora-training.md#windows)), for example `C:\Tools\sd-scripts`; stored as `NUKLEUS_LORA_TRAINER` and kept on later runs, and the daemon then offers `lora.train`. Optional: without it, nothing is stored and nothing is warned about. The installer stops before any change, naming the option, when `DIR` is under `C:\Users`, lacks `sdxl_train_network.py` or `venv\Scripts\python.exe`, or when `venv\pyvenv.cfg` names a `home` under `C:\Users` (a per-user Python the service account cannot read). It opens `DIR` to the daemon's account, read and execute, recursively, only when that account cannot run the venv's Python. |
 | `-WebListen ADDRESS` | LAN IPv4 address of the web interface, on port `9385`. |
 | `-WebBackendHost HOST`, `-WebBackendToken TOKEN` | A backend on another machine; the token is stored in `web\backend-token`. Without them the web service reaches the backend of this machine over loopback. |
 | `-NoStart` | Install without starting the services. |
