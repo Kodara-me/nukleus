@@ -26,8 +26,12 @@ set(SERVICE_DAEMON_SOURCES
     daemon/NukleusDaemon.h
     daemon/LlamaServerRunner.cpp
     daemon/LlamaServerRunner.h
+    daemon/LoraTrainerRunner.cpp
+    daemon/LoraTrainerRunner.h
     daemon/ModelCatalog.cpp
     daemon/ModelCatalog.h
+    daemon/ProcessTree.cpp
+    daemon/ProcessTree.h
     daemon/SdCliProgressParser.cpp
     daemon/SdCliProgressParser.h
     daemon/SdCliRunner.cpp

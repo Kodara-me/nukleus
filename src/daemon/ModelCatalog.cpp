@@ -465,6 +465,85 @@ bool ModelCatalog::install(const ModelInstallRequest &request, QString *errorMes
 
 bool ModelCatalog::isInstalling() const { return bool(m_activeInstall); }
 
+namespace
+{
+constexpr auto TrainedLoraStagingSuffix = ".training.part";
+}
+
+bool ModelCatalog::prepareTrainedLoraStaging(const QString &outputName, QString *stagingPath, QString *errorMessage) const
+{
+    const QString fileName = outputName + QStringLiteral(".safetensors");
+    if (!isSafeFileName(fileName)) {
+        if (errorMessage) *errorMessage = tr("The LoRA name is not a file name");
+        return false;
+    }
+    if (!ensureDirectory(ModelCategory::Companion, errorMessage)) return false;
+    if (stagingPath) *stagingPath = QDir(directoryPath(ModelCategory::Companion)).filePath(fileName + QLatin1String(TrainedLoraStagingSuffix));
+    return true;
+}
+
+std::optional<ModelInfo> ModelCatalog::registerTrainedLora(const QString &stagedPath, const QString &outputName, QString *errorMessage)
+{
+    const auto fail = [&](const QString &message) -> std::optional<ModelInfo> {
+        if (errorMessage) *errorMessage = message;
+        return std::nullopt;
+    };
+    const QString fileName = outputName + QStringLiteral(".safetensors");
+    if (!isSafeFileName(fileName)) return fail(tr("The LoRA name is not a file name"));
+    if (!QFileInfo(stagedPath).isFile()) return fail(tr("The trained file is not staged"));
+    const QString directory = directoryPath(ModelCategory::Companion);
+    const QString finalPath = QDir(directory).filePath(fileName);
+    const auto metadata = readMetadata(ModelCategory::Companion);
+    if (!metadata) return fail(tr("Could not read model metadata"));
+    // An installed companion holds the name, whatever its extension.
+    const QString held = tr("The name %1 is now held by an installed companion").arg(outputName);
+    if (!loraNameError(fileName, QStringLiteral("lora"), models(ModelCategory::Companion), {}).isEmpty()) return fail(held);
+    if (QFileInfo::exists(finalPath) || metadata->contains(fileName)) return fail(held);
+    // A file being downloaded holds its name too: the installation will publish it under that name.
+    const QString downloading = tr("The name %1 is now held by a file being downloaded").arg(outputName);
+    const auto sameBaseName = [&outputName](const QString &name) {
+        return QFileInfo(name).completeBaseName().compare(outputName, Qt::CaseInsensitive) == 0;
+    };
+    const QDir companions(directory);
+    for (const QFileInfo &part : companions.entryInfoList({QStringLiteral("*.part")}, QDir::Files | QDir::Hidden)) {
+        if (part.fileName().endsWith(QLatin1String(TrainedLoraStagingSuffix))) continue;
+        if (sameBaseName(part.completeBaseName())) return fail(downloading);
+    }
+    if (m_activeInstall) {
+        for (const auto &file : m_activeInstall->files)
+            if (QFileInfo(file.finalPath).absolutePath() == companions.absolutePath() && sameBaseName(QFileInfo(file.finalPath).fileName()))
+                return fail(downloading);
+    }
+    bool alreadyExists = false;
+    if (!createHardLinkNoReplace(stagedPath, finalPath, &alreadyExists))
+        return fail(alreadyExists ? held : tr("Could not install the trained file"));
+    auto updated = *metadata;
+    updated.insert(fileName, QJsonObject{{QStringLiteral("companionFiles"), QJsonObject{}},
+                                         {QStringLiteral("modelType"), QStringLiteral("checkpoint")},
+                                         {QStringLiteral("recommendedOptions"), QJsonObject{{QStringLiteral("subtype"), QStringLiteral("lora")}}},
+                                         {QStringLiteral("displayName"), outputName}});
+    if (!writeMetadata(ModelCategory::Companion, updated)) {
+        QFile::remove(finalPath);
+        return fail(tr("Could not save model metadata"));
+    }
+    QFile::remove(stagedPath);
+    const auto installed = model(ModelCategory::Companion, QStringLiteral("companion:") + fileName);
+    if (!installed) {
+        QFile::remove(finalPath);
+        writeMetadata(ModelCategory::Companion, *metadata);
+        return fail(tr("Could not read the installed model"));
+    }
+    return installed;
+}
+
+void ModelCatalog::removeTrainedLoraLeftovers() const
+{
+    if (directoryPath(ModelCategory::Companion).isEmpty()) return;
+    const QDir companions(directoryPath(ModelCategory::Companion));
+    for (const QFileInfo &leftover : companions.entryInfoList({QStringLiteral("*") + QLatin1String(TrainedLoraStagingSuffix)}, QDir::Files | QDir::Hidden))
+        QFile::remove(leftover.absoluteFilePath());
+}
+
 void ModelCatalog::cancel(const QString &installId)
 {
     if (!m_activeInstall || m_activeInstall->request.installId != installId) return;

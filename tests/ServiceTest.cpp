@@ -34,6 +34,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <signal.h>
+#include <sys/types.h>
 #endif
 
 namespace
@@ -147,6 +150,16 @@ private slots:
     void loraCompanionIsCataloged_R1();
     void loraCompanionNamesAreUnambiguous_R2();
     void loraCompanionIsAcceptedByOptions_R3();
+    void loraTrainingCapabilityFollowsTheTrainer_R1();
+    void loraTrainingRejectsInvalidSubmissions_R3_R4();
+    void loraTrainingRunsTheTrainerWithTheRequest_R2_R4_R6_R7_R8();
+    void loraTrainingRejectsBadUploads_R5_R11();
+    void loraTrainingInstallsDuringAModelInstall_R8();
+    void loraTrainingReportsFailures_R9_R11();
+    void loraTrainingQueuesAndStopsTheProcessTree_R10_R11();
+    void loraTrainingCleansUpAtStartup_R11();
+    void loraTrainingProtectsItsBaseModel_R12();
+    void loraTrainingUnloadsTheChatModelFirst_R10();
     void animationRollsBackCanceledAndFailedInstalls_R3();
     void animationRequiresMatchingCompanions_R4_R5();
     void animationAttachesAndRemovesFiles_R6_R7();
@@ -178,6 +191,8 @@ void ServiceTest::initTestCase()
     // Services built from a default configuration must never probe or run the host's ffmpeg;
     // tests that need one name a fake explicitly.
     qputenv("NUKLEUS_FFMPEG", "/nonexistent/nukleus-test-ffmpeg");
+    // Nor may they train with the host's LoRA trainer.
+    qunsetenv("NUKLEUS_LORA_TRAINER");
 }
 
 void ServiceTest::publishesHardLinkWithoutReplacing_R4()
@@ -5185,4 +5200,1059 @@ void ServiceTest::animateMapsCompressionQualityOntoEncoders_R17()
         if (c.quality) QCOMPARE(fixture.argument("--compression-quality"), QString::number(*c.quality));
         else QVERIFY(!fixture.arguments().contains("--compression-quality"));
     }
+}
+
+// lora.train: the fake trainer (tests/FakeLoraTrainer.cpp) stands in for sd-scripts and its venv Python.
+namespace
+{
+const QByteArray TrainingPng = QByteArray("\x89PNG\r\n\x1a\n", 8);
+const QByteArray TrainingJpeg = QByteArray("\xff\xd8\xff\xe0", 4);
+
+// Image i of a training set: PNG for even indexes, JPEG for odd ones, each with its own bytes.
+QByteArray trainingImage(int index)
+{
+    return (index % 2 == 0 ? TrainingPng : TrainingJpeg) + "pixels-" + QByteArray::number(index);
+}
+
+bool processRunning(qint64 pid)
+{
+#ifdef Q_OS_WIN
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, DWORD(pid));
+    if (!process) return false;
+    const bool alive = WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+    CloseHandle(process);
+    return alive;
+#elif defined(Q_OS_LINUX)
+    // A zombie waiting for its parent has ended.
+    QFile stat(QStringLiteral("/proc/%1/stat").arg(pid));
+    if (!stat.open(QIODevice::ReadOnly)) return false;
+    const QByteArray content = stat.readAll();
+    const qsizetype close = content.lastIndexOf(')');
+    return close >= 0 && close + 2 < content.size() && content.at(close + 2) != 'Z';
+#else
+    return ::kill(pid_t(pid), 0) == 0;
+#endif
+}
+
+qint64 pidFrom(const QString &path)
+{
+    QFile file(path);
+    return file.open(QIODevice::ReadOnly) ? file.readAll().trimmed().toLongLong() : 0;
+}
+
+// One WebSocket client of the service, recording what it receives.
+class TrainingClient
+{
+public:
+    QWebSocket socket;
+    QList<QJsonObject> messages;
+
+    bool connectTo(quint16 port)
+    {
+        QObject::connect(&socket, &QWebSocket::textMessageReceived, &socket,
+                         [this](const QString &text) { messages.append(QJsonDocument::fromJson(text.toUtf8()).object()); });
+        QObject::connect(&socket, &QWebSocket::binaryMessageReceived, &socket, [this] { ++binaries; });
+        socket.open(QUrl(QString("ws://127.0.0.1:%1").arg(port)));
+        if (!QTest::qWaitFor([this] { return socket.state() == QAbstractSocket::ConnectedState; })) return false;
+        send({{"type", "authenticate"}, {"version", 3}});
+        if (!QTest::qWaitFor([this] { return messages.size() >= 2; })) return false;
+        messages.clear();
+        return true;
+    }
+    void send(const QJsonObject &message)
+    {
+        socket.sendTextMessage(QString::fromUtf8(QJsonDocument(message).toJson(QJsonDocument::Compact)));
+    }
+    QList<QJsonObject> of(const QString &jobId, const QString &type = {}) const
+    {
+        QList<QJsonObject> found;
+        for (const auto &message : messages)
+            if (message.value("jobId") == jobId && (type.isEmpty() || message.value("type") == type)) found.append(message);
+        return found;
+    }
+    // The job's result or error, once it came.
+    QJsonObject terminal(const QString &jobId) const
+    {
+        for (const auto &message : messages)
+            if (message.value("jobId") == jobId && (message.value("type") == "result" || message.value("type") == "error")) return message;
+        return {};
+    }
+    bool waitForTerminal(const QString &jobId, int timeout = 20000)
+    {
+        return QTest::qWaitFor([&] { return !terminal(jobId).isEmpty(); }, timeout);
+    }
+    bool waitForType(const QString &jobId, const QString &type, int count = 1, int timeout = 20000)
+    {
+        return QTest::qWaitFor([&] { return of(jobId, type).size() >= count; }, timeout);
+    }
+    // Submits a lora.train job and answers each upload request with the next of the images.
+    bool submitAndUpload(const QString &jobId, const QJsonObject &options, const QList<QByteArray> &images, bool waitForEnd = false)
+    {
+        send({{"type", "submit"}, {"operation", "lora.train"}, {"jobId", jobId}, {"options", options}});
+        for (int index = 0; index < images.size(); ++index) {
+            if (!QTest::qWaitFor([&] { return of(jobId, "upload-required").size() > index || !terminal(jobId).isEmpty(); })) return false;
+            if (of(jobId, "upload-required").size() <= index) return false;
+            socket.sendBinaryMessage(images.at(index));
+        }
+        return !waitForEnd || waitForTerminal(jobId);
+    }
+    int binaries = 0;
+};
+
+class LoraTrainerFixture
+{
+public:
+    QTemporaryDir directory;
+    NukleusConfiguration configuration;
+    TrainingClient client;
+    std::unique_ptr<NukleusDaemon> daemon;
+    bool configureTrainer = true; // Whether start() names the fake trainer.
+
+    LoraTrainerFixture() : m_testMode(QStandardPaths::isTestModeEnabled())
+    {
+        // The training folders and the trainer's caches are the service's data: kept off the host's.
+        QStandardPaths::setTestModeEnabled(true);
+        QDir(ServicePaths::trainingPath()).removeRecursively();
+        QDir(ServicePaths::trainerCachePath()).removeRecursively();
+    }
+    ~LoraTrainerFixture()
+    {
+        client.socket.close();
+        daemon.reset();
+        QDir(ServicePaths::trainingPath()).removeRecursively();
+        QDir(ServicePaths::trainerCachePath()).removeRecursively();
+        QStandardPaths::setTestModeEnabled(m_testMode);
+    }
+
+    QString trainer() const { return directory.filePath("trainer"); }
+    QString models() const { return directory.filePath("models"); }
+    QString companionDirectory() const { return QDir(models()).filePath("companion"); }
+    QString baseModelId() const { return QStringLiteral("image-generation:wai.safetensors"); }
+    QString baseModelPath() const { return QDir(models()).filePath("wai.safetensors"); }
+
+    static bool writeFile(const QString &path, const QByteArray &bytes)
+    {
+        QDir().mkpath(QFileInfo(path).absolutePath());
+        QFile file(path);
+        return file.open(QIODevice::WriteOnly | QIODevice::Truncate) && file.write(bytes) == bytes.size();
+    }
+
+    // sdxl_train_network.py and the venv Python (the fake) in the trainer directory.
+    bool layoutTrainer(bool script = true, bool python = true) const
+    {
+#ifdef Q_OS_WIN
+        const QString interpreter = QDir(trainer()).filePath("venv/Scripts/python.exe");
+#else
+        const QString interpreter = QDir(trainer()).filePath("venv/bin/python");
+#endif
+        if (!QDir().mkpath(trainer())) return false;
+        if (script && !writeFile(QDir(trainer()).filePath("sdxl_train_network.py"), "# fake sd-scripts\n")) return false;
+        if (!python) return true;
+        QDir().mkpath(QFileInfo(interpreter).absolutePath());
+        QFile::remove(interpreter);
+        QFile fake(QStringLiteral(NUKLEUS_FAKE_LORA_TRAINER));
+        return fake.copy(interpreter)
+            && QFile::setPermissions(interpreter, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner | QFile::ReadGroup | QFile::ExeGroup);
+    }
+    // Control lines of the fake for one output name, or for every run with an empty name.
+    bool control(const QString &name, const QStringList &lines) const
+    {
+        return writeFile(QDir(trainer()).filePath(name.isEmpty() ? QString("control.txt") : "control-" + name + ".txt"),
+                         lines.join('\n').toUtf8());
+    }
+    bool release(const QString &name) const { return writeFile(QDir(trainer()).filePath("release-" + name), "go"); }
+    bool started(const QString &name) const { return QFileInfo::exists(QDir(trainer()).filePath("started-" + name)); }
+    bool waitStarted(const QString &name) const { return QTest::qWaitFor([&] { return started(name); }, 20000); }
+    qint64 childPid(const QString &name) const { return pidFrom(QDir(trainer()).filePath("child-" + name + ".pid")); }
+
+    // What the run of an output name received.
+    QJsonObject record(const QString &name) const
+    {
+        QFile file(QDir(trainer()).filePath("record-" + name + ".json"));
+        return file.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(file.readAll()).object() : QJsonObject();
+    }
+    static QStringList recordedArguments(const QJsonObject &record)
+    {
+        QStringList arguments;
+        for (const auto &argument : record.value("arguments").toArray()) arguments.append(argument.toString());
+        return arguments;
+    }
+    static QString argumentAfter(const QStringList &arguments, const QString &flag)
+    {
+        const qsizetype index = arguments.indexOf(flag);
+        return index >= 0 && index + 1 < arguments.size() ? arguments.at(index + 1) : QString();
+    }
+    static QByteArray recordedFile(const QJsonObject &record, const QString &path)
+    {
+        return QByteArray::fromHex(record.value("files").toObject().value(path).toString().toLatin1());
+    }
+
+    // An installed checkpoint, a diffusion model, a GGUF model, a VAE companion and a LoRA.
+    bool writeModels() const
+    {
+        if (!writeFile(baseModelPath(), "base") || !writeFile(QDir(models()).filePath("diffusion.safetensors"), "diffusion")
+            || !writeFile(QDir(models()).filePath("model.gguf"), "gguf")
+            || !writeFile(QDir(models()).filePath("metadata.json"), QJsonDocument(QJsonObject{
+                   {"diffusion.safetensors", QJsonObject{{"modelType", "diffusion"}}}}).toJson(QJsonDocument::Compact)))
+            return false;
+        return installCompanion("other-vae.safetensors", "vae") && installCompanion("style.v2.gguf", "lora");
+    }
+    // Writes a companion file and its catalogue entry directly, as an installation that finished would.
+    bool installCompanion(const QString &fileName, const QString &subtype, const QByteArray &bytes = "companion") const
+    {
+        const QString metadataPath = QDir(companionDirectory()).filePath("metadata.json");
+        QJsonObject metadata;
+        QFile existing(metadataPath);
+        if (existing.open(QIODevice::ReadOnly)) metadata = QJsonDocument::fromJson(existing.readAll()).object();
+        existing.close();
+        metadata.insert(fileName, QJsonObject{{"recommendedOptions", QJsonObject{{"subtype", subtype}}}});
+        return writeFile(QDir(companionDirectory()).filePath(fileName), bytes)
+            && writeFile(metadataPath, QJsonDocument(metadata).toJson(QJsonDocument::Compact));
+    }
+
+    // Starts the service (the trainer is checked here); with connect, a client authenticates too.
+    bool start(bool connect = true, QString *error = nullptr)
+    {
+        configuration.port = 0;
+        configuration.modelRootPath = models();
+        configuration.ffmpeg = directory.filePath("missing-ffmpeg");
+        if (configuration.loraTrainer.isEmpty() && configureTrainer) configuration.loraTrainer = trainer();
+        daemon = std::make_unique<NukleusDaemon>(configuration);
+        QString message;
+        if (!daemon->start(&message)) {
+            if (error) *error = message;
+            return false;
+        }
+        return !connect || client.connectTo(daemon->serverPort());
+    }
+    void withoutTrainer() { configureTrainer = false; }
+
+    // The next message of a type received after this call began.
+    QJsonObject request(const QJsonObject &message, const QString &replyType)
+    {
+        const int before = client.messages.size();
+        client.send(message);
+        QJsonObject reply;
+        static_cast<void>(QTest::qWaitFor([&] {
+            for (int index = before; index < client.messages.size(); ++index)
+                if (client.messages.at(index).value("type") == replyType) { reply = client.messages.at(index); return true; }
+            return false;
+        }));
+        return reply;
+    }
+    QStringList operations()
+    {
+        QStringList operations;
+        for (const auto &operation : request({{"type", "capabilities"}}, "capabilities").value("operations").toArray())
+            operations.append(operation.toString());
+        return operations;
+    }
+    // The installed companions, listed over the protocol.
+    QList<QJsonObject> companions()
+    {
+        QList<QJsonObject> models;
+        for (const auto &category : request({{"type", "models.list"}}, "models.list.result").value("categories").toArray())
+            if (category.toObject().value("category") == "companion")
+                for (const auto &model : category.toObject().value("models").toArray()) models.append(model.toObject());
+        return models;
+    }
+    QStringList companionIds()
+    {
+        QStringList ids;
+        for (const auto &model : companions()) ids.append(model.value("id").toString());
+        ids.sort();
+        return ids;
+    }
+    QJsonObject companion(const QString &id)
+    {
+        for (const auto &model : companions())
+            if (model.value("id") == id) return model;
+        return {};
+    }
+    static QStringList trainingEntries()
+    {
+        return QDir(ServicePaths::trainingPath()).entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden);
+    }
+    QStringList stagedFiles() const
+    {
+        return QDir(companionDirectory()).entryList({"*.training.part"}, QDir::Files | QDir::Hidden);
+    }
+
+    QJsonObject options(const QString &outputName, int images = 2, const QJsonObject &settings = {}) const
+    {
+        QJsonArray captions;
+        for (int index = 0; index < images; ++index) captions.append(QString("%1, caption %2").arg(outputName).arg(index));
+        QJsonObject result{{"baseModelId", baseModelId()}, {"outputName", outputName}, {"captions", captions}};
+        if (!settings.isEmpty()) result.insert("settings", settings);
+        return result;
+    }
+    static QList<QByteArray> images(int count)
+    {
+        QList<QByteArray> result;
+        for (int index = 0; index < count; ++index) result.append(trainingImage(index));
+        return result;
+    }
+    // Runs a job of two images to its end.
+    QJsonObject train(const QString &jobId, const QString &outputName, int images = 2)
+    {
+        return client.submitAndUpload(jobId, options(outputName, images), LoraTrainerFixture::images(images), true)
+            ? client.terminal(jobId) : QJsonObject();
+    }
+
+private:
+    bool m_testMode = false;
+};
+}
+
+void ServiceTest::loraTrainingCapabilityFollowsTheTrainer_R1()
+{
+    // The configuration reads NUKLEUS_LORA_TRAINER, and nothing else offers a default.
+    qputenv("NUKLEUS_LORA_TRAINER", "/opt/sd-scripts");
+    QCOMPARE(NukleusConfiguration().loraTrainer, QString("/opt/sd-scripts"));
+    qunsetenv("NUKLEUS_LORA_TRAINER");
+    QVERIFY(NukleusConfiguration().loraTrainer.isEmpty());
+
+    // A script and a Python that exits with code 0 on --version offer the operation.
+    {
+        LoraTrainerFixture fixture;
+        QVERIFY(fixture.layoutTrainer() && fixture.writeModels());
+        QVERIFY(fixture.start());
+        QVERIFY(fixture.operations().contains("lora.train"));
+        QCOMPARE(fixture.client.messages.first().value("type").toString(), QString("capabilities"));
+    }
+    // Each of these leaves the operation out, and a submission fails before any upload is requested.
+    struct Case { QString label; bool script; bool python; QStringList control; bool configured; };
+    const QList<Case> cases{
+        {"no trainer configured", true, true, {}, false},
+        {"no script", false, true, {}, true},
+        {"no Python", true, false, {}, true},
+        {"Python exits with 1 on --version", true, true, {"versionExit=1"}, true}};
+    for (const auto &c : cases) {
+        LoraTrainerFixture fixture;
+        QVERIFY2(fixture.layoutTrainer(c.script, c.python) && fixture.writeModels(), qPrintable(c.label));
+        if (!c.control.isEmpty()) QVERIFY(fixture.control("", c.control));
+        if (!c.configured) fixture.withoutTrainer();
+        QVERIFY2(fixture.start(), qPrintable(c.label));
+        QVERIFY2(!fixture.operations().contains("lora.train"), qPrintable(c.label));
+        fixture.client.send({{"type", "submit"}, {"operation", "lora.train"}, {"jobId", "train-1"}, {"options", fixture.options("clara")}});
+        QVERIFY2(fixture.client.waitForTerminal("train-1"), qPrintable(c.label));
+        QCOMPARE(fixture.client.terminal("train-1").value("code").toString(), QString("backend-not-ready"));
+        QVERIFY(fixture.client.of("train-1", "upload-required").isEmpty());
+        QVERIFY(LoraTrainerFixture::trainingEntries().isEmpty());
+    }
+}
+
+void ServiceTest::loraTrainingRejectsInvalidSubmissions_R3_R4()
+{
+    LoraTrainerFixture fixture;
+    QVERIFY(fixture.layoutTrainer() && fixture.writeModels());
+    QVERIFY(fixture.installCompanion("clara.safetensors", "lora"));
+    QVERIFY(fixture.start());
+    auto &client = fixture.client;
+    int sequence = 0;
+    const auto valid = [&] { return fixture.options("fresh"); };
+    const auto with = [](QJsonObject options, const QString &key, const QJsonValue &value) {
+        options.insert(key, value);
+        return options;
+    };
+    const auto without = [](QJsonObject options, const QString &key) {
+        options.remove(key);
+        return options;
+    };
+    const auto withSetting = [&](const QString &key, const QJsonValue &value) {
+        return with(valid(), "settings", QJsonObject{{key, value}});
+    };
+    // Rejected before any upload is requested, correlated to the job, with nothing left on disk.
+    const auto rejected = [&](const QString &label, const QJsonObject &options, const QString &code = "invalid-request",
+                              bool nothingOnDisk = true) {
+        const QString jobId = QString("rejected-%1").arg(++sequence);
+        client.send({{"type", "submit"}, {"operation", "lora.train"}, {"jobId", jobId}, {"options", options}});
+        QVERIFY2(client.waitForTerminal(jobId), qPrintable(label));
+        QVERIFY2(client.terminal(jobId).value("type") == "error", qPrintable(label));
+        QVERIFY2(client.terminal(jobId).value("code") == code, qPrintable(label + ": " + client.terminal(jobId).value("code").toString()));
+        QVERIFY2(client.of(jobId, "upload-required").isEmpty(), qPrintable(label));
+        QVERIFY2(!nothingOnDisk || LoraTrainerFixture::trainingEntries().isEmpty(), qPrintable(label));
+    };
+    // Accepted: the upload is requested; a text where an image should be ends the job.
+    const auto accepted = [&](const QString &label, const QJsonObject &options) {
+        const QString jobId = QString("accepted-%1").arg(++sequence);
+        client.send({{"type", "submit"}, {"operation", "lora.train"}, {"jobId", jobId}, {"options", options}});
+        QVERIFY2(client.waitForType(jobId, "upload-required"), qPrintable(label));
+        client.socket.sendBinaryMessage("not an image");
+        QVERIFY2(client.waitForTerminal(jobId), qPrintable(label));
+        QCOMPARE(client.terminal(jobId).value("code").toString(), QString("invalid-image"));
+    };
+
+    // R3: the options.
+    rejected("unknown option", with(valid(), "extra", 1));
+    rejected("no base model", without(valid(), "baseModelId"));
+    rejected("blank base model", with(valid(), "baseModelId", "   "));
+    rejected("base model not a string", with(valid(), "baseModelId", 5));
+    rejected("base model is a companion", with(valid(), "baseModelId", "companion:other-vae.safetensors"));
+    rejected("base model is a diffusion model", with(valid(), "baseModelId", "image-generation:diffusion.safetensors"));
+    rejected("base model is not safetensors", with(valid(), "baseModelId", "image-generation:model.gguf"));
+    rejected("base model names no model", with(valid(), "baseModelId", "image-generation:absent.safetensors"), "model-unavailable");
+    rejected("base model has no category", with(valid(), "baseModelId", "absent"), "model-unavailable");
+    rejected("base model of no category", with(valid(), "baseModelId", "unknown:thing"), "model-unavailable");
+    // R3: the output name.
+    rejected("no output name", without(valid(), "outputName"));
+    rejected("empty output name", with(valid(), "outputName", ""));
+    rejected("output name not a string", with(valid(), "outputName", 5));
+    rejected("65 characters", with(valid(), "outputName", QString(65, 'a')));
+    for (const QString &name : {QString("a b"), QString("a.b"), QString("a/b"), QString("a\\b"), QString("café"), QString("a:b"), QString("<a>")})
+        rejected("output name " + name, with(valid(), "outputName", name));
+    rejected("name of an installed LoRA", with(valid(), "outputName", "clara"));
+    rejected("name of an installed LoRA, ignoring case", with(valid(), "outputName", "CLARA"));
+    rejected("name of a companion of another subtype", with(valid(), "outputName", "other-vae"));
+    // R3: the captions.
+    rejected("no captions", without(valid(), "captions"));
+    rejected("captions not an array", with(valid(), "captions", "text"));
+    rejected("no caption", with(valid(), "captions", QJsonArray{}));
+    rejected("empty caption", with(valid(), "captions", QJsonArray{""}));
+    rejected("blank caption", with(valid(), "captions", QJsonArray{"a", "  \t "}));
+    rejected("caption not a string", with(valid(), "captions", QJsonArray{1}));
+    rejected("null caption", with(valid(), "captions", QJsonArray{QJsonValue(QJsonValue::Null)}));
+    rejected("caption of 1001 characters", with(valid(), "captions", QJsonArray{QString(1001, 'x')}));
+    QJsonArray sixtyFive;
+    for (int index = 0; index < 65; ++index) sixtyFive.append("caption");
+    rejected("65 captions", with(valid(), "captions", sixtyFive));
+    // R3, R4: the settings.
+    rejected("settings not an object", with(valid(), "settings", "fast"));
+    rejected("settings an array", with(valid(), "settings", QJsonArray{}));
+    rejected("settings null", with(valid(), "settings", QJsonValue(QJsonValue::Null)));
+    rejected("unknown setting", withSetting("batchSize", 2));
+    const QList<std::pair<QString, QJsonValue>> badSettings{
+        {"networkDim", 0}, {"networkDim", 129}, {"networkDim", 1.5}, {"networkDim", "16"}, {"networkDim", QJsonValue(QJsonValue::Null)},
+        {"networkAlpha", 0}, {"networkAlpha", -1}, {"networkAlpha", 128.5}, {"networkAlpha", "8"},
+        {"maxTrainSteps", 0}, {"maxTrainSteps", 20001}, {"maxTrainSteps", 10.5}, {"maxTrainSteps", "100"},
+        {"learningRate", 0}, {"learningRate", -0.1}, {"learningRate", 0.011}, {"learningRate", "0.0001"},
+        {"resolution", 448}, {"resolution", 2112}, {"resolution", 1000}, {"resolution", 1024.5}, {"resolution", "1024"},
+        {"seed", -2}, {"seed", 2147483648.0}, {"seed", 1.5}, {"seed", "7"},
+        {"trainTextEncoder", "yes"}, {"trainTextEncoder", 1}};
+    for (const auto &[key, value] : badSettings)
+        rejected(QString("setting %1 = %2").arg(key, QString::fromUtf8(QJsonDocument(QJsonArray{value}).toJson(QJsonDocument::Compact))),
+                 withSetting(key, value));
+    // R3, R4: the limits themselves are valid, whichever way the numbers are written.
+    accepted("empty settings", with(valid(), "settings", QJsonObject{}));
+    accepted("lower limits", with(valid(), "settings", QJsonObject{{"networkDim", 1}, {"networkAlpha", 0.001}, {"maxTrainSteps", 1},
+        {"learningRate", 0.000001}, {"resolution", 512}, {"seed", -1}, {"trainTextEncoder", true}}));
+    accepted("upper limits", with(valid(), "settings", QJsonObject{{"networkDim", 128}, {"networkAlpha", 128}, {"maxTrainSteps", 20000},
+        {"learningRate", 0.01}, {"resolution", 2048}, {"seed", 2147483647}, {"trainTextEncoder", false}}));
+    accepted("whole numbers written as decimals", with(valid(), "settings", QJsonObject{{"networkDim", 16.0}, {"resolution", 1024.0}}));
+    accepted("a caption of 1000 characters", with(valid(), "captions", QJsonArray{QString(1000, 'x')}));
+    QJsonArray sixtyFour;
+    for (int index = 0; index < 64; ++index) sixtyFour.append("caption");
+    accepted("64 captions", with(valid(), "captions", sixtyFour));
+    accepted("a name of 64 characters", with(valid(), "outputName", QString(64, 'a')));
+    accepted("a name of every allowed character", with(valid(), "outputName", "A-z_0-9"));
+
+    // R3: the name of a job that is waiting for its uploads, queued or running is taken.
+    client.send({{"type", "submit"}, {"operation", "lora.train"}, {"jobId", "waiting"}, {"options", fixture.options("held-name")}});
+    QVERIFY(client.waitForType("waiting", "upload-required"));
+    rejected("name of a job waiting for its uploads", with(valid(), "outputName", "HELD-name"), "invalid-request", false);
+    client.socket.sendBinaryMessage("not an image");
+    QVERIFY(client.waitForTerminal("waiting"));
+    QVERIFY(fixture.control("", {"hold=yes"}));
+    QVERIFY(client.submitAndUpload("running", fixture.options("running-name", 2), LoraTrainerFixture::images(2)));
+    QVERIFY(fixture.waitStarted("running-name"));
+    rejected("name of a running job", with(valid(), "outputName", "RUNNING-name"), "invalid-request", false);
+    QVERIFY(client.submitAndUpload("queued", fixture.options("queued-name", 2), LoraTrainerFixture::images(2)));
+    QVERIFY(client.waitForType("queued", "queued"));
+    rejected("name of a queued job", with(valid(), "outputName", "queued-NAME"), "invalid-request", false);
+    QVERIFY(fixture.release("running-name"));
+    QVERIFY(fixture.release("queued-name"));
+    QVERIFY(client.waitForTerminal("queued"));
+    QCOMPARE(client.terminal("queued").value("type").toString(), QString("result"));
+    // Once the job is done, its name is an installed companion's.
+    rejected("name of a trained LoRA", with(valid(), "outputName", "queued-name"));
+}
+
+void ServiceTest::loraTrainingRunsTheTrainerWithTheRequest_R2_R4_R6_R7_R8()
+{
+    LoraTrainerFixture fixture;
+    QVERIFY(fixture.layoutTrainer() && fixture.writeModels());
+    QVERIFY(fixture.start());
+    auto &client = fixture.client;
+    const QStringList companionsBefore = fixture.companionIds();
+    // Steps that go back or repeat are not reported again.
+    QVERIFY(fixture.control("clara", {"progress=1,50,50,40,100,200", "output=yes"}));
+    const QJsonObject settings{{"networkDim", 32}, {"networkAlpha", 10.5}, {"maxTrainSteps", 200}, {"learningRate", 0.0002},
+                               {"resolution", 768}, {"seed", 42}, {"trainTextEncoder", true}};
+    const QJsonObject options = fixture.options("clara", 2, settings);
+    client.send({{"type", "submit"}, {"operation", "lora.train"}, {"jobId", "train-1"}, {"options", options}});
+
+    // R2: one upload request per caption, in order, the next only after the previous image; then queued.
+    QVERIFY(client.waitForType("train-1", "upload-required"));
+    QCOMPARE(client.of("train-1", "upload-required").size(), 1);
+    QCOMPARE(client.of("train-1", "upload-required").first().value("inputRole").toString(), QString("training"));
+    QCOMPARE(client.of("train-1", "upload-required").first().value("inputIndex").toInt(), 0);
+    QVERIFY(client.of("train-1", "queued").isEmpty());
+    client.socket.sendBinaryMessage(trainingImage(0));
+    QVERIFY(client.waitForType("train-1", "upload-required", 2));
+    QCOMPARE(client.of("train-1", "upload-required").last().value("inputRole").toString(), QString("training"));
+    QCOMPARE(client.of("train-1", "upload-required").last().value("inputIndex").toInt(), 1);
+    QVERIFY(client.of("train-1", "queued").isEmpty());
+    client.socket.sendBinaryMessage(trainingImage(1));
+    QVERIFY(client.waitForTerminal("train-1"));
+    QCOMPARE(client.of("train-1", "upload-required").size(), 2);
+    QCOMPARE(client.of("train-1", "queued").size(), 1);
+    QCOMPARE(client.of("train-1", "running").size(), 1);
+
+    // R8: the result, with no binary frame.
+    const QJsonObject result = client.terminal("train-1");
+    QCOMPARE(result.value("type").toString(), QString("result"));
+    QCOMPARE(result.value("operation").toString(), QString("lora.train"));
+    QCOMPARE(result.value("modelId").toString(), QString("companion:clara.safetensors"));
+    QCOMPARE(result.value("steps").toInt(), 200);
+    QCOMPARE(result.value("seed").toInt(), 42);
+    QVERIFY(result.value("durationMs").toDouble() >= 0);
+    QVERIFY(result.contains("durationMs"));
+    QCOMPARE(client.binaries, 0);
+    // R8: the file is installed as the LoRA companion, which models.list reports.
+    const QString installed = QDir(fixture.companionDirectory()).filePath("clara.safetensors");
+    QVERIFY(QFileInfo(installed).isFile());
+    QFile installedFile(installed);
+    QVERIFY(installedFile.open(QIODevice::ReadOnly));
+    QCOMPARE(installedFile.readAll(), QByteArray("trained:clara"));
+    installedFile.close();
+    QStringList expected = companionsBefore;
+    expected.append("companion:clara.safetensors");
+    expected.sort();
+    QCOMPARE(fixture.companionIds(), expected);
+    const QJsonObject listed = fixture.companion("companion:clara.safetensors");
+    QCOMPARE(listed.value("recommendedOptions").toObject().value("subtype").toString(), QString("lora"));
+    QCOMPARE(listed.value("displayName").toString(), QString("clara"));
+    QCOMPARE(listed.value("fileName").toString(), QString("clara.safetensors"));
+    QVERIFY(fixture.stagedFiles().isEmpty());
+
+    // R7: preparing, loading-model, the steps, saving, complete; the percentage never decreases.
+    QStringList stages;
+    QList<int> steps;
+    int percentage = -1;
+    for (const auto &message : client.of("train-1", "progress")) {
+        const QJsonObject progress = message.value("progress").toObject();
+        stages.append(progress.value("stage").toString());
+        QVERIFY2(progress.value("percentage").toInt() >= percentage, qPrintable(stages.join(',')));
+        percentage = progress.value("percentage").toInt();
+        if (progress.value("stage") == "training") {
+            steps.append(progress.value("currentStep").toInt());
+            QCOMPARE(progress.value("totalSteps").toInt(), 200);
+        }
+    }
+    QCOMPARE(stages.first(), QString("preparing"));
+    QCOMPARE(stages.at(1), QString("loading-model"));
+    QCOMPARE(stages.mid(2, steps.size()), QStringList(steps.size(), "training"));
+    QCOMPARE(stages.mid(2 + steps.size()), (QStringList{"saving", "complete"}));
+    QCOMPARE(steps, (QList<int>{1, 50, 100, 200}));
+    QCOMPARE(percentage, 100);
+    // The messages of the job come in this order.
+    QStringList types;
+    for (const auto &message : client.messages)
+        if (message.value("jobId") == "train-1") types.append(message.value("type").toString());
+    QCOMPARE(types.first(), QString("upload-required"));
+    QVERIFY(types.indexOf("queued") < types.indexOf("running"));
+    QVERIFY(types.indexOf("running") < types.indexOf("progress"));
+    QCOMPARE(types.last(), QString("result"));
+
+    // R4, R6: what the trainer received.
+    const QJsonObject record = fixture.record("clara");
+    QVERIFY(!record.isEmpty());
+    const QStringList arguments = LoraTrainerFixture::recordedArguments(record);
+    const auto argument = [&](const QString &flag) { return LoraTrainerFixture::argumentAfter(arguments, flag); };
+    QCOMPARE(QDir::cleanPath(record.value("script").toString()), QDir::cleanPath(QDir(fixture.trainer()).filePath("sdxl_train_network.py")));
+    QCOMPARE(QDir::cleanPath(argument("--pretrained_model_name_or_path")), QDir::cleanPath(fixture.baseModelPath()));
+    QCOMPARE(argument("--dataset_config"), QString("dataset.toml"));
+    QCOMPARE(argument("--output_dir"), QString("output"));
+    QCOMPARE(argument("--output_name"), QString("clara"));
+    QCOMPARE(argument("--save_model_as"), QString("safetensors"));
+    QCOMPARE(argument("--network_module"), QString("networks.lora"));
+    QCOMPARE(argument("--network_dim"), QString("32"));
+    QCOMPARE(argument("--network_alpha"), QString("10.5"));
+    QCOMPARE(argument("--learning_rate"), QString("0.0002"));
+    QCOMPARE(argument("--max_train_steps"), QString("200"));
+    QCOMPARE(argument("--seed"), QString("42"));
+    QCOMPARE(QDir::cleanPath(argument("--tokenizer_cache_dir")), QDir::cleanPath(QDir(fixture.trainer()).filePath("tokenizers")));
+    QCOMPARE(argument("--mixed_precision"), QString("bf16"));
+    QCOMPARE(argument("--save_precision"), QString("fp16"));
+    QCOMPARE(argument("--optimizer_type"), QString("AdamW"));
+    QCOMPARE(argument("--max_data_loader_n_workers"), QString("0"));
+    for (const QString &flag : {"--gradient_checkpointing", "--cache_latents", "--sdpa"}) QVERIFY2(arguments.contains(flag), qPrintable(flag));
+    // trainTextEncoder drops the UNet-only flag; no intermediate saves are asked for.
+    QVERIFY(!arguments.contains("--network_train_unet_only"));
+    for (const QString &flag : arguments) QVERIFY2(!flag.startsWith("--save_every") && !flag.startsWith("--save_state"), qPrintable(flag));
+    // R6: every path the arguments name is the job's folder, the base model, the trainer or its cache.
+    const QString jobFolder = QDir::cleanPath(record.value("cwd").toString());
+    QVERIFY(jobFolder.startsWith(QDir::cleanPath(ServicePaths::trainingPath()) + "/"));
+    const QString cache = QDir::cleanPath(ServicePaths::trainerCachePath());
+    for (const QString &value : arguments) {
+        if (!QFileInfo(value).isAbsolute()) {
+            QVERIFY2(!value.contains(".."), qPrintable(value));
+            continue;
+        }
+        const QString path = QDir::cleanPath(value);
+        const bool allowed = path.startsWith(jobFolder + "/") || path == QDir::cleanPath(fixture.baseModelPath())
+            || path.startsWith(QDir::cleanPath(fixture.trainer()) + "/") || path.startsWith(cache + "/");
+        QVERIFY2(allowed, qPrintable(value));
+    }
+    // R6: the environment.
+    const QJsonObject environment = record.value("environment").toObject();
+    QCOMPARE(environment.value("HF_HUB_OFFLINE").toString(), QString("1"));
+    QCOMPARE(environment.value("TRANSFORMERS_OFFLINE").toString(), QString("1"));
+    QCOMPARE(environment.value("PYTHONDONTWRITEBYTECODE").toString(), QString("1"));
+    for (const QString &variable : {"HOME", "HF_HOME", "XDG_CACHE_HOME", "TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR", "MPLCONFIGDIR",
+                                    "MIOPEN_USER_DB_PATH", "MIOPEN_CUSTOM_CACHE_DIR"}) {
+        const QString path = QDir::cleanPath(environment.value(variable).toString());
+        QVERIFY2(path.startsWith(cache + "/"), qPrintable(variable + "=" + path));
+        QVERIFY2(QFileInfo(path).isDir(), qPrintable(variable));
+    }
+    // R6: the working directory, the images and their captions.
+    QVERIFY(QDir::cleanPath(record.value("cwd").toString()) != QDir::cleanPath(ServicePaths::trainingPath()));
+    QCOMPARE(LoraTrainerFixture::recordedFile(record, "dataset/000.png"), trainingImage(0));
+    QCOMPARE(LoraTrainerFixture::recordedFile(record, "dataset/001.jpg"), trainingImage(1));
+    QCOMPARE(LoraTrainerFixture::recordedFile(record, "dataset/000.txt"), QByteArray("clara, caption 0"));
+    QCOMPARE(LoraTrainerFixture::recordedFile(record, "dataset/001.txt"), QByteArray("clara, caption 1"));
+    const QString dataset = QString::fromUtf8(LoraTrainerFixture::recordedFile(record, "dataset.toml"));
+    for (const QString &line : {"resolution = 768", "num_repeats = 1", "caption_extension = \".txt\"", "enable_bucket = true",
+                                "image_dir = \"dataset\""})
+        QVERIFY2(dataset.contains(line), qPrintable(line));
+    // R11: the job's folder is gone once it ended.
+    QVERIFY(!QFileInfo::exists(record.value("cwd").toString()));
+    QVERIFY(LoraTrainerFixture::trainingEntries().isEmpty());
+
+    // R4: defaults. The alpha is half the dimension; a seed of -1 (here, no seed) is a random one the result reports.
+    QVERIFY(fixture.control("", {}));
+    QVERIFY(client.submitAndUpload("train-2", fixture.options("defaults", 2), LoraTrainerFixture::images(2), true));
+    QCOMPARE(client.terminal("train-2").value("type").toString(), QString("result"));
+    QStringList defaults = LoraTrainerFixture::recordedArguments(fixture.record("defaults"));
+    QCOMPARE(LoraTrainerFixture::argumentAfter(defaults, "--network_dim"), QString("16"));
+    QCOMPARE(LoraTrainerFixture::argumentAfter(defaults, "--network_alpha"), QString("8"));
+    QCOMPARE(LoraTrainerFixture::argumentAfter(defaults, "--max_train_steps"), QString("1500"));
+    QCOMPARE(LoraTrainerFixture::argumentAfter(defaults, "--learning_rate"), QString("0.0001"));
+    QVERIFY(defaults.contains("--network_train_unet_only"));
+    const int seed = LoraTrainerFixture::argumentAfter(defaults, "--seed").toInt();
+    QVERIFY(seed >= 0);
+    QCOMPARE(client.terminal("train-2").value("seed").toInt(), seed);
+    QCOMPARE(client.terminal("train-2").value("steps").toInt(), 1500);
+    QVERIFY(LoraTrainerFixture::recordedFile(fixture.record("defaults"), "dataset.toml").contains("resolution = 1024"));
+    // An explicit -1 and an odd dimension.
+    QVERIFY(client.submitAndUpload("train-3", fixture.options("random", 1, QJsonObject{{"seed", -1}, {"networkDim", 7}}),
+                                   LoraTrainerFixture::images(1), true));
+    defaults = LoraTrainerFixture::recordedArguments(fixture.record("random"));
+    QVERIFY(LoraTrainerFixture::argumentAfter(defaults, "--seed").toInt() >= 0);
+    QCOMPARE(LoraTrainerFixture::argumentAfter(defaults, "--network_alpha"), QString("3.5"));
+    QCOMPARE(client.terminal("train-3").value("seed").toInt(), LoraTrainerFixture::argumentAfter(defaults, "--seed").toInt());
+    // A seed of 0 is a seed.
+    QVERIFY(client.submitAndUpload("train-4", fixture.options("zero", 1, QJsonObject{{"seed", 0}}), LoraTrainerFixture::images(1), true));
+    QCOMPARE(LoraTrainerFixture::argumentAfter(LoraTrainerFixture::recordedArguments(fixture.record("zero")), "--seed"), QString("0"));
+    QCOMPARE(client.terminal("train-4").value("seed").toInt(), 0);
+    QVERIFY(LoraTrainerFixture::trainingEntries().isEmpty());
+}
+
+void ServiceTest::loraTrainingRejectsBadUploads_R5_R11()
+{
+    LoraTrainerFixture fixture;
+    QVERIFY(fixture.layoutTrainer() && fixture.writeModels());
+    fixture.configuration.maximumImageBytes = 2048;
+    QVERIFY(fixture.start());
+    auto &client = fixture.client;
+    const QStringList companionsBefore = fixture.companionIds();
+    struct Case { QString label; QList<QByteArray> images; };
+    const QList<Case> cases{
+        {"empty", {QByteArray()}},
+        {"larger than the limit", {TrainingPng + QByteArray(2048, 'x')}},
+        {"exactly over the limit", {TrainingPng + QByteArray(2048 - TrainingPng.size() + 1, 'x')}},
+        {"not an image", {QByteArray("GIF89a-not-accepted")}},
+        {"a text", {QByteArray("just text")}},
+        {"after good images", {trainingImage(0), QByteArray("not an image")}},
+        {"empty after a good image", {trainingImage(0), QByteArray()}}};
+    int sequence = 0;
+    for (const auto &c : cases) {
+        const QString jobId = QString("bad-%1").arg(++sequence);
+        QVERIFY2(client.submitAndUpload(jobId, fixture.options("bad", 3), c.images, true), qPrintable(c.label));
+        const QJsonObject error = client.terminal(jobId);
+        QVERIFY2(error.value("type") == "error", qPrintable(c.label));
+        QCOMPARE(error.value("code").toString(), QString("invalid-image"));
+        QCOMPARE(error.value("jobId").toString(), jobId);
+        // The job is not queued, nothing is left on disk, and the trainer never ran.
+        QVERIFY2(client.of(jobId, "queued").isEmpty(), qPrintable(c.label));
+        QVERIFY2(client.of(jobId, "running").isEmpty(), qPrintable(c.label));
+        QVERIFY2(LoraTrainerFixture::trainingEntries().isEmpty(), qPrintable(c.label));
+        QVERIFY2(!fixture.started("bad"), qPrintable(c.label));
+    }
+    // An image at the limit is accepted, a JPEG as well as a PNG.
+    const QByteArray atLimit = TrainingPng + QByteArray(2048 - TrainingPng.size(), 'x');
+    QVERIFY(client.submitAndUpload("limit", fixture.options("limit", 2), {atLimit, TrainingJpeg + QByteArray(100, 'y')}, true));
+    QCOMPARE(client.terminal("limit").value("type").toString(), QString("result"));
+    QCOMPARE(LoraTrainerFixture::recordedFile(fixture.record("limit"), "dataset/000.png"), atLimit);
+    QCOMPARE(LoraTrainerFixture::recordedFile(fixture.record("limit"), "dataset/001.jpg"), TrainingJpeg + QByteArray(100, 'y'));
+    QStringList expected = companionsBefore;
+    expected.append("companion:limit.safetensors");
+    expected.sort();
+    QCOMPARE(fixture.companionIds(), expected);
+    // An upload with no job is refused, as for every operation.
+    client.socket.sendBinaryMessage(trainingImage(0));
+    QVERIFY(QTest::qWaitFor([&] { return client.messages.last().value("code") == "unexpected-upload"; }));
+}
+
+void ServiceTest::loraTrainingInstallsDuringAModelInstall_R8()
+{
+    LoraTrainerFixture fixture;
+    QVERIFY(fixture.layoutTrainer() && fixture.writeModels());
+    QVERIFY(fixture.start());
+    auto &client = fixture.client;
+    // A download that never answers keeps a model installation in progress.
+    QTcpServer stalled;
+    QVERIFY(stalled.listen(QHostAddress::LocalHost));
+    const QString url = QString("https://127.0.0.1:%1/downloading.safetensors").arg(stalled.serverPort());
+    client.send({{"type", "models.install"}, {"displayName", "Downloading"}, {"installId", "download"}, {"category", "companion"}, {"url", url}});
+    QVERIFY(QTest::qWaitFor([&] {
+        for (const auto &message : client.messages) if (message.value("type") == "models.install.accepted") return true;
+        return false;
+    }));
+    // The training installs its LoRA under its exact name, neither waiting for the download nor blocked by it.
+    QVERIFY(fixture.control("clara", {"hold=yes"}));
+    QVERIFY(client.submitAndUpload("train-1", fixture.options("clara", 2), LoraTrainerFixture::images(2)));
+    QVERIFY(fixture.waitStarted("clara"));
+    QVERIFY(fixture.release("clara"));
+    QVERIFY(client.waitForTerminal("train-1"));
+    QCOMPARE(client.terminal("train-1").value("type").toString(), QString("result"));
+    QCOMPARE(client.terminal("train-1").value("modelId").toString(), QString("companion:clara.safetensors"));
+    QVERIFY(QFileInfo(QDir(fixture.companionDirectory()).filePath("clara.safetensors")).isFile());
+    QVERIFY(!QFileInfo::exists(QDir(fixture.companionDirectory()).filePath("clara-2.safetensors")));
+    QVERIFY(fixture.companionIds().contains("companion:clara.safetensors"));
+    QVERIFY(fixture.stagedFiles().isEmpty());
+    // The download goes on, then cancels: the training's metadata did not disturb it.
+    for (const auto &message : client.messages) QVERIFY(message.value("type") != "models.install.completed");
+    client.send({{"type", "models.install.cancel"}, {"installId", "download"}});
+    QVERIFY(QTest::qWaitFor([&] {
+        for (const auto &message : client.messages) if (message.value("type") == "models.install.canceled") return true;
+        return false;
+    }));
+    QVERIFY(fixture.companionIds().contains("companion:clara.safetensors"));
+}
+
+void ServiceTest::loraTrainingReportsFailures_R9_R11()
+{
+    LoraTrainerFixture fixture;
+    QVERIFY(fixture.layoutTrainer() && fixture.writeModels());
+    QVERIFY(fixture.start());
+    auto &client = fixture.client;
+    const QStringList companionsBefore = fixture.companionIds();
+    const auto unchanged = [&](const QString &label) {
+        QVERIFY2(fixture.companionIds() == companionsBefore, qPrintable(label));
+        QVERIFY2(fixture.stagedFiles().isEmpty(), qPrintable(label));
+        QVERIFY2(LoraTrainerFixture::trainingEntries().isEmpty(), qPrintable(label));
+        for (const QString &entry : QDir(fixture.companionDirectory()).entryList(QDir::Files))
+            QVERIFY2(!entry.endsWith(".training.part"), qPrintable(label + ": " + entry));
+    };
+
+    // A nonzero exit: the command, the exit code and the last 4096 characters of the error output.
+    QVERIFY(fixture.control("boom", {"exit=3", "error=" + QString(5000, 'x') + "TAIL"}));
+    QVERIFY(client.submitAndUpload("boom-1", fixture.options("boom", 2), LoraTrainerFixture::images(2), true));
+    QJsonObject error = client.terminal("boom-1");
+    QCOMPARE(error.value("type").toString(), QString("error"));
+    QCOMPARE(error.value("code").toString(), QString("generation-failed"));
+    QCOMPARE(error.value("jobId").toString(), QString("boom-1"));
+    QString message = error.value("message").toString();
+    QVERIFY2(message.contains("exit code 3"), qPrintable(message));
+    QVERIFY2(message.contains("sdxl_train_network.py") && message.contains("--output_name") && message.contains("'boom'"), qPrintable(message));
+    QVERIFY(message.endsWith("TAIL"));
+    const QString diagnostic = message.mid(message.indexOf("Trainer error:\n") + QString("Trainer error:\n").size());
+    QVERIFY(message.contains("Trainer error:\n"));
+    QCOMPARE(diagnostic.size(), 4096);
+    QVERIFY(client.of("boom-1", "result").isEmpty());
+    unchanged("nonzero exit");
+
+    // No output file, a directory where the file belongs, a zero exit: the trainer wrote nothing usable.
+    QVERIFY(fixture.control("nothing", {"output=no"}));
+    QVERIFY(client.submitAndUpload("nothing-1", fixture.options("nothing", 1), LoraTrainerFixture::images(1), true));
+    QCOMPARE(client.terminal("nothing-1").value("code").toString(), QString("generation-failed"));
+    QVERIFY(client.terminal("nothing-1").value("message").toString().contains("sdxl_train_network.py"));
+    unchanged("no output");
+    QVERIFY(fixture.control("folder", {"output=directory"}));
+    QVERIFY(client.submitAndUpload("folder-1", fixture.options("folder", 1), LoraTrainerFixture::images(1), true));
+    QCOMPARE(client.terminal("folder-1").value("code").toString(), QString("generation-failed"));
+    unchanged("output is a directory");
+    // The failures leave the service working.
+    QVERIFY(fixture.control("fine", {}));
+    QVERIFY(client.submitAndUpload("fine-1", fixture.options("fine", 1), LoraTrainerFixture::images(1), true));
+    QCOMPARE(client.terminal("fine-1").value("type").toString(), QString("result"));
+
+    // The name taken while the trainer ran: by a companion of the same base name, whatever its extension,
+    // by a download's .part, or by a download in progress. No suffix, no overwrite.
+    struct Taken { QString name; std::function<bool(LoraTrainerFixture &)> take; QString cause; };
+    QTcpServer stalled;
+    QVERIFY(stalled.listen(QHostAddress::LocalHost));
+    const QList<Taken> taken{
+        {"held1", [](LoraTrainerFixture &f) { return f.installCompanion("held1.safetensors", "lora", "someone else's"); }, "installed companion"},
+        {"held2", [](LoraTrainerFixture &f) { return f.installCompanion("HELD2.gguf", "controlnet"); }, "installed companion"},
+        {"held3", [](LoraTrainerFixture &f) { return LoraTrainerFixture::writeFile(QDir(f.companionDirectory()).filePath("held3.safetensors.part"), "partial"); }, "downloaded"},
+        {"held4", [&](LoraTrainerFixture &f) {
+             f.client.send({{"type", "models.install"}, {"displayName", "Downloading"}, {"installId", "dl"}, {"category", "companion"},
+                            {"url", QString("https://127.0.0.1:%1/held4.safetensors").arg(stalled.serverPort())}});
+             return QTest::qWaitFor([&] {
+                 for (const auto &m : f.client.messages) if (m.value("type") == "models.install.accepted") return true;
+                 return false;
+             });
+         }, "downloaded"}};
+    for (const auto &c : taken) {
+        QVERIFY(fixture.control(c.name, {"hold=yes"}));
+        const QString jobId = c.name + "-job";
+        QVERIFY2(client.submitAndUpload(jobId, fixture.options(c.name, 1), LoraTrainerFixture::images(1)), qPrintable(c.name));
+        QVERIFY2(fixture.waitStarted(c.name), qPrintable(c.name));
+        QVERIFY2(c.take(fixture), qPrintable(c.name));
+        const QStringList before = fixture.companionIds();
+        QVERIFY(fixture.release(c.name));
+        QVERIFY2(client.waitForTerminal(jobId), qPrintable(c.name));
+        error = client.terminal(jobId);
+        QCOMPARE(error.value("type").toString(), QString("error"));
+        QCOMPARE(error.value("code").toString(), QString("generation-failed"));
+        QCOMPARE(error.value("jobId").toString(), jobId);
+        QVERIFY2(error.value("message").toString().contains(c.name) && error.value("message").toString().contains(c.cause),
+                 qPrintable(error.value("message").toString()));
+        QVERIFY2(fixture.companionIds() == before, qPrintable(c.name));
+        QVERIFY2(fixture.stagedFiles().isEmpty(), qPrintable(c.name));
+        QVERIFY2(!QFileInfo::exists(QDir(fixture.companionDirectory()).filePath(c.name + "-2.safetensors")), qPrintable(c.name));
+        QVERIFY2(LoraTrainerFixture::trainingEntries().isEmpty(), qPrintable(c.name));
+    }
+    // The other file was not touched.
+    QFile held(QDir(fixture.companionDirectory()).filePath("held1.safetensors"));
+    QVERIFY(held.open(QIODevice::ReadOnly));
+    QCOMPARE(held.readAll(), QByteArray("someone else's"));
+    held.close();
+    client.send({{"type", "models.install.cancel"}, {"installId", "dl"}});
+
+    // A copy into the companion directory that fails: here, the staging path is a directory.
+    QVERIFY(fixture.control("copyfail", {"hold=yes"}));
+    QVERIFY(client.submitAndUpload("copyfail-job", fixture.options("copyfail", 1), LoraTrainerFixture::images(1)));
+    QVERIFY(fixture.waitStarted("copyfail"));
+    const QString blocker = QDir(fixture.companionDirectory()).filePath("copyfail.safetensors.training.part");
+    QVERIFY(QDir().mkpath(blocker));
+    const QStringList beforeCopy = fixture.companionIds();
+    QVERIFY(fixture.release("copyfail"));
+    QVERIFY(client.waitForTerminal("copyfail-job"));
+    QCOMPARE(client.terminal("copyfail-job").value("code").toString(), QString("generation-failed"));
+    QVERIFY2(client.terminal("copyfail-job").value("message").toString().contains("copy"), qPrintable(client.terminal("copyfail-job").value("message").toString()));
+    QCOMPARE(fixture.companionIds(), beforeCopy);
+    QVERIFY(!QFileInfo::exists(QDir(fixture.companionDirectory()).filePath("copyfail.safetensors")));
+    QVERIFY(LoraTrainerFixture::trainingEntries().isEmpty());
+    QVERIFY(QDir(blocker).removeRecursively());
+    QVERIFY(fixture.stagedFiles().isEmpty());
+}
+
+void ServiceTest::loraTrainingQueuesAndStopsTheProcessTree_R10_R11()
+{
+    LoraTrainerFixture fixture;
+    QVERIFY(fixture.layoutTrainer() && fixture.writeModels());
+    QVERIFY(fixture.start());
+    auto &client = fixture.client;
+    const QStringList companionsBefore = fixture.companionIds();
+
+    // R10: a job shares the queue; the second waits, with its images on disk and no trainer running.
+    QVERIFY(fixture.control("first", {"hold=yes", "child=yes"}));
+    QVERIFY(fixture.control("second", {"child=yes"}));
+    QVERIFY(client.submitAndUpload("first-job", fixture.options("first", 2), LoraTrainerFixture::images(2)));
+    QVERIFY(fixture.waitStarted("first"));
+    QVERIFY(client.submitAndUpload("second-job", fixture.options("second", 3), LoraTrainerFixture::images(3)));
+    QVERIFY(client.waitForType("second-job", "queued"));
+    QVERIFY(client.waitForType("second-job", "queue-position"));
+    QCOMPARE(client.of("second-job", "queue-position").last().value("position").toInt(), 1);
+    QVERIFY(client.of("second-job", "running").isEmpty());
+    QCOMPARE(client.of("first-job", "running").size(), 1);
+    QCOMPARE(LoraTrainerFixture::trainingEntries().size(), 2);
+    // Both folders are on disk: the queued job's images were written as they arrived.
+    int imagesOnDisk = 0;
+    for (const QString &entry : LoraTrainerFixture::trainingEntries())
+        imagesOnDisk += QDir(QDir(ServicePaths::trainingPath()).filePath(entry + "/dataset")).entryList({"*.png", "*.jpg"}, QDir::Files).size();
+    QCOMPARE(imagesOnDisk, 5);
+    const qint64 firstChild = fixture.childPid("first");
+    QVERIFY(firstChild > 0);
+    QVERIFY(processRunning(firstChild));
+    QVERIFY(!fixture.started("second"));
+
+    // The trainer exits while its child runs: the child is stopped before the next job starts.
+    QVERIFY(fixture.release("first"));
+    QVERIFY(client.waitForTerminal("first-job"));
+    QCOMPARE(client.terminal("first-job").value("type").toString(), QString("result"));
+    QVERIFY(fixture.waitStarted("second"));
+    QVERIFY(!processRunning(firstChild));
+    QVERIFY(client.waitForTerminal("second-job"));
+    QCOMPARE(client.terminal("second-job").value("type").toString(), QString("result"));
+    // That job's child ended with it too.
+    QTRY_VERIFY_WITH_TIMEOUT(!processRunning(fixture.childPid("second")), 10000);
+    QVERIFY(LoraTrainerFixture::trainingEntries().isEmpty());
+
+    // R10: a client disconnects while its job runs, with a job of its own queued behind it and a job of
+    // another client behind that.
+    TrainingClient leaver;
+    QVERIFY(leaver.connectTo(fixture.daemon->serverPort()));
+    QVERIFY(fixture.control("third", {"hold=yes", "child=yes"}));
+    QVERIFY(fixture.control("fourth", {"hold=yes"}));
+    QVERIFY(fixture.control("fifth", {"child=yes"}));
+    QVERIFY(leaver.submitAndUpload("third-job", fixture.options("third", 1), LoraTrainerFixture::images(1)));
+    QVERIFY(fixture.waitStarted("third"));
+    const qint64 thirdChild = fixture.childPid("third");
+    QVERIFY(thirdChild > 0 && processRunning(thirdChild));
+    QVERIFY(leaver.submitAndUpload("fourth-job", fixture.options("fourth", 1), LoraTrainerFixture::images(1)));
+    QVERIFY(leaver.waitForType("fourth-job", "queued"));
+    QVERIFY(client.submitAndUpload("fifth-job", fixture.options("fifth", 1), LoraTrainerFixture::images(1)));
+    QVERIFY(client.waitForType("fifth-job", "queued"));
+    QCOMPARE(LoraTrainerFixture::trainingEntries().size(), 3);
+    leaver.socket.close();
+    // The running job is stopped with its child, the client's queued job is dropped, and the next client's job
+    // starts only once the tree is gone.
+    QVERIFY(fixture.waitStarted("fifth"));
+    QVERIFY(!processRunning(thirdChild));
+    QVERIFY(client.waitForTerminal("fifth-job"));
+    QCOMPARE(client.terminal("fifth-job").value("type").toString(), QString("result"));
+    QVERIFY(!fixture.started("fourth"));
+    QVERIFY(!QFileInfo::exists(QDir(fixture.companionDirectory()).filePath("third.safetensors")));
+    QVERIFY(!QFileInfo::exists(QDir(fixture.companionDirectory()).filePath("fourth.safetensors")));
+    QVERIFY(fixture.stagedFiles().isEmpty());
+    QTRY_VERIFY_WITH_TIMEOUT(LoraTrainerFixture::trainingEntries().isEmpty(), 10000);
+    QTRY_VERIFY_WITH_TIMEOUT(!processRunning(fixture.childPid("fifth")), 10000);
+    // The catalog holds what it held, and the LoRAs of the jobs that finished.
+    QStringList expected = companionsBefore;
+    expected.append({"companion:first.safetensors", "companion:second.safetensors", "companion:fifth.safetensors"});
+    expected.sort();
+    QCOMPARE(fixture.companionIds(), expected);
+
+    // R10: the same when the trainer is stopped while it runs alone, and a later job still runs.
+    TrainingClient second;
+    QVERIFY(second.connectTo(fixture.daemon->serverPort()));
+    QVERIFY(fixture.control("sixth", {"hold=yes", "child=yes"}));
+    QVERIFY(second.submitAndUpload("sixth-job", fixture.options("sixth", 1), LoraTrainerFixture::images(1)));
+    QVERIFY(fixture.waitStarted("sixth"));
+    const qint64 sixthChild = fixture.childPid("sixth");
+    QVERIFY(sixthChild > 0 && processRunning(sixthChild));
+    second.socket.close();
+    QTRY_VERIFY_WITH_TIMEOUT(!processRunning(sixthChild), 10000);
+    QTRY_VERIFY_WITH_TIMEOUT(LoraTrainerFixture::trainingEntries().isEmpty(), 10000);
+    QCOMPARE(fixture.companionIds(), expected);
+    QVERIFY(fixture.train("seventh-job", "seventh").value("type") == "result");
+}
+
+void ServiceTest::loraTrainingCleansUpAtStartup_R11()
+{
+    LoraTrainerFixture fixture;
+    QVERIFY(fixture.layoutTrainer() && fixture.writeModels());
+    // What a crashed service left: job folders, a stray file, and half-copied trained files.
+    const QString training = ServicePaths::trainingPath();
+    QVERIFY(LoraTrainerFixture::writeFile(QDir(training).filePath("old-job/dataset/000.png"), "image"));
+    QVERIFY(LoraTrainerFixture::writeFile(QDir(training).filePath("old-job/output/old.safetensors"), "weights"));
+    QVERIFY(LoraTrainerFixture::writeFile(QDir(training).filePath("stray.txt"), "stray"));
+    QVERIFY(QDir().mkpath(QDir(training).filePath("empty-job")));
+    const QString companions = fixture.companionDirectory();
+    QVERIFY(LoraTrainerFixture::writeFile(QDir(companions).filePath("old.safetensors.training.part"), "half"));
+    QVERIFY(LoraTrainerFixture::writeFile(QDir(companions).filePath("other.safetensors.training.part"), "half"));
+    // A download's .part and an installed file are not the service's to remove.
+    QVERIFY(LoraTrainerFixture::writeFile(QDir(companions).filePath("download.safetensors.part"), "partial"));
+    QVERIFY(LoraTrainerFixture::writeFile(QDir(companions).filePath("keep.safetensors"), "kept"));
+    QVERIFY(fixture.installCompanion("kept-lora.safetensors", "lora"));
+    // Done when start() returns, before a single connection can be accepted, whatever the trainer.
+    fixture.withoutTrainer();
+    QVERIFY(fixture.start(false));
+    QVERIFY(LoraTrainerFixture::trainingEntries().isEmpty());
+    QVERIFY(fixture.stagedFiles().isEmpty());
+    QVERIFY(QFileInfo::exists(QDir(companions).filePath("download.safetensors.part")));
+    QVERIFY(QFileInfo::exists(QDir(companions).filePath("keep.safetensors")));
+    QVERIFY(QFileInfo::exists(QDir(companions).filePath("kept-lora.safetensors")));
+    // The directory itself stays usable by the next job.
+    fixture.daemon.reset();
+    fixture.configureTrainer = true;
+    QVERIFY(fixture.start());
+    QVERIFY(fixture.operations().contains("lora.train"));
+    QVERIFY(fixture.train("after-restart", "afterwards").value("type") == "result");
+
+    // A client that leaves while its job waits for uploads leaves no folder either.
+    auto &client = fixture.client;
+    client.send({{"type", "submit"}, {"operation", "lora.train"}, {"jobId", "leaves"}, {"options", fixture.options("leaves", 3)}});
+    QVERIFY(client.waitForType("leaves", "upload-required"));
+    client.socket.sendBinaryMessage(trainingImage(0));
+    QVERIFY(client.waitForType("leaves", "upload-required", 2));
+    QCOMPARE(LoraTrainerFixture::trainingEntries().size(), 1);
+    client.socket.close();
+    QTRY_VERIFY_WITH_TIMEOUT(LoraTrainerFixture::trainingEntries().isEmpty(), 10000);
+    QVERIFY(!fixture.started("leaves"));
+}
+
+void ServiceTest::loraTrainingProtectsItsBaseModel_R12()
+{
+    LoraTrainerFixture fixture;
+    QVERIFY(fixture.layoutTrainer() && fixture.writeModels());
+    QVERIFY(fixture.start());
+    auto &client = fixture.client;
+    const auto deleteBase = [&] {
+        const int before = client.messages.size();
+        client.send({{"type", "models.delete"}, {"id", fixture.baseModelId()}});
+        QJsonObject reply;
+        static_cast<void>(QTest::qWaitFor([&] {
+            for (int index = before; index < client.messages.size(); ++index) {
+                const QJsonObject &message = client.messages.at(index);
+                if (message.value("id") == fixture.baseModelId()) { reply = message; return true; }
+            }
+            return false;
+        }));
+        return reply;
+    };
+    // Waiting for its uploads.
+    client.send({{"type", "submit"}, {"operation", "lora.train"}, {"jobId", "waiting"}, {"options", fixture.options("waiting")}});
+    QVERIFY(client.waitForType("waiting", "upload-required"));
+    QJsonObject reply = deleteBase();
+    QCOMPARE(reply.value("code").toString(), QString("model-in-use"));
+    client.socket.sendBinaryMessage("not an image");
+    QVERIFY(client.waitForTerminal("waiting"));
+    // Running, and queued behind it.
+    QVERIFY(fixture.control("", {"hold=yes"}));
+    QVERIFY(client.submitAndUpload("running", fixture.options("running", 1), LoraTrainerFixture::images(1)));
+    QVERIFY(fixture.waitStarted("running"));
+    reply = deleteBase();
+    QCOMPARE(reply.value("code").toString(), QString("model-in-use"));
+    QVERIFY(client.submitAndUpload("queued", fixture.options("queued", 1), LoraTrainerFixture::images(1)));
+    QVERIFY(client.waitForType("queued", "queued"));
+    QVERIFY(fixture.release("running"));
+    QVERIFY(client.waitForTerminal("running"));
+    QVERIFY(fixture.waitStarted("queued"));
+    reply = deleteBase();
+    QCOMPARE(reply.value("code").toString(), QString("model-in-use"));
+    QVERIFY(QFileInfo::exists(fixture.baseModelPath()));
+    QVERIFY(fixture.release("queued"));
+    QVERIFY(client.waitForTerminal("queued"));
+    // Once every job is over, the model can go.
+    reply = deleteBase();
+    QCOMPARE(reply.value("type").toString(), QString("models.delete.completed"));
+    QVERIFY(!QFileInfo::exists(fixture.baseModelPath()));
+}
+
+void ServiceTest::loraTrainingUnloadsTheChatModelFirst_R10()
+{
+    LoraTrainerFixture fixture;
+    QVERIFY(fixture.layoutTrainer() && fixture.writeModels());
+    // A chat model that a text.chat.load job keeps loaded in the fake llama-server.
+    QVERIFY(LoraTrainerFixture::writeFile(QDir(fixture.models()).filePath("llm/llm.gguf"), "fixture"));
+    {
+        ModelCatalog catalog(fixture.models(), false);
+        QVERIFY(configureNamed(catalog, "llm-chat:llm.gguf", Nukleus::Protocol::defaultModelOptions("llm-chat")));
+    }
+    QTemporaryDir llamaDirectory;
+    QVERIFY(llamaDirectory.isValid());
+    qputenv("NUKLEUS_FAKE_LLAMA_DIR", llamaDirectory.path().toUtf8());
+    const auto unsetFakeDirectory = qScopeGuard([] { qunsetenv("NUKLEUS_FAKE_LLAMA_DIR"); });
+    fixture.configuration.llamaServer = QStringLiteral(NUKLEUS_FAKE_LLAMA_SERVER);
+    fixture.configuration.llamaServerIdleMs = 10 * 60 * 1000;
+    QVERIFY(fixture.start());
+    auto &client = fixture.client;
+    const auto serverPid = [&] { return pidFrom(llamaDirectory.filePath("pid")); };
+    client.send({{"type", "submit"}, {"operation", "text.chat.load"}, {"jobId", "load"}, {"options", QJsonObject{{"modelId", "llm-chat:llm.gguf"}}}});
+    QVERIFY(client.waitForTerminal("load"));
+    QCOMPARE(client.terminal("load").value("type").toString(), QString("result"));
+    QVERIFY(serverPid() > 0 && processRunning(serverPid()));
+    // The training job unloads it before the trainer starts, as animation jobs do.
+    QVERIFY(fixture.control("clara", {"hold=yes"}));
+    QVERIFY(client.submitAndUpload("train-1", fixture.options("clara", 1), LoraTrainerFixture::images(1)));
+    QVERIFY(fixture.waitStarted("clara"));
+    QVERIFY(!processRunning(serverPid()));
+    QVERIFY(fixture.release("clara"));
+    QVERIFY(client.waitForTerminal("train-1"));
+    QCOMPARE(client.terminal("train-1").value("type").toString(), QString("result"));
 }

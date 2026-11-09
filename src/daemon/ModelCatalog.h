@@ -96,6 +96,17 @@ public:
     bool removeCompanion(const QString& id, const QString& role, QString* error = nullptr);
     void cancel(const QString &installId);
     bool isInstalling() const;
+    // Trained LoRAs (lora.train): the file is first copied to the staging path in the companion directory,
+    // then registered by one synchronous call that never waits for, and is never blocked by, an installation.
+    // Creates the companion directory when it is missing.
+    bool prepareTrainedLoraStaging(const QString &outputName, QString *stagingPath, QString *errorMessage = nullptr) const;
+    // Installs the staged file as the companion <outputName>.safetensors of subtype lora, under exactly that
+    // name: fails, with no numeric suffix, when an installed companion or a file being downloaded holds its base
+    // name (ignoring case). On success the staged file is gone; on failure the catalogue is unchanged and the
+    // staged file is left for the caller to remove.
+    std::optional<ModelInfo> registerTrainedLora(const QString &stagedPath, const QString &outputName, QString *errorMessage = nullptr);
+    // Removes the staged files a crashed service left in the companion directory.
+    void removeTrainedLoraLeftovers() const;
     bool configure(const QString &id, const QJsonObject &options, QString *error = nullptr, std::optional<bool> explicitContent = {}, std::optional<QString> displayName = {}, std::optional<QString> mmprojModelId = {});
     bool configureStyles(const QString &id, const QList<Nukleus::PromptStyle> &styles, QString *error = nullptr);
     std::optional<Nukleus::ModelRouting> routing(QString *error = nullptr) const;

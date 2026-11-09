@@ -162,6 +162,12 @@ paru -S llama.cpp-vulkan-git stable-diffusion.cpp-vulkan-git
 `NUKLEUS_FFMPEG` names in `/etc/nukleus/nukleus.conf`. In the same way `NUKLEUS_SD_CLI` names the
 `sd-cli` to run when it is not on the service's PATH; unset or empty, the `sd-cli` on PATH is used.
 
+`NUKLEUS_LORA_TRAINER` is optional too: it names a kohya-ss/sd-scripts directory, with its Python
+environment in `venv`, that makes the `lora.train` operation (LoRA training) available. Nukleus does
+not install it; [LoRA training](docs/lora-training.md) gives the pinned steps for Linux with ROCm,
+including where the trainer must live for the service to see it, and the restart the service needs
+after the trainer is installed or changed.
+
 `NUKLEUS_LOG_FILE` makes `nukleusd` and `nukleus-web` append their messages to a file instead of the
 console, on every platform. Each line starts with an ISO timestamp and the level (`INFO`, `WARN`,
 `ERROR`). When the file passes 10 MiB it is renamed to the same name with a `.1` suffix, replacing an

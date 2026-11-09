@@ -945,3 +945,132 @@ the model ID, prompts, seed, start image, optional end image and a `QJsonObject`
 of parameters, and uploads the images when asked. Progress arrives through
 `generationProgressChanged`; `animationFinished(AnimationResult)` carries the
 video bytes, `mimeType`, `frames` and `fps`, or the error code and message.
+
+## Training a LoRA (lora.train)
+
+`lora.train` trains a LoRA for an installed SDXL checkpoint from a set of captioned
+images and installs the result as a `companion` of subtype `lora`, ready for the
+`loras` option of `image.generate` (see [Image generation with LoRAs](#image-generation-with-loras)).
+The service runs kohya-ss/sd-scripts' `sdxl_train_network.py` from a trainer that
+the administrator installs: Nukleus downloads no training code (see
+[LoRA training](lora-training.md) for the setup).
+
+**Capability.** `capabilities.operations` includes `lora.train` exactly when
+`NUKLEUS_LORA_TRAINER` names a directory that holds `sdxl_train_network.py` and a
+Python executable at `venv/bin/python` (Linux) or `venv\Scripts\python.exe`
+(Windows) that exits with code 0 on `--version`. The check runs once, when the
+service starts; restart the service after installing or changing the trainer.
+Importing PyTorch is not part of it: a broken GPU stack is reported by the job.
+Without the capability, a `lora.train` submission fails with `backend-not-ready`,
+correlated to the `jobId`, before any upload is requested. Nothing limits the
+operation to one platform; AMD states that its ROCm PyTorch wheels for Windows have
+no training support, so the guide covers Linux.
+
+**Submission.** The images travel through the upload flow, one binary frame per
+image, and the captions in the options:
+
+```text
+-> {"type":"submit","operation":"lora.train","jobId":"train-1","options":{"baseModelId":"image-generation:WAI-NSFW-illustrious-SDXL-v12.safetensors","outputName":"clara","captions":["clara, 1girl, red hair, standing","clara, 1girl, red hair, sitting"],"settings":{"networkDim":16,"maxTrainSteps":1500}}}
+<- {"type":"upload-required","jobId":"train-1","inputRole":"training","inputIndex":0}
+-> <binary frame: image 0>
+<- {"type":"upload-required","jobId":"train-1","inputRole":"training","inputIndex":1}
+-> <binary frame: image 1>
+<- {"type":"queued","jobId":"train-1"}
+<- {"type":"running","jobId":"train-1"}
+<- {"type":"progress","jobId":"train-1","progress":{"stage":"training","currentStep":120,"totalSteps":1500,"percentage":12,"statusText":"Training step 120 / 1500"}}
+<- {"type":"result","jobId":"train-1","operation":"lora.train","modelId":"companion:clara.safetensors","steps":1500,"seed":184467,"durationMs":2710000}
+```
+
+The service sends one `upload-required` per caption, with `inputRole` `training` and
+`inputIndex` from 0 to n-1 in order; as for every upload, it asks for the next image
+only once it has received the previous one. The job is queued when every image has
+arrived. Image i is captioned by caption i.
+
+| Option | Meaning |
+| --- | --- |
+| `baseModelId` | A nonblank string naming an installed `image-generation` model of `modelType` `checkpoint` stored as a `.safetensors` file. It must be an SDXL checkpoint: the trainer is `sdxl_train_network.py`, and a checkpoint of another architecture fails in the trainer (`generation-failed`). An id that names no installed model fails with `model-unavailable`. |
+| `outputName` | 1 to 64 characters of `A-Z`, `a-z`, `0-9`, `_` and `-`. The LoRA is installed as `<outputName>.safetensors`, so the name always resolves as a LoRA tag. It must differ, ignoring case, from the file name without extension of every installed companion and from the `outputName` of every queued, waiting or running `lora.train` job. |
+| `captions` | An array of 1 to 64 nonblank strings of at most 1000 characters each, one per image. |
+| `settings` | Optional object; every key is optional. |
+
+`settings` accepts only these keys; the trainer receives each value from the request,
+else its default:
+
+| Setting | Type and range | Default |
+| --- | --- | --- |
+| `networkDim` | integer 1–128 | 16 |
+| `networkAlpha` | number greater than 0 and at most 128 | half of `networkDim` |
+| `maxTrainSteps` | integer 1–20000 | 1500 |
+| `learningRate` | number greater than 0 and at most 0.01 | 0.0001 |
+| `resolution` | integer 512–2048, a multiple of 64 | 1024 |
+| `seed` | integer -1 to 2147483647 | -1, a random seed chosen by the service |
+| `trainTextEncoder` | boolean | false (the UNet only is trained) |
+
+Every other trainer argument is fixed by the service: a client chooses no path,
+module or script. A submission whose `options` has a key other than `baseModelId`,
+`outputName`, `captions` and `settings`, or any option or setting outside these
+rules, is rejected with `invalid-request`, correlated to the `jobId`, before any
+upload is requested.
+
+**Uploads.** Each image must be a PNG or a JPEG not larger than the image upload
+limit. An upload that is empty, too large or not a PNG or JPEG fails the job with
+`invalid-image`, correlated to the `jobId`, and the job is not queued. The service
+writes each image to the job's folder as it arrives, so a waiting or queued job holds
+no image in memory.
+
+**Progress.** `progress` messages follow the run: `preparing`, `loading-model`, then
+`training` with `currentStep` from the trainer's output, `totalSteps` equal to the
+job's `maxTrainSteps` and a `percentage`, then `saving` and `complete`. The
+percentage never decreases.
+
+**Result.** When the trainer exits with code 0 and has written
+`<outputName>.safetensors`, the service installs that file under exactly that name,
+with no numeric suffix, as the `companion` model `companion:<outputName>.safetensors`
+of subtype `lora` with the display name `outputName`, listed by `models.list`, whether
+or not a model installation (`models.install`) is in progress. It then sends the
+`result` above: `modelId`, the `steps` that were trained, the `seed` that was used
+(the one chosen by the service for -1) and `durationMs`, with no binary frame.
+
+**Errors.**
+
+| Code | When |
+| --- | --- |
+| `backend-not-ready` | The service reports no `lora.train`. |
+| `invalid-request` | An option or a setting is invalid, or `outputName` is taken. |
+| `model-unavailable` | `baseModelId` names no installed model. |
+| `invalid-image` | An upload is empty, too large, or not a PNG or JPEG. |
+| `queue-full` | The queue is full, as for every job. |
+| `generation-failed` | The trainer exited with another code or wrote no output file: the message holds the trainer command, its exit code and up to 4096 trailing characters of its error output. It is also sent when the output cannot be installed because its base name, ignoring case, is now held by an installed companion or by a file a model installation is downloading, or because copying it into the companion directory failed: the message names that cause. |
+
+A failed job leaves the model catalog unchanged and no file of the job in the
+companion directory. A name taken while the trainer ran is not overwritten and the
+output is not kept.
+
+**Queue and cancellation.** `lora.train` jobs share the FIFO with image and animation
+jobs (`queued`, `queue-position`, `running`), and llama-server is unloaded before a
+`lora.train` job runs, as for animation jobs. When the submitting client disconnects,
+its queued `lora.train` jobs are dropped and its running one is stopped; there is no
+per-job cancel message. Whatever ends a job, in success, failure or cancellation, the
+service stops the trainer's whole process tree, the child interpreter that a Python
+virtual environment's launcher starts included, and starts the next job only after
+that. `models.delete` of the base model of a queued, waiting or running `lora.train`
+job fails with `model-in-use`.
+
+**The job's folder.** Each job keeps its images, captions, dataset configuration and
+the trainer's output in a folder under the service's data directory
+(`/var/lib/nukleus/data/nukleus/training` on Linux, `%LOCALAPPDATA%\nukleus\training`
+of the service account on Windows), not under `TMPDIR`. The folder is removed when the
+job ends in any way, or is dropped before it runs; when the service starts, it empties
+that directory and removes every `*.training.part` file (a trained file that was being
+copied) from the companion directory, before it accepts any connection.
+
+**Isolation.** The trainer runs under the same trust model as sd-cli, llama-server and
+ffmpeg: as a child of the service, with the rights of the service account. It is
+started with the job's folder as its working directory, with `HF_HUB_OFFLINE=1` and
+`TRANSFORMERS_OFFLINE=1`, and with no argument that names a path outside the job's
+folder, the base model's file, the trainer directory and the service's trainer cache
+directory (`trainer-cache` in the service's data directory, which holds `HOME` and the
+Hugging Face, ROCm and compiler caches). Offline mode is a request to the Hugging Face
+libraries, not a network block.
+
+The progress stage is `GenerationProgressStage::Training` in the SDK.

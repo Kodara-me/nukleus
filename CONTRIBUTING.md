@@ -26,6 +26,14 @@ run the host's ffmpeg: the test binary points NUKLEUS_FFMPEG at a missing path,
 and animation tests use a POSIX fake ffmpeg that records its arguments and
 fails, hangs or refuses `-version` through marker files.
 
+`NUKLEUS_LORA_TRAINER` names the LoRA trainer (kohya-ss/sd-scripts with its `venv`) that `lora.train` runs;
+`LoraTrainerRunner` starts it through `ProcessTree`, which owns the trainer's whole process tree (a job
+object on Windows, a process group on Linux) and stops it at every end of a job. Tests never need the
+real trainer: `nukleus-fake-lora-trainer` (tests/FakeLoraTrainer.cpp) is copied into a fake trainer
+directory as the `venv` Python, records the arguments, environment and dataset it received, and fails,
+holds or leaves a child process running through control files. It needs no POSIX shell, so the
+`ServiceTest` cases that use it run on Windows too.
+
 Nukleus is a C++20 Qt 6 project. Build dependencies are CMake 3.24+, Ninja, a C++20 compiler, and Qt 6.5+ Network, WebSockets, and Widgets, SVG, and LinguistTools development packages, LibArchive, plus Ardoise 0.1 (installed, or cloned by CMake). `sd-cli` is required on a machine that performs image work; README's "Runtime tools on Arch Linux" lists the Vulkan AUR packages for `sd-cli` and llama.cpp. Tests never need them.
 
 ```sh
