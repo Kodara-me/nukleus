@@ -372,7 +372,12 @@ if ($doBackend) {
         }
         $loraTrainerPath = $trainerDir
     } elseif ($backendEnvironment.Contains('NUKLEUS_LORA_TRAINER') -and $backendEnvironment['NUKLEUS_LORA_TRAINER']) {
-        $loraTrainerPath = $backendEnvironment['NUKLEUS_LORA_TRAINER']
+        $storedTrainer = $backendEnvironment['NUKLEUS_LORA_TRAINER']
+        if (Test-UnderUserProfile ($storedTrainer.TrimEnd('\', '/') + '\')) {
+            Stop-Install ("The stored NUKLEUS_LORA_TRAINER is $storedTrainer, under a user profile that the service account cannot read. " +
+                'Move the trainer outside C:\Users (for example C:\Tools\sd-scripts) and pass that directory with -LoraTrainer.')
+        }
+        $loraTrainerPath = $storedTrainer
     }
 }
 
@@ -429,6 +434,7 @@ $installing = -not ($existingBackend -or $existingWeb)
 if ($DryRun) { Write-Host 'Dry run: nothing will be changed.' }
 Write-Host ($(if ($installing) { 'Installing Nukleus.' } else { 'Updating Nukleus.' }))
 if ($doBackend) { foreach ($warning in $warnings) { Write-Host $warning } }
+elseif ($LoraTrainer) { Write-Host 'Warning: -LoraTrainer is ignored: this run does not install the backend.' }
 
 $serviceNames = @()
 if ($doBackend) { $serviceNames += $ServiceName }
